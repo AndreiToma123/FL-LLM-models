@@ -1,0 +1,640 @@
+diff --git a/camel/agents/chat_agent.py b/camel/agents/chat_agent.py
+index 9480ec4..d9e5df2 100755
+--- a/camel/agents/chat_agent.py
++++ b/camel/agents/chat_agent.py
+@@ -19,6 +19,7 @@ from tenacity import retry
+ from tenacity.stop import stop_after_attempt
+ from tenacity.wait import wait_exponential
+ 
++from camel import local_llm
+ from camel.agents import BaseAgent
+ from camel.configs import ChatGPTConfig
+ from camel.messages import ChatMessage, MessageType, SystemMessage
+@@ -211,6 +212,9 @@ class ChatAgent(BaseAgent):
+         else:
+             self.terminated = True
+             output_messages = []
++            local_llm.log_event("context_overflow_guard", role=self.role_name,
++                                est_prompt_tokens=num_tokens,
++                                prompt_token_limit=self.model_token_limit)
+ 
+             info = self.get_info(
+                 None,
+diff --git a/camel/local_llm.py b/camel/local_llm.py
+new file mode 100644
+index 0000000..5bb6b19
+--- /dev/null
++++ b/camel/local_llm.py
+@@ -0,0 +1,200 @@
++"""Open-model support for SoapFL (added by the FL-LLM-models thesis project).
++
++Everything here is standard library only, so it can be imported from anywhere
++in the SoapFL code base without creating import cycles.
++
++Configuration is read from environment variables (all optional unless noted):
++
++  SOAPFL_MODEL_NAME          model name the server expects (REQUIRED for --model LOCAL)
++  SOAPFL_BASE_URL            OpenAI-compatible endpoint, e.g. http://localhost:8000/v1
++                             (falls back to OPENAI_BASE_URL, then the OpenAI default)
++  SOAPFL_API_KEY             API key (falls back to OPENAI_API_KEY, then "EMPTY")
++  SOAPFL_CONTEXT_LIMIT       context window of the served model in tokens (default 32768)
++  SOAPFL_TOKEN_MARGIN        safety margin for tokenizer mismatch, 0..0.5 (default 0.10)
++  SOAPFL_MAX_COMPLETION_TOKENS  cap on generated tokens per call (default 4096)
++  SOAPFL_TIMEOUT             per-request timeout in seconds (default 600)
++  SOAPFL_MAX_RETRIES         SDK-level retries on connection errors / 5xx (default 3)
++  SOAPFL_EXTRA_BODY          JSON object passed as extra_body to the server, e.g.
++                             {"chat_template_kwargs": {"enable_thinking": false}}
++  SOAPFL_STRIP_THINK         1 (default) removes <think>...</think> blocks from replies
++  SOAPFL_LENIENT_PARSING     1 = record parse/overflow failures and continue instead of
++                             crashing the whole bug (default 0 = original behaviour)
++  SOAPFL_SEED                if set, seeds the random test-suite/test-case sampling
++  SOAPFL_RUN_DIR             if set, events are appended to <dir>/events.jsonl
++"""
++import json
++import os
++import re
++import threading
++import time
++from typing import Optional, Tuple
++
++
++# --------------------------------------------------------------------------
++# environment helpers
++# --------------------------------------------------------------------------
++
++def env_str(name: str, default: Optional[str] = None) -> Optional[str]:
++    value = os.environ.get(name)
++    return value if value not in (None, "") else default
++
++
++def env_int(name: str, default: int) -> int:
++    value = env_str(name)
++    if value is None:
++        return default
++    try:
++        return int(value)
++    except ValueError:
++        raise ValueError(f"{name} must be an integer, got {value!r}")
++
++
++def env_float(name: str, default: float) -> float:
++    value = env_str(name)
++    if value is None:
++        return default
++    try:
++        return float(value)
++    except ValueError:
++        raise ValueError(f"{name} must be a number, got {value!r}")
++
++
++def lenient() -> bool:
++    return env_str("SOAPFL_LENIENT_PARSING", "0") == "1"
++
++
++def strip_think_enabled() -> bool:
++    return env_str("SOAPFL_STRIP_THINK", "1") != "0"
++
++
++def context_limit() -> int:
++    return env_int("SOAPFL_CONTEXT_LIMIT", 32768)
++
++
++def token_margin() -> float:
++    return min(max(env_float("SOAPFL_TOKEN_MARGIN", 0.10), 0.0), 0.5)
++
++
++def prompt_token_limit() -> int:
++    """Largest prompt (as counted locally) that SoapFL will send."""
++    return int(context_limit() * (1.0 - token_margin()))
++
++
++def max_completion_tokens() -> int:
++    return env_int("SOAPFL_MAX_COMPLETION_TOKENS", 4096)
++
++
++def api_model_name() -> str:
++    name = env_str("SOAPFL_MODEL_NAME")
++    if name is None:
++        raise RuntimeError(
++            "SOAPFL_MODEL_NAME is not set. It must hold the model name the "
++            "OpenAI-compatible server expects when running with --model LOCAL.")
++    return name
++
++
++def base_url() -> Optional[str]:
++    return env_str("SOAPFL_BASE_URL", env_str("OPENAI_BASE_URL"))
++
++
++def api_key() -> str:
++    return env_str("SOAPFL_API_KEY", env_str("OPENAI_API_KEY", "EMPTY"))
++
++
++def request_timeout() -> float:
++    return env_float("SOAPFL_TIMEOUT", 600.0)
++
++
++def max_retries() -> int:
++    return env_int("SOAPFL_MAX_RETRIES", 3)
++
++
++def extra_body() -> Optional[dict]:
++    raw = env_str("SOAPFL_EXTRA_BODY")
++    if raw is None:
++        return None
++    try:
++        value = json.loads(raw)
++    except json.JSONDecodeError as exc:
++        raise ValueError(f"SOAPFL_EXTRA_BODY is not valid JSON: {exc}")
++    if not isinstance(value, dict):
++        raise ValueError("SOAPFL_EXTRA_BODY must be a JSON object")
++    return value
++
++
++# --------------------------------------------------------------------------
++# event log (one JSON object per line, per bug)
++# --------------------------------------------------------------------------
++
++_LOCK = threading.Lock()
++
++
++def log_event(kind: str, **fields) -> None:
++    """Append an event to $SOAPFL_RUN_DIR/events.jsonl. No-op if the variable is unset."""
++    run_dir = env_str("SOAPFL_RUN_DIR")
++    if run_dir is None:
++        return
++    record = {"t": round(time.time(), 3), "type": kind}
++    record.update(fields)
++    try:
++        os.makedirs(run_dir, exist_ok=True)
++        with _LOCK, open(os.path.join(run_dir, "events.jsonl"), "a", encoding="utf-8") as f:
++            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
++    except OSError:
++        # Logging must never break a debugging run.
++        pass
++
++
++# --------------------------------------------------------------------------
++# output post-processing
++# --------------------------------------------------------------------------
++
++def strip_think(text: Optional[str]) -> Tuple[str, int]:
++    """Remove reasoning blocks emitted by "thinking" models.
++
++    Returns (clean_text, number_of_characters_removed). Text without think tags
++    is returned untouched.
++    """
++    if not text:
++        return text or "", 0
++    if "think>" not in text:
++        return text, 0
++    original = len(text)
++    out = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
++    if "</think>" in out:          # template put <think> in the prompt: keep what follows
++        out = out.split("</think>")[-1]
++    elif "<think>" in out:         # unterminated block (generation was cut off)
++        out = out.split("<think>")[0]
++    out = out.strip()
++    return out, original - len(out)
++
++
++_STRICT_SCORE = re.compile(r"#(\d+)#")
++_LENIENT_SCORES = (
++    re.compile(r"#\s*(\d+)\s*#"),
++    re.compile(r"(?i)\bscore\b\W{0,12}(\d+)"),
++    re.compile(r"\b(\d+)\s*/\s*10\b"),
++)
++
++
++def parse_score(text: str) -> Optional[int]:
++    """Extract the 1-10 suspiciousness score from a MethodReview answer.
++
++    Strict mode reproduces SoapFL: the first ``#N#`` in the text, no range check.
++    Lenient mode additionally accepts ``# N #``, ``Score: N`` and ``N/10`` and
++    only returns values in 0..10.
++    """
++    strict = _STRICT_SCORE.findall(text)
++    if not lenient():
++        return int(strict[0]) if strict else None
++    candidates = []
++    if strict:
++        candidates.append(int(strict[0]))
++    for pattern in _LENIENT_SCORES:
++        match = pattern.search(text)
++        if match:
++            candidates.append(int(match.group(1)))
++    for value in candidates:
++        if 0 <= value <= 10:
++            return value
++    return None
+diff --git a/camel/model_backend.py b/camel/model_backend.py
+index bf231a7..f1f13e2 100755
+--- a/camel/model_backend.py
++++ b/camel/model_backend.py
+@@ -16,12 +16,30 @@ from abc import ABC, abstractmethod
+ from typing import Any, Dict
+ 
+ import openai
+-import tiktoken
+ from openai.types.chat import ChatCompletion
+ 
++from camel import local_llm
+ from camel.typing import ModelType
++from camel.utils import get_encoding
+ from chatdev.utils import log_online
+ 
++_CLIENT = None
++
++
++def _get_client():
++    r"""One OpenAI client per process, configured from the environment
++    (SOAPFL_BASE_URL / SOAPFL_API_KEY, falling back to OPENAI_*). This replaces
++    the hard-coded empty base_url/api_key that had to be edited by hand."""
++    global _CLIENT
++    if _CLIENT is None:
++        _CLIENT = openai.OpenAI(
++            base_url=local_llm.base_url(),
++            api_key=local_llm.api_key(),
++            timeout=local_llm.request_timeout(),
++            max_retries=local_llm.max_retries(),
++        )
++    return _CLIENT
++
+ 
+ class ModelBackend(ABC):
+     r"""Base class for different model backends.
+@@ -50,51 +68,82 @@ class OpenAIModel(ModelBackend):
+         self.model_config_dict = model_config_dict
+ 
+     def run(self, *args, **kwargs) -> Dict[str, Any]:
++        is_local = self.model_type == ModelType.LOCAL
+         string = "\n".join([message["content"] for message in kwargs["messages"]])
+-        encoding = tiktoken.encoding_for_model(self.model_type.value)
++        encoding = get_encoding(self.model_type)
+         num_prompt_tokens = len(encoding.encode(string))
+         gap_between_send_receive = 15 * len(kwargs["messages"])
+         num_prompt_tokens += gap_between_send_receive
+ 
+-        num_max_token_map = {
+-            "gpt-3.5-turbo": 4096,
+-            "gpt-3.5-turbo-16k": 16384,
+-            "gpt-3.5-turbo-0613": 4096,
+-            "gpt-3.5-turbo-16k-0613": 16384,
+-            "gpt-3.5-turbo-1106": 16384,
+-            "gpt-4": 8192,
+-            "gpt-4-0613": 8192,
+-            "gpt-4-32k": 32768,
+-            "gpt-4o-2024-08-06": 128000,
+-        }
+-        num_max_token = num_max_token_map[self.model_type.value]
+-        num_max_completion_tokens = num_max_token - num_prompt_tokens
+-        if self.model_type == ModelType.GPT_4_O:
+-            num_max_completion_tokens = 16384
+-        elif self.model_type == ModelType.GPT_3_5_TURBO:
+-            num_max_completion_tokens = 4096
++        if is_local:
++            # Size the generation budget from the real context window of the
++            # served model. The prompt estimate is padded by the same margin the
++            # context guard uses, because it is counted with a different tokenizer.
++            room = (local_llm.context_limit()
++                    - int(num_prompt_tokens * (1.0 + local_llm.token_margin())) - 32)
++            num_max_completion_tokens = max(64, min(local_llm.max_completion_tokens(), room))
++            api_model_name = local_llm.api_model_name()
++        else:
++            num_max_token_map = {
++                "gpt-3.5-turbo": 4096,
++                "gpt-3.5-turbo-16k": 16384,
++                "gpt-3.5-turbo-0613": 4096,
++                "gpt-3.5-turbo-16k-0613": 16384,
++                "gpt-3.5-turbo-1106": 16384,
++                "gpt-4": 8192,
++                "gpt-4-0613": 8192,
++                "gpt-4-32k": 32768,
++                "gpt-4o-2024-08-06": 128000,
++            }
++            num_max_token = num_max_token_map[self.model_type.value]
++            num_max_completion_tokens = num_max_token - num_prompt_tokens
++            if self.model_type == ModelType.GPT_4_O:
++                num_max_completion_tokens = 16384
++            elif self.model_type == ModelType.GPT_3_5_TURBO:
++                num_max_completion_tokens = 4096
++            api_model_name = self.model_type.value
+         self.model_config_dict['max_tokens'] = num_max_completion_tokens
+-        
+-        # set to your own OpenAI API key
+-        client = openai.OpenAI(
+-            base_url="",
+-            api_key="",
+-        )
+-        
+-        response = client.chat.completions.create(
+-            *args,
+-            **kwargs,
+-            model=self.model_type.value,
+-            **self.model_config_dict
+-        )
+-        # time.sleep(2)
+ 
+-        log_online(
+-            "**[OpenAI_Usage_Info Receive]**\nprompt_tokens: {}\ncompletion_tokens: {}\ntotal_tokens: {}\n".format(
+-                response.usage.prompt_tokens, response.usage.completion_tokens,
+-                response.usage.total_tokens))
++        create_kwargs = dict(**kwargs, model=api_model_name, **self.model_config_dict)
++        extra_body = local_llm.extra_body()
++        if extra_body:
++            create_kwargs["extra_body"] = extra_body
++
++        started = time.time()
++        response = _get_client().chat.completions.create(*args, **create_kwargs)
++        latency = time.time() - started
+         if not isinstance(response, ChatCompletion):
+             raise RuntimeError("Unexpected return from OpenAI API")
++
++        # Normalise replies from open models: missing content, <think> blocks.
++        stripped_chars = 0
++        for choice in response.choices:
++            content = choice.message.content or ""
++            if is_local and local_llm.strip_think_enabled():
++                content, removed = local_llm.strip_think(content)
++                stripped_chars += removed
++            choice.message.content = content
++
++        usage = response.usage
++        prompt_tokens = getattr(usage, "prompt_tokens", None)
++        completion_tokens = getattr(usage, "completion_tokens", None)
++        total_tokens = getattr(usage, "total_tokens", None)
++        if usage is not None:
++            # these three lines are parsed by chatdev/statistics.py, keep the format
++            log_online(
++                "**[OpenAI_Usage_Info Receive]**\nprompt_tokens: {}\ncompletion_tokens: {}\ntotal_tokens: {}\n".format(
++                    prompt_tokens, completion_tokens, total_tokens))
++        local_llm.log_event(
++            "llm_call",
++            model=api_model_name,
++            latency_s=round(latency, 3),
++            est_prompt_tokens=num_prompt_tokens,
++            max_tokens=num_max_completion_tokens,
++            prompt_tokens=prompt_tokens,
++            completion_tokens=completion_tokens,
++            finish_reason=str(response.choices[0].finish_reason) if response.choices else None,
++            think_chars_removed=stripped_chars,
++        )
+         return response
+ 
+ 
+@@ -130,7 +179,7 @@ class ModelFactory:
+ 
+         if model_type in {
+             ModelType.GPT_3_5_TURBO, ModelType.GPT_4, ModelType.GPT_4_32k, ModelType.GPT_4_O,
+-            None
++            ModelType.LOCAL, None
+         }:
+             model_class = OpenAIModel
+         elif model_type == ModelType.STUB:
+diff --git a/camel/typing.py b/camel/typing.py
+index 4d2d630..620a5bb 100755
+--- a/camel/typing.py
++++ b/camel/typing.py
+@@ -55,10 +55,14 @@ class ModelType(Enum):
+     GPT_4_32k = "gpt-4-32k"
+     GPT_4_O = "gpt-4o-2024-08-06"
+     STUB = "stub"
++    # Any OpenAI-compatible endpoint (vLLM, llama.cpp server, a hosted API, ...).
++    # The real model name comes from $SOAPFL_MODEL_NAME, see camel/local_llm.py.
++    LOCAL = "local"
+ 
+     @property
+     def value_for_tiktoken(self):
+-        return self.value if self.name != "STUB" else "gpt-3.5-turbo-16k-0613"
++        # LOCAL models use the cl100k tokenizer only as an approximation.
++        return self.value if self.name not in ("STUB", "LOCAL") else "gpt-3.5-turbo-16k-0613"
+ 
+ 
+ class PhaseType(Enum):
+diff --git a/camel/utils.py b/camel/utils.py
+index a87baf3..05a35a3 100755
+--- a/camel/utils.py
++++ b/camel/utils.py
+@@ -20,14 +20,58 @@ from typing import Any, Callable, List, Optional, Set, TypeVar
+ import requests
+ import tiktoken
+ 
++from camel import local_llm
+ from camel.messages import OpenAIMessage
+ from camel.typing import ModelType, TaskType
+ 
+ F = TypeVar('F', bound=Callable[..., Any])
+ 
++import sys
+ import time
+ 
+ 
++class ApproxEncoding:
++    r"""Fallback tokenizer used when tiktoken cannot load its vocabulary
++    (typically on compute nodes without internet access).
++
++    One "token" is three characters, which over-estimates real token counts for
++    code and therefore errs on the safe side for context-limit checks.
++    """
++    CHUNK = 3
++
++    def encode(self, text, *args, **kwargs):
++        return [text[i:i + self.CHUNK] for i in range(0, len(text), self.CHUNK)]
++
++    def decode(self, tokens, *args, **kwargs):
++        return "".join(tokens)
++
++
++_ENCODINGS = {}
++
++
++def get_encoding(model: ModelType):
++    r"""Returns a tokenizer for `model`; never raises for unknown or LOCAL models.
++
++    Order: tiktoken's encoding for the model, then cl100k_base, then the
++    character-based approximation (with a one-time warning on stderr).
++    """
++    name = model.value_for_tiktoken
++    if name in _ENCODINGS:
++        return _ENCODINGS[name]
++    try:
++        try:
++            encoding = tiktoken.encoding_for_model(name)
++        except KeyError:
++            encoding = tiktoken.get_encoding("cl100k_base")
++    except Exception as exc:  # offline: the BPE file could not be downloaded
++        print(f"[camel.utils] WARNING: tiktoken unavailable ({type(exc).__name__}); "
++              f"using a 3-characters-per-token approximation. Set TIKTOKEN_CACHE_DIR to a "
++              f"pre-warmed cache to avoid this.", file=sys.stderr)
++        encoding = ApproxEncoding()
++    _ENCODINGS[name] = encoding
++    return encoding
++
++
+ def count_tokens_openai_chat_models(
+         messages: List[OpenAIMessage],
+         encoding: Any,
+@@ -76,15 +120,11 @@ def num_tokens_from_messages(
+         - https://platform.openai.com/docs/models/gpt-4
+         - https://platform.openai.com/docs/models/gpt-3-5
+     """
+-    try:
+-        value_for_tiktoken = model.value_for_tiktoken
+-        encoding = tiktoken.encoding_for_model(value_for_tiktoken)
+-    except KeyError:
+-        encoding = tiktoken.get_encoding("cl100k_base")
++    encoding = get_encoding(model)
+ 
+     if model in {
+         ModelType.GPT_3_5_TURBO, ModelType.GPT_4, ModelType.GPT_4_32k, ModelType.GPT_4_O,
+-        ModelType.STUB
++        ModelType.STUB, ModelType.LOCAL
+     }:
+         return count_tokens_openai_chat_models(messages, encoding)
+     else:
+@@ -117,6 +157,10 @@ def get_model_token_limit(model: ModelType) -> int:
+         return 128000
+     elif model == ModelType.STUB:
+         return 4096
++    elif model == ModelType.LOCAL:
++        # context window from $SOAPFL_CONTEXT_LIMIT minus a safety margin,
++        # because prompt sizes are only estimated with the cl100k tokenizer
++        return local_llm.prompt_token_limit()
+     else:
+         raise ValueError("Unknown model type")
+ 
+diff --git a/chatdev/phase.py b/chatdev/phase.py
+index 418587e..e76cf28 100755
+--- a/chatdev/phase.py
++++ b/chatdev/phase.py
+@@ -3,6 +3,7 @@ import re
+ from abc import ABC, abstractmethod
+ 
+ from camel.agents import RolePlaying
++from camel.local_llm import lenient, log_event, parse_score
+ from camel.messages import ChatMessage
+ from camel.typing import ModelType, TaskType
+ from chatdev.chat_env import ChatEnv
+@@ -134,6 +135,14 @@ class Phase(ABC):
+             # the first interaction is logged in role_play_session.init_chat
+             assistant_response, user_response = role_play_session.step(input_user_msg, chat_turn_limit == 1)
+ 
++            if lenient() and assistant_response.terminated:
++                # A prompt that does not fit the context window terminates the chat; the original
++                # code then raises inside `.msg` and the whole bug is lost. In lenient mode we
++                # record the event and continue with an empty conclusion for this phase.
++                log_event("terminated", phase=phase_name, info=assistant_response.info)
++                log_online("**[Seminar Conclusion]**:\n\n (empty: chat terminated, see events.jsonl)")
++                return ""
++
+             conversation_meta = "**" + assistant_role_name + "<->" + user_role_name + " on : " + str(
+                 phase_name) + ", turn " + str(i) + "**\n\n"
+ 
+@@ -366,11 +375,16 @@ class SearchSuspiciousClass(Phase):
+ 
+     def update_chat_env(self, chat_env) -> ChatEnv:
+         # process seminar_conclusion
+-        class_names = re.findall(r"(?:\w+\.)+\w+", self.seminar_conclusion)
+-        class_names = [c for c in class_names if c in chat_env.env_dict['classes_dict']]
++        # lenient mode also accepts '$' (inner classes) in the class name
++        pattern = r"(?:\w+\.)+[\w\$]+" if lenient() else r"(?:\w+\.)+\w+"
++        found = re.findall(pattern, self.seminar_conclusion)
++        class_names = [c for c in found if c in chat_env.env_dict['classes_dict']]
+         class_names = list(set(class_names))
+         if len(class_names) == 0:
+             print(f"Invalid Search Suspicious Class Conclusion (SearchSuspiciousClass phase). {self.seminar_conclusion}")
++            log_event("no_valid_class", phase=self.phase_name, suite=chat_env.test_suite.name,
++                      n_candidates=len(found), n_covered=len(chat_env.env_dict['classes_dict']),
++                      conclusion=self.seminar_conclusion[:500])
+         chat_env.env_dict['suspicious_classes'] = class_names
+         chat_env.res_dict['buggy_classes'] = class_names
+         return chat_env
+@@ -454,12 +468,16 @@ class FindRelatedMethods(Phase):
+         java_class = chat_env.env_dict['classes_dict'][suspicious_class]
+         method_names = re.findall(r"((?:\w+\.)+[\w\$]+::.+?\(.*?\))", self.seminar_conclusion)
+         method_names = [m.replace(' ', '') for m in method_names]
++        n_mentioned = len(method_names)
+         # filter out methods not in this suspicious class
+         src_ids = [java_class.methods[m].src_id for m in java_class.methods]
+         method_names = [m for m in method_names if m in src_ids]
+         method_names = list(set(method_names))
+         if len(method_names) == 0:
+             print(f"No Related Methods Finded in Conclusion (FindRelatedMethods phase): {self.seminar_conclusion}")
++            log_event("no_valid_method", phase=self.phase_name, suite=chat_env.test_suite.name,
++                      cls=suspicious_class, n_mentioned=n_mentioned, n_in_class=len(src_ids),
++                      conclusion=self.seminar_conclusion[:500])
+         chat_env.env_dict['suspicious_methods'][suspicious_class] = method_names
+         return chat_env
+ 
+@@ -531,12 +549,14 @@ class MethodReview(Phase):
+     def update_chat_env(self, chat_env) -> ChatEnv:
+         # process seminar_conclusion
+         conclusion = self.seminar_conclusion.strip('"')
+-        try:
+-            score = re.findall(r"#(\d+)#", conclusion)[0]
+-            score = int(score)
+-        except Exception:
+-            raise ValueError(f"Invalid Method Review Conclusion (MethodReview phase). {conclusion}")
+-        
++        score = parse_score(conclusion)  # strict mode: first "#N#", exactly as before
++        if score is None:
++            log_event("score_unparsed", phase=self.phase_name, suite=chat_env.test_suite.name,
++                      method=self.phase_env['method_name'], conclusion=conclusion[:500])
++            if not lenient():
++                raise ValueError(f"Invalid Method Review Conclusion (MethodReview phase). {conclusion}")
++            score = 0  # lenient mode: keep the method, rank it last
++
+         method_name = self.phase_env['method_name']
+         buggy_method = {
+             "method_name": method_name,
+diff --git a/functions/func.py b/functions/func.py
+index 6f439a4..483d6f0 100644
+--- a/functions/func.py
++++ b/functions/func.py
+@@ -1,5 +1,6 @@
+ import tiktoken
+ 
++from camel.utils import get_encoding
+ from functions.d4j import extract_classes, filter_classes_Grace, filter_classes_Ochiai
+ 
+ 
+@@ -222,7 +223,7 @@ def methods_list_prompt(java_class, model_type, method_doc_tokens=100, use_comme
+ 
+ 
+ def check_tokens(model_type, doc, max_tokens):
+-    encoding = tiktoken.encoding_for_model(model_type.value)
++    encoding = get_encoding(model_type)
+     original_tokens = encoding.encode(doc)
+     num_doc_tokens = len(original_tokens)
+     if num_doc_tokens <= max_tokens:
+diff --git a/run.py b/run.py
+index 5777cc3..e9714b2 100755
+--- a/run.py
++++ b/run.py
+@@ -72,9 +72,18 @@ def main():
+     parser.add_argument('--output', type=str, default="DebugResult",
+                         help="Output directory")
+     parser.add_argument('--model', type=str, default="GPT_4_O",
+-                        help="GPT Model, choose from {'GPT_3_5_TURBO','GPT_4','GPT_4_32K'}")
++                        help="GPT Model, choose from {'GPT_3_5_TURBO','GPT_4','GPT_4_32K','GPT_4_O','LOCAL'}. "
++                             "LOCAL uses any OpenAI-compatible server, configured through SOAPFL_* "
++                             "environment variables (see camel/local_llm.py).")
+     args = parser.parse_args()
+ 
++    # Make the random test-suite / test-case sampling reproducible (per bug).
++    if os.environ.get("SOAPFL_SEED"):
++        random.seed(f"{os.environ['SOAPFL_SEED']}-d4j{args.version}-{args.project}-{args.bugID}")
++    if args.model == "LOCAL" and not os.environ.get("SOAPFL_MODEL_NAME"):
++        sys.exit("--model LOCAL requires the SOAPFL_MODEL_NAME environment variable "
++                 "(the model name your OpenAI-compatible server expects).")
++
+     # Start DebugDev
+     print("*" * 100)
+     print(f"Start DebugDev for d4j{args.version}-{args.project}-{args.bugID}")
+@@ -114,6 +123,7 @@ def main():
+         'GPT_4': ModelType.GPT_4,
+         'GPT_4_32K': ModelType.GPT_4_32k,
+         'GPT_4_O': ModelType.GPT_4_O,
++        'LOCAL': ModelType.LOCAL,
+     }
+     chat_chain = ChatChain(config_path=config_path,
+         config_phase_path=config_phase_path,
