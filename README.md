@@ -1,7 +1,7 @@
 # FL-LLM-models
 
 Reproducing **SoapFL** (LLM-based fault localization, TSE 2025) with an **open-source model**
-(Llama 3 / Qwen coder served by vLLM) on **Defects4J**, plus tooling to run it in batches,
+(Llama / Qwen coder, via Ollama locally or vLLM on a cluster) on **Defects4J**, plus tooling to run it in batches,
 score it (Top-1/3/5) and see *where in the pipeline* bugs are lost.
 
 This repository does **not** contain SoapFL's code. It contains a small patch for it, and
@@ -14,10 +14,12 @@ the tools around it. `scripts/setup_soapfl.sh` clones SoapFL at a pinned commit 
 | Patch applies cleanly to SoapFL `c9f75f4` | verified |
 | Patched backend (LOCAL model type) vs. a mock OpenAI server: `<think>` stripping, context budgeting, null content, missing usage, event log | tested (`tests/test_backend.py`) |
 | Runner (resume, retries, timeout, run-settings guard), scorer, funnel, bug sampling, preflight | tested with a stub `run.py` and synthetic results |
-| **A real SoapFL run on real Defects4J bugs with a real GPU model** | **NOT done yet. It was not possible where this code was written.** |
-| `scripts/install_defects4j.sh`, `scripts/serve_vllm.sh`, Slurm template | **untested**; read them, fill in the `<PLACEHOLDERS>` |
+| Real SoapFL run on real Defects4J bugs with a local model (Docker + Ollama, `qwen2.5-coder:7b`) | worked: 20-bug pilot, results in `reports/pilot-2/` (Top-1/3/5 = 5/8/10 of 20). A 100-bug run is the next baseline. |
+| Docker + Ollama setup (`docker/`, `docker-compose.yml`) | used for the pilot, see "Running on your own computer" |
+| `scripts/` (cluster: `install_defects4j.sh`, `serve_vllm.sh`, Slurm template) | **untested**; read them, fill in the `<PLACEHOLDERS>` |
 
-So expect to fix small environment problems on the first real run. `preflight` exists to catch most of them cheaply.
+`preflight` catches most environment problems cheaply. Results from small samples are exploratory: with 20-100 bugs the
+Top-N numbers are only accurate to roughly +-10 points and are not comparable to the paper's 395-bug numbers.
 
 ## Quick start (CSC or any Linux box with a GPU)
 
@@ -49,30 +51,63 @@ On CSC use `scripts/slurm_pilot.sbatch` (placeholders for project, partition and
 ## Running on your own computer (Ollama + Docker)
 
 No cluster needed. Ollama runs the model on your machine (it uses your GPU); Docker runs SoapFL, Java 8 and Defects4J
-(Defects4J does not run natively on Windows). **Untested end to end** -- I had no Docker or Ollama where this was written.
+(Defects4J does not run natively on Windows). Commands are for PowerShell, run from the repo folder.
 
-1. **Model with a large enough context.** Ollama's default context is only a few thousand tokens and it *silently cuts*
-   longer prompts, which would quietly ruin SoapFL (its prompts are long). Create a variant (check your tag with `ollama list`):
-   ```powershell
-   ollama create soapfl-qwen -f configs/ollama/Modelfile.qwen     # edit the FROM tag first
-   ```
-   Context costs memory (16k is fine for a 7-8B model on most 16 GB GPUs/RAM; lower `num_ctx` if it is too slow or out of memory).
-2. **Settings:** `copy configs\ollama.env .env` and edit (model name, and `SOAPFL_CONTEXT_LIMIT` <= `num_ctx`).
-3. **Build once** (long: Defects4J downloads several GB): `docker compose build`
-4. **Check:** `docker compose run --rm soapfl python -m fl_tools preflight` -- it also reads the model's `num_ctx` from Ollama and fails if it is too small.
-5. **Run:**
-   ```powershell
-   docker compose run --rm soapfl python -m fl_tools run --name smoke --bugs Lang-1
-   docker compose run --rm soapfl python -m fl_tools run --name pilot-1 --pilot 20
-   docker compose run --rm soapfl python -m fl_tools score results/pilot-1
-   docker compose run --rm soapfl python -m fl_tools funnel results/pilot-1
-   ```
-   Keep `--jobs 1` (the default): one local model serves one request at a time, more jobs just queue and use more memory.
-   Expect each bug to take many minutes on a local 7-8B model. Results live in a Docker volume (Windows shared folders are too slow for Defects4J builds and make SoapFL's 90 s test
-   limit fail). Copy the small summary files into your repo folder with
-   `docker compose run --rm soapfl python -m fl_tools export results/pilot-1` (they appear in `reports/pilot-1/`).
-   The first minutes of every bug show `0 model calls`: SoapFL first checks out, compiles and runs the failing test
-   with Defects4J, and only then calls the model.
+### One-time setup (also on a new PC)
+
+1. **Install** Docker Desktop (start it, wait until it says "running") and Ollama. If your C: drive is small, first set
+   Docker Desktop's *Settings > Resources > Advanced > Disk image location* and the `OLLAMA_MODELS` environment variable
+   to a folder on a bigger drive, *before* downloading models or building.
+2. **Have the models** (`ollama list`). The presets in `configs/models.json` need `qwen2.5-coder`, `qwen3.5` and `llama3.1`;
+   install a missing one with e.g. `ollama pull qwen2.5-coder`.
+3. **Settings:** `copy configs\ollama.env .env`. It only holds the Ollama address. `.env` is git-ignored, so it is **not**
+   in the repo and must be recreated on every new machine. The model name and context size are *not* set by hand any more.
+4. **Build once** (10-30 minutes, downloads several GB): `docker compose build`
+
+### Running one model, start to finish (one command)
+
+```powershell
+.\run-experiment.ps1 qwen25coder      # main baseline, 100 bugs
+.\run-experiment.ps1 llama31          # comparison
+.\run-experiment.ps1 qwen35 -N 10     # newer Qwen: try 10 bugs first, it may "think" and be slow
+```
+Add `-Push` to also commit and push the finished `reports/` folder. `-N` sets the number of bugs, `-Jobs` the parallel
+bugs (default 2). If PowerShell refuses to run the script: `powershell -ExecutionPolicy Bypass -File .\run-experiment.ps1 qwen25coder`.
+
+What the command does by itself:
+1. Finds the installed Ollama model of that family and **creates a variant with the right context size** (16384) through
+   Ollama's API (Ollama otherwise silently cuts long prompts). It is created once and reused.
+2. Sets the model name, context limit, token budget and extra settings for this model (`configs/models.json`).
+3. Runs the preflight checks (Docker, Defects4J, patch, the model endpoint) and stops with a clear `[FAIL]` line if something is wrong.
+4. Runs SoapFL on the same 100 bugs every time (stratified over the six projects), 2 at a time, and keeps the PC awake.
+5. Scores the run (Top-1/3/5), runs the funnel analysis, and copies the small result files to `reports\run100-<model>\`
+   (read `summary.md` and `funnel.md` there).
+
+* **Resume:** if it stops (sleep, Ctrl+C, crash), run the exact same command again; finished bugs are skipped.
+* **The first minutes of every bug show `0 model calls`.** That is normal: SoapFL first checks out, compiles and runs the
+  failing test with Defects4J, and only then calls the model.
+* **Comparing models:** run the command once per model. Same bugs, same settings except the model, one results folder each.
+  Run them whenever you like, they do not have to run back to back.
+* **`killed_oom` in the output:** Docker ran out of memory; give Docker more memory or use `-Jobs 1`.
+* **Models and presets:** `docker compose run --rm soapfl python -m fl_tools models` shows which presets are available.
+  Add your own model by adding an entry to `configs/models.json`.
+
+### Where the data lives
+`results/` is a Docker **volume** inside Docker's disk image (Windows shared folders are far too slow for Defects4J builds
+and make SoapFL's 90 s test limit fail). It is *not* in your repo folder and *not* on GitHub. Only the export step copies the
+small summaries into `reports/`, which you commit and push. The volume and image keep their names (`name: flllmmodels` in
+`docker-compose.yml`) even if the folder is moved. Optional backup of the raw runs:
+`docker run --rm -v flllmmodels_fl_results:/data -v D:\backup:/backup ubuntu tar czf /backup/fl_results.tgz -C /data .`
+
+### Manual commands (advanced)
+```powershell
+docker compose run --rm soapfl python -m fl_tools preflight
+docker compose run --rm soapfl python -m fl_tools experiment qwen25coder --select Lang-1     # one bug
+docker compose run --rm soapfl python -m fl_tools score  results/run100-qwen25coder
+docker compose run --rm soapfl python -m fl_tools funnel results/run100-qwen25coder
+docker compose run --rm soapfl python -m fl_tools export results/run100-qwen25coder
+```
+`configs/ollama/Modelfile.*` are the manual way to make a context-size variant; the experiment command does not need them.
 
 ## Rules that protect your results
 

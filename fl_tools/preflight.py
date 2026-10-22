@@ -171,7 +171,8 @@ def check_endpoint(base_url: Optional[str], model: Optional[str], api_key: str =
         out.append(("warn", "model-name", f"served as {model!r}; set SOAPFL_MODEL_NAME={model} in .env"))
     out.append(("ok", "endpoint", f"{base_url} reachable, serves {', '.join(map(str, names)) or '(nothing)'}"))
     if model and model not in names:
-        out.append(("fail", "model-name", f"SOAPFL_MODEL_NAME={model!r} not among served models {names}"))
+        out.append(("fail", "model-name", f"SOAPFL_MODEL_NAME={model!r} not among served models {names}. "
+                    f"Tip: `python -m fl_tools experiment <preset>` picks and prepares the model automatically"))
     elif model:
         out.append(("ok", "model-name", f"{model!r} is served"))
         entry = next((m for m in served if m.get("id") == model), {})
@@ -190,10 +191,15 @@ def check_endpoint(base_url: Optional[str], model: Optional[str], api_key: str =
     if chat and model and model in names:
         try:
             reply = _http_json(base_url + "/chat/completions", {
-                "model": model, "max_tokens": 16, "temperature": 0,
+                "model": model, "max_tokens": 64, "temperature": 0,
                 "messages": [{"role": "user", "content": "Reply with the single word: ready"}]}, api_key)
             text = (reply["choices"][0]["message"].get("content") or "").strip()
-            out.append(("ok", "chat", f"test completion works (reply: {text[:40]!r})"))
+            if text:
+                out.append(("ok", "chat", f"test completion works (reply: {text[:40]!r})"))
+            else:
+                out.append(("warn", "chat", "test completion returned an EMPTY reply. If this model 'thinks' before "
+                            "answering, it may use up the token budget; try the extra_body setting in "
+                            "configs/models.json (reasoning_effort / think) or a non-thinking model"))
         except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
             out.append(("fail", "chat", f"test completion failed: {exc}"))
     return out

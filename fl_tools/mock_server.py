@@ -65,13 +65,19 @@ def start_mock_server(port: int = 0,
                       finish_reason: str = "stop",
                       null_content: bool = False,
                       omit_usage: bool = False,
-                      latency: float = 0.0) -> MockServer:
+                      latency: float = 0.0,
+                      ollama_models: Optional[dict] = None,
+                      create_style: str = "new") -> MockServer:
     """Start the server on a free port (port=0) in a background thread.
 
     rules: list of {"match": <regex on the last user message>, "reply": str,
            "finish_reason": optional str}. The first matching rule wins.
+    ollama_models: if given ({"name:latest": num_ctx or None}), also emulate Ollama's native API
+           (/api/tags, /api/show, /api/create) and serve exactly these models on /v1/models.
+           create_style "new" accepts {"model","from","parameters"}, "old" only {"name","modelfile"}.
     """
-    state = {"requests": [], "n": 0, "lock": threading.Lock()}
+    state = {"requests": [], "api_requests": [], "n": 0, "lock": threading.Lock(),
+             "models": dict(ollama_models) if ollama_models is not None else None}
     compiled = [(re.compile(r["match"], re.S), r) for r in (rules or [])]
 
     class Handler(BaseHTTPRequestHandler):
@@ -89,16 +95,58 @@ def start_mock_server(port: int = 0,
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.rstrip("/").endswith("/models"):
-                self._send(200, {"object": "list",
-                                 "data": [{"id": model, "object": "model",
-                                           "max_model_len": max_model_len}]})
+            path = self.path.rstrip("/")
+            if path.endswith("/api/tags") and state["models"] is not None:
+                self._send(200, {"models": [{"name": n, "model": n} for n in state["models"]]})
+            elif path.endswith("/models"):
+                if state["models"] is not None:
+                    data = [{"id": n, "object": "model"} for n in state["models"]]
+                else:
+                    data = [{"id": model, "object": "model", "max_model_len": max_model_len}]
+                self._send(200, {"object": "list", "data": data})
             else:
                 self._send(404, {"error": {"message": "not found"}})
+
+        def _ollama_api(self, path: str, body: dict) -> bool:
+            """Handle /api/show and /api/create; return True if the request was an Ollama API call."""
+            models = state["models"]
+            if models is None or not path.rstrip("/").startswith("/api/"):
+                return False
+            with state["lock"]:
+                state["api_requests"].append({"path": path, "body": body})
+            def with_tag(n):
+                return n if ":" in n else n + ":latest"
+            if path.rstrip("/") == "/api/show":
+                name = with_tag(body.get("model") or body.get("name") or "")
+                if name not in models:
+                    self._send(404, {"error": f"model '{name}' not found"})
+                else:
+                    ctx = models[name]
+                    self._send(200, {"parameters": f"num_ctx                        {ctx}" if ctx else ""})
+            elif path.rstrip("/") == "/api/create":
+                if create_style == "old":
+                    if "modelfile" not in body:
+                        self._send(400, {"error": "unknown field"})
+                        return True
+                    name = with_tag(body.get("name", ""))
+                    m = re.search(r"PARAMETER\s+num_ctx\s+(\d+)", body["modelfile"])
+                    models[name] = int(m.group(1)) if m else None
+                else:
+                    if "from" not in body:
+                        self._send(400, {"error": "from required"})
+                        return True
+                    name = with_tag(body.get("model", ""))
+                    models[name] = int((body.get("parameters") or {}).get("num_ctx") or 0) or None
+                self._send(200, {"status": "success"})
+            else:
+                self._send(404, {"error": "unknown api"})
+            return True
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
+            if self._ollama_api(self.path.split("?")[0], body):
+                return
             with state["lock"]:
                 state["n"] += 1
                 n = state["n"]

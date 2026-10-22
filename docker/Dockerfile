@@ -2,6 +2,8 @@
 # UNTESTED by the author (no Docker in the authoring sandbox). The Defects4J step downloads several GB.
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+# retry flaky mirror downloads (e.g. the deadsnakes PPA sometimes answers 503)
+RUN echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80retries
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git subversion unzip zip perl cpanminus build-essential \

@@ -32,3 +32,11 @@ def test_parse_ollama_num_ctx():
     assert parse_ollama_num_ctx({"parameters": "num_ctx                        16384\nstop   \"<|im_end|>\""}) == 16384
     assert parse_ollama_num_ctx({"parameters": "stop \"x\""}) is None
     assert parse_ollama_num_ctx({}) is None
+
+
+def test_empty_reply_is_a_warning():
+    srv = start_mock_server(model="m", max_model_len=8192, null_content=True)
+    try:
+        assert levels(check_endpoint(srv.url, "m", "x", 8192))["chat"] == "warn"
+    finally:
+        srv.stop()

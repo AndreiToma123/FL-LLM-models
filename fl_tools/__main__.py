@@ -69,6 +69,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--soapfl-dir", default=DEFAULT_SOAPFL)
     p.add_argument("--no-write", action="store_true")
 
+    p = sub.add_parser("models", help="list model presets and what is installed in Ollama")
+    p.add_argument("--presets", default=None)
+
+    p = sub.add_parser("experiment", help="ONE COMMAND per model: prepare Ollama, run, score, funnel, export")
+    p.add_argument("model", help="preset name from configs/models.json (see `models`)")
+    p.add_argument("--n", type=int, default=100, help="number of bugs (stratified sample, same bugs every time)")
+    p.add_argument("--select", default="", help="explicit bugs instead of a sample, e.g. Lang-1,Math-3")
+    p.add_argument("--jobs", type=int, default=2)
+    p.add_argument("--name", default=None, help="run name (default: run<N>-<model>)")
+    p.add_argument("--tag", default=None, help="exact Ollama tag if several are installed")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--sample-seed", type=int, default=0)
+    p.add_argument("--soapfl-dir", default=DEFAULT_SOAPFL)
+    p.add_argument("--results-dir", default=DEFAULT_RESULTS)
+    p.add_argument("--reports-dir", default=os.path.join(ROOT, "reports"))
+    p.add_argument("--python", default=None)
+    p.add_argument("--defects4j-home", default=None)
+    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--skip-preflight", action="store_true")
+    p.add_argument("--presets", default=None)
+
     p = sub.add_parser("export", help="copy summaries/results of a run (no checkouts) to a folder")
     p.add_argument("run_dir")
     p.add_argument("--dest", default=None, help="default: reports/<run name> in the repo")
@@ -86,6 +107,37 @@ def main(argv=None) -> int:
         from . import mock_server
         sys.argv = ["fl_tools.mock_server"] + args.rest
         return mock_server.main() or 0
+
+    if args.cmd == "models":
+        from .models import ModelError, installed_models, load_presets, resolve_tag, variant_name, variant_num_ctx
+        presets = load_presets(args.presets)
+        base_url = os.environ.get("SOAPFL_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        installed = []
+        if base_url:
+            try:
+                installed = installed_models(base_url)
+            except ModelError as exc:
+                print(f"cannot list installed models: {exc}", file=sys.stderr)
+        print(f"installed in Ollama: {', '.join(installed) or '(unknown)'}\n")
+        for key, p in presets.items():
+            line = f"{key:12s} family {p.family}, context {p.num_ctx}"
+            try:
+                tag = resolve_tag(p, installed)
+                ready = base_url and variant_num_ctx(base_url, variant_name(tag, p.num_ctx)) == p.num_ctx
+                line += f" -> {tag}; variant " + ("ready" if ready else "will be created automatically")
+            except ModelError as exc:
+                line += f" -> NOT AVAILABLE ({exc})"
+            print(line + (f"\n{'':12s} {p.note}" if p.note else ""))
+        return 0
+
+    if args.cmd == "experiment":
+        from .experiment import run_experiment
+        return run_experiment(args.model, n=args.n, select=args.select, jobs=args.jobs, name=args.name,
+                              tag=args.tag, seed=args.seed, sample_seed=args.sample_seed,
+                              soapfl_dir=args.soapfl_dir, results_dir=args.results_dir,
+                              reports_dir=args.reports_dir, python=args.python,
+                              defects4j_home=args.defects4j_home, timeout=args.timeout,
+                              skip_preflight=args.skip_preflight, presets_path=args.presets)
 
     if args.cmd == "list-bugs":
         bugs = _select(args)
