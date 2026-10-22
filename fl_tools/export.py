@@ -4,7 +4,8 @@ import shutil
 from typing import List
 
 TOP_FILES = ("run_meta.json", "runs.jsonl", "summary.md", "summary.json", "per_bug.csv",
-             "per_bug_soapfl_format.csv", "funnel.md", "funnel.json", "funnel_per_bug.csv")
+             "per_bug_soapfl_format.csv", "funnel.md", "funnel.json", "funnel_per_bug.csv",
+             "ties.md", "ties.json", "job_meta.json")
 BUG_FILES = ("result.json", "events.jsonl", "ground_truth.json")
 
 

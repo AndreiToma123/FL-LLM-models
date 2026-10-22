@@ -1,6 +1,7 @@
 """Command line: python -m fl_tools <preflight|list-bugs|run|score|funnel|mock> ..."""
 import argparse
 import os
+import signal
 import sys
 
 from . import __version__
@@ -69,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--soapfl-dir", default=DEFAULT_SOAPFL)
     p.add_argument("--no-write", action="store_true")
 
+    p = sub.add_parser("ties", help="RQ3 step 0: how much does the ranking depend on score ties (offline)")
+    p.add_argument("run_dir")
+    p.add_argument("--draws", type=int, default=2000, help="random tie orders for the spread")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-write", action="store_true")
+
     p = sub.add_parser("models", help="list model presets and what is installed in Ollama")
     p.add_argument("--presets", default=None)
 
@@ -100,7 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["mock"]:
+        # argparse.REMAINDER does not accept options right after the subcommand (`mock --port 8000`),
+        # so the mock server's own options are passed through untouched
+        from . import mock_server
+        sys.argv = ["fl_tools.mock_server"] + argv[1:]
+        return mock_server.main() or 0
     args = build_parser().parse_args(argv)
 
     if args.cmd == "mock":
@@ -154,6 +172,10 @@ def main(argv=None) -> int:
 
     if args.cmd == "run":
         from .runner import MetaMismatch, Runner
+        # Stop cleanly on SIGTERM (Slurm time limit, `kill`) and on SIGINT even when started in the
+        # background of a non-interactive shell, where SIGINT is ignored by default.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, _raise_interrupt)
         bugs = _select(args)
         if not bugs:
             print("no bugs selected", file=sys.stderr)
@@ -185,7 +207,7 @@ def main(argv=None) -> int:
               f"python -m fl_tools funnel {summary['out_dir']}")
         return 0
 
-    if args.cmd in ("score", "funnel", "export") and not os.path.isdir(args.run_dir):
+    if args.cmd in ("score", "funnel", "export", "ties") and not os.path.isdir(args.run_dir):
         parent = os.path.dirname(os.path.abspath(args.run_dir)) or "."
         found = sorted(d for d in os.listdir(parent) if os.path.isdir(os.path.join(parent, d))) \
             if os.path.isdir(parent) else []
@@ -210,6 +232,14 @@ def main(argv=None) -> int:
         dest = args.dest or os.path.join(ROOT, "reports", os.path.basename(run_dir.rstrip(os.sep)))
         copied = export_run(run_dir, dest, include_logs=not args.no_logs)
         print(f"copied {len(copied)} items to {dest}")
+        return 0
+
+    if args.cmd == "ties":
+        from .ties import analyse_run as analyse_ties
+        out = analyse_ties(args.run_dir, draws=args.draws, seed=args.seed, write=not args.no_write)
+        print(out["markdown"])
+        for path in out["written"]:
+            print("wrote", path)
         return 0
 
     if args.cmd == "funnel":

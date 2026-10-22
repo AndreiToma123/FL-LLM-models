@@ -44,7 +44,10 @@ def classify(record: BugRecord) -> dict:
 
     if record.result is None:
         run = record.run or {}
-        if run.get("status") == "failed" or run.get("status") == "timeout":
+        if run.get("status") == "interrupted":   # stopped by Ctrl-C / time limit: rerun resumes it
+            info["stage"] = "not_run"
+            info["detail"] = "interrupted"
+        elif run.get("status") == "failed" or run.get("status") == "timeout":
             info["stage"] = "crashed"
             info["detail"] = run.get("error_class") or run.get("status")
         elif record.events_of("no_valid_class"):

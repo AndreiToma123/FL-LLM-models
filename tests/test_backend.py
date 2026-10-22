@@ -114,3 +114,16 @@ def test_parse_score(lenient, expected):
     got = json.loads(proc.stdout.splitlines()[-1])
     norm = [("ERR" if isinstance(g, str) and g.startswith("ERR") else g) for g in got]
     assert norm == expected, got
+
+
+def test_unix_socket_endpoint(tmp_path):
+    """vLLM on Roihu listens on a Unix socket (--uds); SOAPFL_UDS must route the client through it."""
+    sock = str(tmp_path / "vllm.sock")
+    srv = start_mock_server(reply="Via socket. #7#", max_model_len=8192, uds=sock)
+    try:
+        proc, events = call(srv, SOAPFL_UDS=sock, SOAPFL_BASE_URL="")
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout.splitlines()[-1])["content"] == "Via socket. #7#"
+        assert [e for e in events if e["type"] == "llm_call"]
+    finally:
+        srv.stop()

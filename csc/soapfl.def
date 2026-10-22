@@ -1,0 +1,79 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# SoapFL + Defects4J 1.4.0 + Java 8 + Python 3.11 for CSC Roihu GPU nodes (aarch64).
+# Same steps as docker/Dockerfile (the local pipeline); keep the two in sync.
+# Build on the GPU login node (roihu-gpu.csc.fi), from the repository root:   csc/setup.sh image
+# The model server (vLLM) is NOT in this image: it comes from CSC's python-vllm module.
+
+%files
+    patches /opt/fl/patches
+    requirements.txt /opt/fl/requirements.txt
+
+%environment
+    export LANG=C.UTF-8
+    export JAVA_HOME=/usr/lib/jvm/java-8-openjdk
+    export DEFECTS4J_HOME=/opt/defects4j
+    export SOAPFL_DIR=/opt/SoapFL
+    export TIKTOKEN_CACHE_DIR=/opt/tiktoken
+    export PATH=/opt/defects4j/framework/bin:/opt/venv/bin:/usr/lib/jvm/java-8-openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+    # apt under --fakeroot: do not drop privileges to the _apt user; retry flaky mirrors (deadsnakes PPA)
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10sandbox
+    echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80retries
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git subversion unzip zip perl cpanminus build-essential \
+        openjdk-8-jdk software-properties-common gnupg rsync
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update
+    apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev
+    rm -rf /var/lib/apt/lists/*
+    # architecture-independent JAVA_HOME (java-8-openjdk-arm64 here, -amd64 on x86)
+    ln -sfn "/usr/lib/jvm/java-8-openjdk-$(dpkg --print-architecture)" /usr/lib/jvm/java-8-openjdk
+    export JAVA_HOME=/usr/lib/jvm/java-8-openjdk PATH=/usr/lib/jvm/java-8-openjdk/bin:$PATH
+
+    # Defects4J 1.4.0. Its init.sh downloads from a dead host (404) but still reports success,
+    # so the repositories and Gradle files come from defects4j.org and the result is verified below.
+    git clone https://github.com/rjust/defects4j.git /opt/defects4j
+    git -C /opt/defects4j checkout v1.4.0
+    (cd /opt/defects4j && ./init.sh) || true
+    cd /opt/defects4j/project_repos
+    wget -q -O repos.zip https://defects4j.org/downloads/defects4j-repos.zip
+    unzip -q repos.zip && mv defects4j/project_repos/* . && rm -rf defects4j repos.zip
+    cd /opt/defects4j/framework/lib/build_systems/gradle
+    wget -q https://defects4j.org/downloads/defects4j-gradle-dists-v3.zip https://defects4j.org/downloads/defects4j-gradle-deps-v3.zip
+    mkdir -p dists && unzip -q -u defects4j-gradle-dists-v3.zip -d dists && unzip -q -u defects4j-gradle-deps-v3.zip
+    rm -f defects4j-gradle-*-v3.zip
+    cd /opt/defects4j && cpanm --notest --installdeps .
+    /opt/defects4j/framework/bin/defects4j info -p Lang | head -5
+    /opt/defects4j/framework/bin/defects4j checkout -p Lang -v 1b -w /tmp/lang1
+    /opt/defects4j/framework/bin/defects4j compile -w /tmp/lang1
+    rm -rf /tmp/lang1
+
+    # SoapFL at the pinned commit + our patch + its Defects4J overlay
+    git clone https://github.com/IntHelloWorld/SoapFL.git /opt/SoapFL
+    git -C /opt/SoapFL checkout c9f75f4f349849bc84d5cc50c4cc7dc70f012f16
+    git -C /opt/SoapFL apply --whitespace=nowarn /opt/fl/patches/0001-open-model-support.patch
+    cp -r /opt/SoapFL/Defects4J_mod/defects4j-1.4.0-jvm-mod/. /opt/defects4j/
+    # SoapFL writes its per-bug cache to /opt/SoapFL/cache: at run time a writable folder is bound here
+    mkdir -p /opt/SoapFL/cache
+    sha256sum /opt/fl/patches/0001-open-model-support.patch > /opt/fl/patch.sha256
+
+    python3.11 -m venv /opt/venv
+    /opt/venv/bin/pip install --no-cache-dir -r /opt/fl/requirements.txt
+    mkdir -p /opt/tiktoken
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken /opt/venv/bin/python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" || true
+    /opt/venv/bin/python -c "import openai, tree_sitter, tiktoken, tenacity, numpy; print('python deps ok')"
+
+%labels
+    Description SoapFL c9f75f4 + open-model patch, Defects4J 1.4.0, Java 8, Python 3.11
+
+%test
+    java -version 2>&1 | head -1
+    defects4j info -p Lang | head -3
+    python -c "import openai; print('openai', openai.__version__)"

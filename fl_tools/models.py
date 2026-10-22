@@ -30,6 +30,7 @@ class Preset:
     max_completion_tokens: int = 3072
     extra_body: dict = field(default_factory=dict)
     note: str = ""
+    hf: Optional[str] = None        # Hugging Face repo id served by vLLM on CSC (None = local/Ollama only)
 
 
 def load_presets(path: Optional[str] = None) -> Dict[str, Preset]:
@@ -45,7 +46,8 @@ def load_presets(path: Optional[str] = None) -> Dict[str, Preset]:
             continue
         presets[key] = Preset(key=key, family=spec["family"], num_ctx=int(spec.get("num_ctx", 16384)),
                               max_completion_tokens=int(spec.get("max_completion_tokens", 3072)),
-                              extra_body=dict(spec.get("extra_body") or {}), note=spec.get("note", ""))
+                              extra_body=dict(spec.get("extra_body") or {}), note=spec.get("note", ""),
+                              hf=spec.get("hf") or None)
     return presets
 
 

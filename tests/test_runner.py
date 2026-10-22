@@ -80,3 +80,29 @@ def test_parallel(tmp_path, soapfl):
 def test_classify_failure():
     assert classify_failure("This model's maximum context length is 8192 tokens") == "context_overflow_server"
     assert classify_failure("xx") == "other"
+
+
+def test_sigterm_stops_without_retrying(tmp_path, soapfl):
+    """Slurm's time-limit warning ends in SIGTERM: running bugs are killed, marked 'interrupted',
+    not retried, and the CLI exits 130 quickly (CSC job script relies on this)."""
+    import signal
+    import subprocess
+    import time
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.Popen([sys.executable, "-m", "fl_tools", "run", "--name", "t", "--bugs", "Lang-4",
+                             "--results-dir", str(tmp_path / "res"), "--soapfl-dir", soapfl,
+                             "--retries", "2", "--skip-preflight", "--timeout", "60"],
+                            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    runs = tmp_path / "res" / "t" / "runs.jsonl"
+    log_dir = tmp_path / "res" / "t" / "_logs"
+    deadline = time.time() + 20
+    while not (log_dir / "Lang-4.log").exists() and time.time() < deadline:
+        time.sleep(0.2)
+    time.sleep(1)
+    started = time.time()
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=20)
+    assert proc.returncode == 130, out
+    assert time.time() - started < 15
+    rows = [json.loads(l) for l in open(runs)]
+    assert [r["status"] for r in rows] == ["interrupted"], rows

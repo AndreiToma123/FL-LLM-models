@@ -9,7 +9,10 @@ import os
 import shutil
 import subprocess
 import sys
+import http.client
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import List, Optional, Tuple
 
@@ -109,7 +112,40 @@ def check_tiktoken_cache() -> List[Check]:
              "rough 3-chars-per-token estimate (works, but less exact). scripts/setup_soapfl.sh warms the cache.")]
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP over a Unix domain socket (vLLM --uds, as in CSC's Roihu examples)."""
+
+    def __init__(self, path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self._uds_path = path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._uds_path)
+        self.sock = sock
+
+
+def _http_json_uds(uds: str, url: str, payload: Optional[dict], api_key: str, timeout: float):
+    path = urllib.parse.urlsplit(url).path or "/"
+    body = json.dumps(payload).encode() if payload is not None else None
+    conn = _UnixHTTPConnection(uds, timeout)
+    try:
+        conn.request("POST" if body is not None else "GET", path, body=body, headers={
+            "Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Host": "localhost"})
+        resp = conn.getresponse()
+        text = resp.read().decode()
+        if resp.status >= 400:
+            raise OSError(f"HTTP {resp.status} from {uds}{path}: {text[:200]}")
+        return json.loads(text)
+    finally:
+        conn.close()
+
+
 def _http_json(url: str, payload: Optional[dict], api_key: str, timeout: float = 60):
+    uds = os.environ.get("SOAPFL_UDS")
+    if uds:
+        return _http_json_uds(uds, url, payload, api_key, timeout)
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, headers={
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
@@ -222,7 +258,8 @@ def run_preflight(soapfl_dir: str, python: Optional[str] = None, defects4j_home:
         checks += check_overlay(soapfl_dir, defects4j_home)
     checks += check_tiktoken_cache()
     if not skip_endpoint:
-        base = os.environ.get("SOAPFL_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        base = os.environ.get("SOAPFL_BASE_URL") or os.environ.get("OPENAI_BASE_URL") \
+            or ("http://localhost/v1" if os.environ.get("SOAPFL_UDS") else None)
         key = os.environ.get("SOAPFL_API_KEY") or os.environ.get("OPENAI_API_KEY") or "EMPTY"
         limit = os.environ.get("SOAPFL_CONTEXT_LIMIT")
         checks += check_endpoint(base, os.environ.get("SOAPFL_MODEL_NAME"), key,

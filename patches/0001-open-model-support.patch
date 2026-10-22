@@ -22,10 +22,10 @@ index 9480ec4..d9e5df2 100755
                  None,
 diff --git a/camel/local_llm.py b/camel/local_llm.py
 new file mode 100644
-index 0000000..5bb6b19
+index 0000000..6ff6d02
 --- /dev/null
 +++ b/camel/local_llm.py
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,207 @@
 +"""Open-model support for SoapFL (added by the FL-LLM-models thesis project).
 +
 +Everything here is standard library only, so it can be imported from anywhere
@@ -36,6 +36,8 @@ index 0000000..5bb6b19
 +  SOAPFL_MODEL_NAME          model name the server expects (REQUIRED for --model LOCAL)
 +  SOAPFL_BASE_URL            OpenAI-compatible endpoint, e.g. http://localhost:8000/v1
 +                             (falls back to OPENAI_BASE_URL, then the OpenAI default)
++  SOAPFL_UDS                 path of a Unix domain socket the server listens on (vLLM --uds);
++                             base URL then defaults to http://localhost/v1
 +  SOAPFL_API_KEY             API key (falls back to OPENAI_API_KEY, then "EMPTY")
 +  SOAPFL_CONTEXT_LIMIT       context window of the served model in tokens (default 32768)
 +  SOAPFL_TOKEN_MARGIN        safety margin for tokenizer mismatch, 0..0.5 (default 0.10)
@@ -123,6 +125,11 @@ index 0000000..5bb6b19
 +
 +def base_url() -> Optional[str]:
 +    return env_str("SOAPFL_BASE_URL", env_str("OPENAI_BASE_URL"))
++
++
++def unix_socket() -> Optional[str]:
++    """Path of a Unix domain socket to reach the server through (SOAPFL_UDS), or None."""
++    return env_str("SOAPFL_UDS")
 +
 +
 +def api_key() -> str:
@@ -227,10 +234,10 @@ index 0000000..5bb6b19
 +            return value
 +    return None
 diff --git a/camel/model_backend.py b/camel/model_backend.py
-index bf231a7..f1f13e2 100755
+index bf231a7..2b8df11 100755
 --- a/camel/model_backend.py
 +++ b/camel/model_backend.py
-@@ -16,12 +16,30 @@ from abc import ABC, abstractmethod
+@@ -16,12 +16,39 @@ from abc import ABC, abstractmethod
  from typing import Any, Dict
  
  import openai
@@ -251,18 +258,27 @@ index bf231a7..f1f13e2 100755
 +    the hard-coded empty base_url/api_key that had to be edited by hand."""
 +    global _CLIENT
 +    if _CLIENT is None:
++        kwargs = {}
++        uds = local_llm.unix_socket()
++        if uds:
++            # vLLM listening on a Unix domain socket (CSC's recommended setup on Roihu):
++            # only processes that can read the socket file can talk to the server.
++            import httpx
++            kwargs["http_client"] = httpx.Client(transport=httpx.HTTPTransport(uds=uds),
++                                                 timeout=local_llm.request_timeout())
 +        _CLIENT = openai.OpenAI(
-+            base_url=local_llm.base_url(),
++            base_url=local_llm.base_url() or ("http://localhost/v1" if uds else None),
 +            api_key=local_llm.api_key(),
 +            timeout=local_llm.request_timeout(),
 +            max_retries=local_llm.max_retries(),
++            **kwargs,
 +        )
 +    return _CLIENT
 +
  
  class ModelBackend(ABC):
      r"""Base class for different model backends.
-@@ -50,51 +68,82 @@ class OpenAIModel(ModelBackend):
+@@ -50,51 +77,82 @@ class OpenAIModel(ModelBackend):
          self.model_config_dict = model_config_dict
  
      def run(self, *args, **kwargs) -> Dict[str, Any]:
@@ -381,7 +397,7 @@ index bf231a7..f1f13e2 100755
          return response
  
  
-@@ -130,7 +179,7 @@ class ModelFactory:
+@@ -130,7 +188,7 @@ class ModelFactory:
  
          if model_type in {
              ModelType.GPT_3_5_TURBO, ModelType.GPT_4, ModelType.GPT_4_32k, ModelType.GPT_4_O,

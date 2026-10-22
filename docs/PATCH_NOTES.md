@@ -8,7 +8,7 @@ Everything is switched on by `--model LOCAL`; the OpenAI code path is kept (veri
 | `camel/local_llm.py` (new) | env-var settings, event log, `<think>` stripping, score parser | one place for all new behaviour |
 | `camel/typing.py` | `ModelType.LOCAL` | new model kind |
 | `camel/utils.py` | `get_encoding()` with fallbacks (tiktoken → cl100k → 3-chars/token estimate); LOCAL context limit from `SOAPFL_CONTEXT_LIMIT` | tiktoken downloads its vocabulary at first use and fails on offline nodes; open models have other context sizes |
-| `camel/model_backend.py` | LOCAL branch: OpenAI-compatible client (`SOAPFL_BASE_URL`), served model name, `max_tokens` = window − prompt·(1+margin) − 32, `extra_body`, null-content/usage guards, `<think>` stripping, per-call event | original code hard-codes OpenAI model names, token limits and assumes `usage` is present |
+| `camel/model_backend.py` | LOCAL branch: OpenAI-compatible client (`SOAPFL_BASE_URL`, or a Unix domain socket via `SOAPFL_UDS` as used by vLLM `--uds` on CSC Roihu), served model name, `max_tokens` = window − prompt·(1+margin) − 32, `extra_body`, null-content/usage guards, `<think>` stripping, per-call event | original code hard-codes OpenAI model names, token limits and assumes `usage` is present |
 | `camel/agents/chat_agent.py` | log `context_overflow_guard` event | make overflow visible in the funnel |
 | `functions/func.py` | `check_tokens` uses `get_encoding` | same tokenizer fallback |
 | `run.py` | `--model LOCAL`, `SOAPFL_SEED` | seed per bug; clear error if model name missing |

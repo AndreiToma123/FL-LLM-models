@@ -163,6 +163,7 @@ class Runner:
         self.progress = progress
         self._lock = threading.Lock()
         self._procs: List[subprocess.Popen] = []
+        self._stopping = threading.Event()   # set on Ctrl-C / SIGTERM: no new attempts, no retries
 
     # ---------------------------------------------------------------- helpers
     def bug_dir(self, bug: Bug) -> str:
@@ -218,6 +219,8 @@ class Runner:
                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             with self._lock:
                 self._procs.append(proc)
+                if self._stopping.is_set():      # stop requested while this bug was starting
+                    _kill_group(proc)
             try:
                 while True:
                     try:
@@ -263,14 +266,18 @@ class Runner:
     def run_bug(self, bug: Bug) -> dict:
         row: dict = {}
         for attempt in range(1, self.retries + 2):
+            if self._stopping.is_set():
+                break
             row = self._spawn(bug, attempt)
+            if self._stopping.is_set() and row["status"] != "ok":
+                row.update(status="interrupted", error_class="interrupted")
             self._append_run(row)
             bug_dir = self.bug_dir(bug)
             if os.path.isdir(bug_dir):
                 snapshot_ground_truth(self.soapfl_dir, bug_dir, self.python)
-            if row["status"] in ("ok", "no_result") or row["error_class"] not in RETRYABLE:
+            if row["status"] in ("ok", "no_result", "interrupted") or row["error_class"] not in RETRYABLE:
                 break
-        return row
+        return row or {"bug": bug.name, "status": "interrupted", "error_class": "interrupted", "wall_s": 0}
 
     # ------------------------------------------------------------------ batch
     def run(self, bugs: List[Bug]) -> dict:
@@ -307,6 +314,7 @@ class Runner:
                               f"({row.get('wall_s', 0):.0f}s, ETA {eta / 60:.0f} min)")
         except KeyboardInterrupt:
             self.progress("interrupted: stopping running SoapFL processes (progress is resumable)")
+            self._stopping.set()
             for future in list(futures):
                 future.cancel()
             with self._lock:

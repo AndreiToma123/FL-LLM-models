@@ -20,6 +20,8 @@ import math
 import re
 import threading
 import time
+import os
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional
 
@@ -27,6 +29,15 @@ from typing import List, Optional
 def estimate_tokens(text: str) -> int:
     """Crude token estimate (~3.5 characters per token)."""
     return int(math.ceil(len(text) / 3.5))
+
+
+class _ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """HTTP server on a Unix domain socket, like vLLM started with --uds."""
+    daemon_threads = True
+
+    def get_request(self):
+        request, _ = super().get_request()
+        return request, ("uds", 0)   # BaseHTTPRequestHandler expects a (host, port) client address
 
 
 class MockServer:
@@ -37,13 +48,19 @@ class MockServer:
         self._thread.start()
 
     @property
-    def port(self) -> int:
-        return self._httpd.server_address[1]
+    def uds(self) -> Optional[str]:
+        """Socket path if the server listens on a Unix domain socket, else None."""
+        address = self._httpd.server_address
+        return address if isinstance(address, str) else None
+
+    @property
+    def port(self) -> Optional[int]:
+        return None if self.uds else self._httpd.server_address[1]
 
     @property
     def url(self) -> str:
         """Base URL to use as SOAPFL_BASE_URL (ends in /v1)."""
-        return f"http://127.0.0.1:{self.port}/v1"
+        return "http://localhost/v1" if self.uds else f"http://127.0.0.1:{self.port}/v1"
 
     @property
     def requests(self) -> List[dict]:
@@ -67,7 +84,8 @@ def start_mock_server(port: int = 0,
                       omit_usage: bool = False,
                       latency: float = 0.0,
                       ollama_models: Optional[dict] = None,
-                      create_style: str = "new") -> MockServer:
+                      create_style: str = "new",
+                      uds: Optional[str] = None) -> MockServer:
     """Start the server on a free port (port=0) in a background thread.
 
     rules: list of {"match": <regex on the last user message>, "reply": str,
@@ -202,7 +220,12 @@ def start_mock_server(port: int = 0,
                                     "total_tokens": prompt_tokens + completion_tokens}
             self._send(200, payload)
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if uds:
+        if os.path.exists(uds):
+            os.unlink(uds)
+        httpd = _ThreadingUnixHTTPServer(uds, Handler)
+    else:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     return MockServer(httpd, state)
 
 
@@ -213,10 +236,12 @@ def main() -> None:
     parser.add_argument("--reply", default="Mock answer. #5#")
     parser.add_argument("--think", action="store_true")
     parser.add_argument("--max-model-len", type=int, default=32768)
+    parser.add_argument("--uds", default=None, help="listen on this Unix socket instead of a port")
     args = parser.parse_args()
     server = start_mock_server(port=args.port, model=args.model, reply=args.reply,
-                               think=args.think, max_model_len=args.max_model_len)
-    print(f"mock server listening on {server.url} (model={args.model}); Ctrl-C to stop")
+                               think=args.think, max_model_len=args.max_model_len, uds=args.uds)
+    where = f"unix socket {server.uds}" if server.uds else server.url
+    print(f"mock server listening on {where} (model={args.model}); Ctrl-C to stop")
     try:
         while True:
             time.sleep(3600)

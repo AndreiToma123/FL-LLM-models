@@ -16,12 +16,27 @@ the tools around it. `scripts/setup_soapfl.sh` clones SoapFL at a pinned commit 
 | Runner (resume, retries, timeout, run-settings guard), scorer, funnel, bug sampling, preflight | tested with a stub `run.py` and synthetic results |
 | Real SoapFL run on real Defects4J bugs with a local model (Docker + Ollama, `qwen2.5-coder:7b`) | worked: 20-bug pilot, results in `reports/pilot-2/` (Top-1/3/5 = 5/8/10 of 20). A 100-bug run is the next baseline. |
 | Docker + Ollama setup (`docker/`, `docker-compose.yml`) | used for the pilot, see "Running on your own computer" |
-| `scripts/` (cluster: `install_defects4j.sh`, `serve_vllm.sh`, Slurm template) | **untested**; read them, fill in the `<PLACEHOLDERS>` |
+| Real 100-bug run, local pipeline (`qwen2.5-coder:7b`) | done: `reports/run100-qwen25coder/` (Top-1/3/5 = 28/46/47 of 100) |
+| CSC pipeline (`csc/`: Apptainer image, vLLM on a Unix socket, parallel workers, resume, time-limit save) | the whole job flow is tested in a simulation (stubbed Slurm, Apptainer, vLLM and Defects4J); **not yet run on Roihu**: first `csc/submit.sh qwen25coder --smoke` |
+| `scripts/` (older generic cluster scripts: `install_defects4j.sh`, `serve_vllm.sh`, Slurm template) | **untested**; for CSC use `csc/` instead |
 
 `preflight` catches most environment problems cheaply. Results from small samples are exploratory: with 20-100 bugs the
 Top-N numbers are only accurate to roughly +-10 points and are not comparable to the paper's 395-bug numbers.
 
-## Quick start (CSC or any Linux box with a GPU)
+## Two pipelines
+
+| | Local (default, free) | CSC Roihu (limited GPU budget) |
+|---|---|---|
+| Where | your PC: Docker + Ollama | 1 GH200 GPU per job, vLLM + up to 24 parallel bugs |
+| Start | `.\run-experiment.cmd <preset>` | `csc/submit.sh <preset> [--smoke / --n 10]` |
+| Instructions | "Running on your own computer" below | [`csc/README.md`](csc/README.md) |
+| Model weights | Ollama tags (4-bit quantized) | Hugging Face (bf16), `hf` field in `configs/models.json` |
+| Results | `reports/run<N>-<preset>/` | `reports/run<N>-<preset>-csc/` |
+
+Both use the same `fl_tools`, SoapFL patch, presets, bug sample and analyses, so runs are directly comparable
+(apart from the quantization and server differences listed in `csc/README.md`).
+
+## Any Linux box with a GPU (manual setup)
 
 ```bash
 bash scripts/setup_soapfl.sh              # clone SoapFL, apply patch, make .venv, warm tiktoken cache
@@ -46,7 +61,7 @@ Then, smallest to largest:
 ```
 
 Runs are **resumable**: run the same command again and finished bugs are skipped.
-On CSC use `scripts/slurm_pilot.sbatch` (placeholders for project, partition and GPU).
+On CSC use the `csc/` pipeline (see `csc/README.md`), not these manual steps.
 
 ## Running on your own computer (Ollama + Docker)
 
@@ -130,6 +145,10 @@ docker compose run --rm soapfl python -m fl_tools export results/run100-qwen25co
 * `funnel.md`: how many bugs survive each stage (output produced → right class → buggy method reached ranking → top 5 → top 1),
   why the rest were lost (crash, no valid class, context overflow, class missed, ...), and how many Top-1 hits are
   *ties* decided only by review order. This mirrors the funnel analysis in the HypoDeduce paper.
+* `ties.md` / `ties.json` (`python -m fl_tools ties RUN`, offline): how much Top-N depends on score ties: Top-1/3/5
+  with the real review order, reversed, worst case, best case (oracle tie-breaker) and random orders (mean and 95% range),
+  plus the score scale the model really used. Works on `reports/<run>` too.
+* `job_meta.json` (CSC runs): node, GPU, vLLM version, workers, timing and estimated GPU billing units per job.
 * `events.jsonl` (inside each bug folder): every LLM call (latency, tokens, finish reason) and every parse/overflow incident.
 
 `python -m fl_tools score RUN --reference-csv some_soapfl_results.csv` compares bug by bug with another run in SoapFL's CSV format.

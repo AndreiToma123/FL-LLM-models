@@ -59,6 +59,9 @@ def load_runs(run_dir: str) -> Dict[str, dict]:
 def discover_bug_dirs(run_dir: str) -> Dict[str, str]:
     """bug name -> directory, for every SoapFL output folder under run_dir."""
     found: Dict[str, str] = {}
+    exported = os.path.join(run_dir, "bugs")   # layout written by `export` (reports/<run>/bugs/<bug>/)
+    if os.path.isdir(exported) and not any(e.startswith("d4j") for e in os.listdir(run_dir)):
+        run_dir = exported
     try:
         entries = sorted(os.listdir(run_dir))
     except OSError:

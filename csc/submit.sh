@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Submit one SoapFL experiment to CSC Roihu: one GPU (vLLM) + many SoapFL workers on the same node.
+#
+#   csc/submit.sh <preset> --smoke            1 bug on the 15-min test partition (check the setup works)
+#   csc/submit.sh <preset> --n 10             10 bugs (same stratified sample as locally)
+#   csc/submit.sh <preset>                    100 bugs (default)
+#   csc/submit.sh <preset> --select Lang-1,Math-3
+# Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
+#          --partition P  --seed S  --dry-run (print the sbatch command only)
+#
+# Billing: 200 GPU billing units per GPU-hour of the job's ELAPSED time (not of --time). Re-submitting the
+# same command resumes a run: finished bugs are skipped.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+cd "$FL_REPO"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+[ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
+PRESET="$1"; shift
+N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --smoke) SMOKE=1 ;;
+    --n) N="$2"; shift ;;
+    --select) SELECT="$2"; shift ;;
+    --name) NAME="$2"; shift ;;
+    --jobs) JOBS="$2"; shift ;;
+    --time) TIME="$2"; shift ;;
+    --partition) PARTITION="$2"; shift ;;
+    --seed) SEED="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    *) die "unknown option $1" ;;
+  esac
+  shift
+done
+
+# preset -> model settings (configs/models.json, shared with the local pipeline)
+eval "$(python3 - "$FL_REPO/configs/models.json" "$PRESET" <<'PY'
+import json, shlex, sys
+presets = json.load(open(sys.argv[1]))
+name = sys.argv[2]
+p = presets.get(name)
+if p is None or name.startswith("_"):
+    print(f"echo 'unknown preset {name}; known: {', '.join(k for k in presets if not k.startswith('_'))}' >&2; exit 2"); sys.exit()
+if not p.get("hf"):
+    print(f"echo 'preset {name} has no hf repo in configs/models.json, so it cannot run on CSC' >&2; exit 2"); sys.exit()
+out = {"HF_REPO": p["hf"], "CTX": p.get("num_ctx", 16384), "MAX_TOKENS": p.get("max_completion_tokens", 3072),
+       "EXTRA_BODY": json.dumps(p.get("extra_body") or {})}
+for k, v in out.items():
+    print(f"{k}={shlex.quote(str(v))}")
+PY
+)"
+
+MODEL_DIR="$MODELS_DIR/$(echo "$HF_REPO" | tr '/' '_')"
+[ -f "$SOAPFL_SIF" ] || die "image $SOAPFL_SIF missing: run csc/setup.sh image (on roihu-gpu.csc.fi)"
+ls "$MODEL_DIR"/*.safetensors >/dev/null 2>&1 || die "weights of $HF_REPO missing: run csc/setup.sh model $PRESET"
+
+if [ "$SMOKE" = 1 ]; then
+  SELECT="${SELECT:-Lang-1}"
+  NAME="${NAME:-smoke-$PRESET-csc}"
+  PARTITION="${PARTITION:-gputest}"
+  TIME="${TIME:-00:15:00}"
+  ENFORCE_EAGER=1          # skip CUDA-graph capture: faster start, enough for one bug
+else
+  if [ -n "$SELECT" ]; then
+    NAME="${NAME:-sel-$PRESET-csc}"
+  else
+    NAME="${NAME:-run$N-$PRESET-csc}"
+  fi
+  PARTITION="${PARTITION:-gpumedium}"
+  # generous limit: billing counts elapsed time only; the job stops itself when the bugs are done
+  TIME="${TIME:-04:00:00}"
+  ENFORCE_EAGER=0
+fi
+
+mkdir -p "$FL_ROOT/logs"
+# job settings go through a file: sbatch --export cannot carry values with commas (bug lists, JSON)
+JOB_ENV="$FL_ROOT/logs/$NAME-$(date +%Y%m%d-%H%M%S).env"
+{
+  for v in PRESET:FL_PRESET NAME:FL_RUN N:FL_N SELECT:FL_SELECT JOBS:FL_JOBS SEED:FL_SEED HF_REPO:FL_HF_REPO \
+           MODEL_DIR:FL_MODEL_DIR CTX:FL_CTX MAX_TOKENS:FL_MAX_TOKENS EXTRA_BODY:FL_EXTRA_BODY \
+           ENFORCE_EAGER:FL_ENFORCE_EAGER FL_REPO:FL_REPO; do
+    src="${v%%:*}"; printf '%s=%q\n' "${v#*:}" "${!src}"
+  done
+} > "$JOB_ENV"
+CMD=(sbatch --account="$CSC_PROJECT" --partition="$PARTITION" --time="$TIME" --gres="$GPU_GRES"
+     --job-name="fl-$NAME" --output="$FL_ROOT/logs/%x-%j.out"
+     --export=ALL,FL_JOB_ENV="$JOB_ENV" "$FL_REPO/csc/run_job.sbatch")
+echo "run $NAME: preset $PRESET ($HF_REPO), $( [ -n "$SELECT" ] && echo "bugs $SELECT" || echo "$N bugs" ), partition $PARTITION, limit $TIME"
+if [ "$DRY" = 1 ]; then printf '%q ' "${CMD[@]}"; echo; exit 0; fi
+"${CMD[@]}"
+echo "follow it with:  squeue --me    and    tail -f $FL_ROOT/logs/fl-$NAME-<jobid>.out"
