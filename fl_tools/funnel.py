@@ -29,8 +29,9 @@ TERMINAL_STAGES = ["not_run", "crashed", "no_valid_class", "context_overflow", "
 
 def _ties(ranked: List[dict], rank: int) -> int:
     """How many reviewed methods share the score of the buggy method (including itself)."""
-    score = ranked[rank - 1].get("score")
-    return sum(1 for m in ranked if m.get("score") == score)
+    from .ties import rank_value
+    key = rank_value(ranked[rank - 1])
+    return sum(1 for m in ranked if rank_value(m) == key)
 
 
 def classify(record: BugRecord) -> dict:

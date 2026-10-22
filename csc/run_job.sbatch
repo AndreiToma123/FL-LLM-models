@@ -122,7 +122,7 @@ trap on_time_limit USR1
 
 T_RUN=$(date +%s)
 "${SF[@]}" python -m fl_tools run --name "$RUN" --results-dir "$WORK/results" "${SELECTION[@]}" \
-  --jobs "$JOBS" --seed "$FL_SEED" --timeout 3600 --skip-preflight &
+  --jobs "$JOBS" --seed "$FL_SEED" --timeout 3600 --skip-preflight ${FL_PIPELINE_ARGS:-} &
 RUN_PID=$!
 wait "$RUN_PID"; RC=$?
 [ "$STOPPING" = 1 ] && wait "$RUN_PID" 2>/dev/null

@@ -36,6 +36,15 @@ Top-N numbers are only accurate to roughly +-10 points and are not comparable to
 Both use the same `fl_tools`, SoapFL patch, presets, bug sample and analyses, so runs are directly comparable
 (apart from the quantization and server differences listed in `csc/README.md`).
 
+## Pipelines in this repo
+
+* **SoapFL** (baseline, default): `--pipeline soapfl`. Frozen baseline results: `reports/run100-qwen25coder/`.
+* **HypoDeduce** (our re-implementation from the ICSE-NIER 2026 paper, not the authors' code):
+  `.\run-experiment.cmd qwen25coder -HypoDeduce -N 10`, or `--pipeline hypodeduce` with `fl_tools run/experiment`,
+  or `csc/submit.sh <preset> --hypodeduce`. It runs inside the same patched SoapFL (same inputs, same method
+  prompts) and only changes the control flow: several hypotheses, C classes per hypothesis, retention of anything
+  at least one hypothesis keeps, hypothesis selection. Details and our design choices: [`docs/HYPODEDUCE.md`](docs/HYPODEDUCE.md).
+
 ## Any Linux box with a GPU (manual setup)
 
 ```bash

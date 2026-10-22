@@ -5,6 +5,7 @@
 #   csc/submit.sh <preset> --n 10             10 bugs (same stratified sample as locally)
 #   csc/submit.sh <preset>                    100 bugs (default)
 #   csc/submit.sh <preset> --select Lang-1,Math-3
+#   csc/submit.sh <preset> --hypodeduce --n 10 [--hd-h 5 --hd-c 5]   our HypoDeduce re-implementation
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
 #
@@ -18,6 +19,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
+PIPELINE=soapfl; HD_H=5; HD_C=5
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -29,6 +31,9 @@ while [ $# -gt 0 ]; do
     --partition) PARTITION="$2"; shift ;;
     --seed) SEED="$2"; shift ;;
     --dry-run) DRY=1 ;;
+    --hypodeduce) PIPELINE=hypodeduce ;;
+    --hd-h) HD_H="$2"; shift ;;
+    --hd-c) HD_C="$2"; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -55,17 +60,23 @@ MODEL_DIR="$MODELS_DIR/$(echo "$HF_REPO" | tr '/' '_')"
 [ -f "$SOAPFL_SIF" ] || die "image $SOAPFL_SIF missing: run csc/setup.sh image (on roihu-gpu.csc.fi)"
 ls "$MODEL_DIR"/*.safetensors >/dev/null 2>&1 || die "weights of $HF_REPO missing: run csc/setup.sh model $PRESET"
 
+PIPELINE_ARGS=""; SUFFIX=""
+if [ "$PIPELINE" = hypodeduce ]; then
+  PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C"
+  SUFFIX="-hd-h${HD_H}c${HD_C}"
+fi
+
 if [ "$SMOKE" = 1 ]; then
   SELECT="${SELECT:-Lang-1}"
-  NAME="${NAME:-smoke-$PRESET-csc}"
+  NAME="${NAME:-smoke-$PRESET$SUFFIX-csc}"
   PARTITION="${PARTITION:-gputest}"
   TIME="${TIME:-00:15:00}"
   ENFORCE_EAGER=1          # skip CUDA-graph capture: faster start, enough for one bug
 else
   if [ -n "$SELECT" ]; then
-    NAME="${NAME:-sel-$PRESET-csc}"
+    NAME="${NAME:-sel-$PRESET$SUFFIX-csc}"
   else
-    NAME="${NAME:-run$N-$PRESET-csc}"
+    NAME="${NAME:-run$N-$PRESET$SUFFIX-csc}"
   fi
   PARTITION="${PARTITION:-gpumedium}"
   # generous limit: billing counts elapsed time only; the job stops itself when the bugs are done
@@ -79,7 +90,7 @@ JOB_ENV="$FL_ROOT/logs/$NAME-$(date +%Y%m%d-%H%M%S).env"
 {
   for v in PRESET:FL_PRESET NAME:FL_RUN N:FL_N SELECT:FL_SELECT JOBS:FL_JOBS SEED:FL_SEED HF_REPO:FL_HF_REPO \
            MODEL_DIR:FL_MODEL_DIR CTX:FL_CTX MAX_TOKENS:FL_MAX_TOKENS EXTRA_BODY:FL_EXTRA_BODY \
-           ENFORCE_EAGER:FL_ENFORCE_EAGER FL_REPO:FL_REPO; do
+           ENFORCE_EAGER:FL_ENFORCE_EAGER FL_REPO:FL_REPO PIPELINE_ARGS:FL_PIPELINE_ARGS; do
     src="${v%%:*}"; printf '%s=%q\n' "${v#*:}" "${!src}"
   done
 } > "$JOB_ENV"

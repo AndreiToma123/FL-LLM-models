@@ -31,11 +31,16 @@ from .results import BugRecord, load_records
 KS = (1, 3, 5)
 
 
+def rank_value(m: dict):
+    """What the final ranking was sorted by: SoapFL's score, or HypoDeduce's (selected, score) key."""
+    return tuple(m["rank_key"]) if m.get("rank_key") is not None else m.get("score")
+
+
 def _groups(ranked: List[dict]) -> List[List[dict]]:
-    """Consecutive runs of equal scores (the list is already sorted by score)."""
+    """Consecutive runs of equal sort keys (the list is already sorted by them)."""
     groups: List[List[dict]] = []
     for m in ranked:
-        if groups and groups[-1][0].get("score") == m.get("score"):
+        if groups and rank_value(groups[-1][0]) == rank_value(m):
             groups[-1].append(m)
         else:
             groups.append([m])
@@ -91,8 +96,9 @@ def analyse_bug(record: BugRecord) -> Optional[dict]:
     }
     if in_ranking:
         best_rank_actual = _first_rank(ranked, truth)
+        buggy_key = rank_value(ranked[best_rank_actual - 1])
         buggy_score = ranked[best_rank_actual - 1].get("score")
-        tie_size = sum(1 for m in ranked if m.get("score") == buggy_score)
+        tie_size = sum(1 for m in ranked if rank_value(m) == buggy_key)
         info.update({
             "actual_rank": best_rank_actual, "buggy_score": buggy_score, "tie_size": tie_size,
             "in_tie": tie_size > 1,

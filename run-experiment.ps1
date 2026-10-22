@@ -5,6 +5,8 @@
     .\run-experiment.ps1 llama31
     .\run-experiment.ps1 qwen35 -N 10           # quick 10-bug try first (this model may be slow)
     .\run-experiment.ps1 llama31 -Push          # also commit and push the finished reports to GitHub
+    .\run-experiment.ps1 qwen25coder -HypoDeduce -N 10          # our HypoDeduce re-implementation (H=5, C=5)
+    .\run-experiment.ps1 qwen25coder -HypoDeduce -H 3 -C 3 -N 10   # other numbers of hypotheses / classes
 
   Easiest: use  .\run-experiment.cmd qwen25coder  (same thing, works even when PowerShell blocks scripts)
   If it stops (sleep, Ctrl+C, crash), run the same command again: finished bugs are skipped.
@@ -14,7 +16,10 @@ param(
     [Parameter(Mandatory = $true, Position = 0)][string]$Model,
     [int]$N = 100,
     [int]$Jobs = 2,
-    [switch]$Push
+    [switch]$Push,
+    [switch]$HypoDeduce,
+    [int]$H = 5,
+    [int]$C = 5
 )
 
 Set-Location $PSScriptRoot
@@ -33,7 +38,13 @@ if (-not (Test-Path ".env")) {
 Add-Type -Namespace Win -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
 [void][Win.Power]::SetThreadExecutionState([uint32]2147483649)   # ES_CONTINUOUS | ES_SYSTEM_REQUIRED (0x80000001)
 
-docker compose run --rm soapfl python -m fl_tools experiment $Model --n $N --jobs $Jobs
+$extra = @()
+$suffix = ""
+if ($HypoDeduce) {
+    $extra = @("--pipeline", "hypodeduce", "--hd-hypotheses", "$H", "--hd-classes", "$C")
+    $suffix = "-hd-h$($H)c$($C)"
+}
+docker compose run --rm soapfl python -m fl_tools experiment $Model --n $N --jobs $Jobs @extra
 $code = $LASTEXITCODE
 
 [void][Win.Power]::SetThreadExecutionState([uint32]2147483648)   # back to normal (0x80000000)
@@ -43,10 +54,10 @@ if ($code -ne 0) {
     exit $code
 }
 
-$report = "reports\run$N-$Model"
+$report = "reports\run$N-$Model$suffix"
 Write-Host "`nFinished. Open $report\summary.md and $report\funnel.md" -ForegroundColor Green
 if ($Push) {
     git add reports
-    git commit -m "Add results: $Model, $N bugs"
+    git commit -m "Add results: $Model$suffix, $N bugs"
     git push
 }

@@ -21,6 +21,21 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
                    help="include the 7 IDs SoapFL's run_all.py skips (395 bugs instead of 388)")
 
 
+def _add_pipeline(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--pipeline", choices=["soapfl", "hypodeduce"], default="soapfl",
+                   help="soapfl = baseline; hypodeduce = our re-implementation of HypoDeduce (ICSE-NIER 2026)")
+    p.add_argument("--hd-hypotheses", type=int, default=None, help="HypoDeduce H (default 5, as in the paper)")
+    p.add_argument("--hd-classes", type=int, default=None, help="HypoDeduce C, classes per hypothesis (default 5)")
+    p.add_argument("--hd-methods", type=int, default=None,
+                   help="HypoDeduce: max methods per (hypothesis, class), 0 = all (default 0)")
+    p.add_argument("--hd-selection", default=None, help="HypoDeduce hypothesis selection: max | mean_top3")
+
+
+def _hd_args(args) -> dict:
+    return {"hypotheses": args.hd_hypotheses, "classes": args.hd_classes, "methods": args.hd_methods,
+            "selection": args.hd_selection}
+
+
 def _select(args):
     return select_bugs(args.bugs, args.pilot, args.sample_seed, args.exclude, args.include_deprecated)
 
@@ -58,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-meta-change", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="show what would run, do nothing")
     p.add_argument("--skip-preflight", action="store_true")
+    _add_pipeline(p)
 
     p = sub.add_parser("score", help="Top-1/3/5 table for a run")
     p.add_argument("run_dir")
@@ -96,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=int, default=3600)
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument("--presets", default=None)
+    _add_pipeline(p)
 
     p = sub.add_parser("export", help="copy summaries/results of a run (no checkouts) to a folder")
     p.add_argument("run_dir")
@@ -155,7 +172,8 @@ def main(argv=None) -> int:
                               soapfl_dir=args.soapfl_dir, results_dir=args.results_dir,
                               reports_dir=args.reports_dir, python=args.python,
                               defects4j_home=args.defects4j_home, timeout=args.timeout,
-                              skip_preflight=args.skip_preflight, presets_path=args.presets)
+                              skip_preflight=args.skip_preflight, presets_path=args.presets,
+                              pipeline=args.pipeline, hd=_hd_args(args))
 
     if args.cmd == "list-bugs":
         bugs = _select(args)
@@ -191,8 +209,13 @@ def main(argv=None) -> int:
                 print(format_checks(checks), file=sys.stderr)
                 print("preflight failed (use --skip-preflight to override)", file=sys.stderr)
                 return 1
+        if args.pipeline == "hypodeduce":
+            from .experiment import configure_hypodeduce
+            print("HypoDeduce: " + ", ".join(f"{k}={v}" for k, v in configure_hypodeduce(_hd_args(args)).items()))
+            if args.config == "Default":
+                args.config = "HypoDeduce"
         runner = Runner(name=args.name, results_dir=args.results_dir, soapfl_dir=args.soapfl_dir,
-                        config=args.config, model=args.model, lenient=not args.strict, seed=args.seed,
+                        pipeline=args.pipeline, config=args.config, model=args.model, lenient=not args.strict, seed=args.seed,
                         jobs=args.jobs, timeout=args.timeout, retries=args.retries, python=args.python,
                         defects4j_home=args.defects4j_home, allow_meta_change=args.allow_meta_change)
         try:

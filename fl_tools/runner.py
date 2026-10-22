@@ -46,7 +46,10 @@ RETRYABLE = {"server_unreachable", "rate_limited", "timeout", "killed_oom"}
 
 # settings that must not change when a run directory is resumed
 META_GUARDED_ENV = ["SOAPFL_MODEL_NAME", "SOAPFL_CONTEXT_LIMIT", "SOAPFL_EXTRA_BODY", "SOAPFL_STRIP_THINK",
-                    "SOAPFL_MAX_COMPLETION_TOKENS", "SOAPFL_TOKEN_MARGIN"]
+                    "SOAPFL_MAX_COMPLETION_TOKENS", "SOAPFL_TOKEN_MARGIN",
+                    "SOAPFL_HD_HYPOTHESES", "SOAPFL_HD_CLASSES", "SOAPFL_HD_METHODS", "SOAPFL_HD_SELECTION"]
+PIPELINES = ("soapfl", "hypodeduce")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def classify_failure(log_text: str, tail_chars: int = 20000) -> str:
@@ -88,10 +91,12 @@ def _utc_now() -> str:
 
 
 def build_meta(name: str, soapfl_dir: str, config: str, model: str, lenient: bool, seed: int,
-               patches_dir: str) -> dict:
-    llm_env = {k: v for k, v in os.environ.items() if k.startswith("SOAPFL_") and "KEY" not in k}
-    return {
+               patches_dir: str, pipeline: str = "soapfl") -> dict:
+    llm_env = {k: v for k, v in os.environ.items()
+               if k.startswith("SOAPFL_") and "KEY" not in k and k not in ("SOAPFL_UDS", "SOAPFL_HD_CONFIG_DIR")}
+    meta = {
         "name": name,
+        "pipeline": pipeline,
         "created": _utc_now(),
         "soapfl_commit": soapfl_commit(soapfl_dir),
         "patch_digest": patch_digest(patches_dir),
@@ -103,6 +108,10 @@ def build_meta(name: str, soapfl_dir: str, config: str, model: str, lenient: boo
         "python": sys.version.split()[0],
         "host": platform.node(),
     }
+    if pipeline == "hypodeduce":
+        from .hypodeduce.config import prompts_digest
+        meta["hypodeduce_prompts_digest"] = prompts_digest()
+    return meta
 
 
 class MetaMismatch(RuntimeError):
@@ -121,6 +130,9 @@ def check_or_write_meta(out_dir: str, meta: dict, allow_change: bool = False) ->
     for key in ("config", "model_type", "lenient", "seed"):
         if old.get(key) != meta.get(key):
             problems.append(f"{key}: was {old.get(key)!r}, now {meta.get(key)!r}")
+    for key, default in (("pipeline", "soapfl"), ("hypodeduce_prompts_digest", None)):
+        if old.get(key, default) != meta.get(key, default):
+            problems.append(f"{key}: was {old.get(key, default)!r}, now {meta.get(key, default)!r}")
     for key in META_GUARDED_ENV:
         a, b = old.get("llm_env", {}).get(key), meta.get("llm_env", {}).get(key)
         if a != b:
@@ -149,7 +161,11 @@ class Runner:
                  model: str = "LOCAL", lenient: bool = True, seed: int = 0, jobs: int = 1,
                  timeout: int = 3600, retries: int = 1, python: Optional[str] = None,
                  defects4j_home: Optional[str] = None, patches_dir: Optional[str] = None,
-                 allow_meta_change: bool = False, heartbeat: float = 60.0, progress: Callable[[str], None] = print):
+                 allow_meta_change: bool = False, heartbeat: float = 60.0, progress: Callable[[str], None] = print,
+                 pipeline: str = "soapfl"):
+        if pipeline not in PIPELINES:
+            raise ValueError(f"unknown pipeline {pipeline!r}; use one of {PIPELINES}")
+        self.pipeline = pipeline
         self.name = name
         self.out_dir = os.path.abspath(os.path.join(results_dir, name))
         self.soapfl_dir = os.path.abspath(soapfl_dir)
@@ -183,10 +199,15 @@ class Runner:
         })
         if self.defects4j_home:
             env["PATH"] = os.path.join(self.defects4j_home, "framework", "bin") + os.pathsep + env.get("PATH", "")
+        if self.pipeline == "hypodeduce":
+            env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            env["SOAPFL_HD_CONFIG_DIR"] = os.path.join(self.out_dir, "_hypodeduce_config")
+            env["SOAPFL_DIR"] = self.soapfl_dir
         return env
 
     def _command(self, bug: Bug) -> List[str]:
-        return [self.python, "run.py", "--config", self.config, "--version", VERSION,
+        entry = ["-m", "fl_tools.hypodeduce.soapfl_entry"] if self.pipeline == "hypodeduce" else ["run.py"]
+        return [self.python, *entry, "--config", self.config, "--version", VERSION,
                 "--project", bug.project, "--bugID", str(bug.id), "--output", self.out_dir,
                 "--model", self.model]
 
@@ -283,8 +304,12 @@ class Runner:
     def run(self, bugs: List[Bug]) -> dict:
         os.makedirs(self.out_dir, exist_ok=True)
         meta = build_meta(self.name, self.soapfl_dir, self.config, self.model, self.lenient, self.seed,
-                          self.patches_dir)
+                          self.patches_dir, self.pipeline)
         check_or_write_meta(self.out_dir, meta, self.allow_meta_change)
+        if self.pipeline == "hypodeduce":
+            # the exact chain and prompts used, kept with the results (written once, before the workers start)
+            from .hypodeduce.config import build_configs
+            build_configs(self.soapfl_dir, os.path.join(self.out_dir, "_hypodeduce_config"))
 
         todo = [b for b in bugs if not self.is_finished(b)]
         skipped = len(bugs) - len(todo)
