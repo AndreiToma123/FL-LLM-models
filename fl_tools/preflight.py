@@ -192,7 +192,8 @@ def check_endpoint(base_url: Optional[str], model: Optional[str], api_key: str =
         try:
             reply = _http_json(base_url + "/chat/completions", {
                 "model": model, "max_tokens": 64, "temperature": 0,
-                "messages": [{"role": "user", "content": "Reply with the single word: ready"}]}, api_key)
+                "messages": [{"role": "user", "content": "Reply with the single word: ready"}]}, api_key,
+                timeout=600)   # the first call loads the model into memory, which can take minutes
             text = (reply["choices"][0]["message"].get("content") or "").strip()
             if text:
                 out.append(("ok", "chat", f"test completion works (reply: {text[:40]!r})"))
@@ -201,7 +202,8 @@ def check_endpoint(base_url: Optional[str], model: Optional[str], api_key: str =
                             "answering, it may use up the token budget; try the extra_body setting in "
                             "configs/models.json (reasoning_effort / think) or a non-thinking model"))
         except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
-            out.append(("fail", "chat", f"test completion failed: {exc}"))
+            out.append(("fail", "chat", f"test completion failed: {exc}. If the model was still loading, run the same "
+                                        f"command again (it is usually fast the second time)"))
     return out
 
 

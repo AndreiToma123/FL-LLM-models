@@ -49,8 +49,9 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
     if skip_preflight:
         progress("[3/5] preflight skipped")
     else:
+        progress("[3/5] preflight (the first model call loads the model into memory and can take a few minutes) ...")
         checks = run_preflight(soapfl_dir, python, defects4j_home)
-        progress("[3/5] preflight\n" + format_checks(checks))
+        progress(format_checks(checks))
         if any(c[0] == "fail" for c in checks):
             progress("preflight failed; fix the lines marked [FAIL] and run the same command again")
             return 1

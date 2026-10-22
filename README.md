@@ -67,12 +67,12 @@ No cluster needed. Ollama runs the model on your machine (it uses your GPU); Doc
 ### Running one model, start to finish (one command)
 
 ```powershell
-.\run-experiment.ps1 qwen25coder      # main baseline, 100 bugs
-.\run-experiment.ps1 llama31          # comparison
-.\run-experiment.ps1 qwen35 -N 10     # newer Qwen: try 10 bugs first, it may "think" and be slow
+.\run-experiment.cmd qwen25coder      # main baseline, 100 bugs
+.\run-experiment.cmd llama31          # comparison
+.\run-experiment.cmd qwen35 -N 10     # newer Qwen: try 10 bugs first, it may "think" and be slow
 ```
 Add `-Push` to also commit and push the finished `reports/` folder. `-N` sets the number of bugs, `-Jobs` the parallel
-bugs (default 2). If PowerShell refuses to run the script: `powershell -ExecutionPolicy Bypass -File .\run-experiment.ps1 qwen25coder`.
+bugs (default 2). The `.cmd` file just starts the `.ps1` script with PowerShell's script block lifted, so it works even if PowerShell blocks scripts.
 
 What the command does by itself:
 1. Finds the installed Ollama model of that family and **creates a variant with the right context size** (16384) through

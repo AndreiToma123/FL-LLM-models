@@ -6,7 +6,7 @@
     .\run-experiment.ps1 qwen35 -N 10           # quick 10-bug try first (this model may be slow)
     .\run-experiment.ps1 llama31 -Push          # also commit and push the finished reports to GitHub
 
-  If PowerShell refuses to run scripts:  powershell -ExecutionPolicy Bypass -File .\run-experiment.ps1 qwen25coder
+  Easiest: use  .\run-experiment.cmd qwen25coder  (same thing, works even when PowerShell blocks scripts)
   If it stops (sleep, Ctrl+C, crash), run the same command again: finished bugs are skipped.
   Model names: see configs\models.json, or run:  docker compose run --rm soapfl python -m fl_tools models
 #>
@@ -31,12 +31,12 @@ if (-not (Test-Path ".env")) {
 
 # keep Windows from going to sleep while this script runs (released automatically when it ends)
 Add-Type -Namespace Win -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
-[void][Win.Power]::SetThreadExecutionState(0x80000001)   # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+[void][Win.Power]::SetThreadExecutionState([uint32]2147483649)   # ES_CONTINUOUS | ES_SYSTEM_REQUIRED (0x80000001)
 
 docker compose run --rm soapfl python -m fl_tools experiment $Model --n $N --jobs $Jobs
 $code = $LASTEXITCODE
 
-[void][Win.Power]::SetThreadExecutionState(0x80000000)   # back to normal
+[void][Win.Power]::SetThreadExecutionState([uint32]2147483648)   # back to normal (0x80000000)
 
 if ($code -ne 0) {
     Write-Host "`nThe experiment did not finish (exit code $code). Read the messages above, fix the cause, and run the same command again to resume." -ForegroundColor Yellow
