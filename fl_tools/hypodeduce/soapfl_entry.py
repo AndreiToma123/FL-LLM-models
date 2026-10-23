@@ -20,7 +20,7 @@ def main(argv=None) -> None:
     os.chdir(soapfl_dir)
     sys.path.insert(0, soapfl_dir)
 
-    from fl_tools.hypodeduce.config import build_configs
+    from fl_tools.hypodeduce.config import build_configs, existing_configs
 
     import chatdev.phase as phase_module
     from fl_tools.hypodeduce import phases
@@ -28,8 +28,10 @@ def main(argv=None) -> None:
         setattr(phase_module, name, getattr(phases, name))
 
     import run as soapfl_run
-    config_root = os.environ.get("SOAPFL_HD_CONFIG_DIR") or tempfile.mkdtemp(prefix="hypodeduce-")
-    paths = build_configs(soapfl_dir, config_root)
+    config_root = os.environ.get("SOAPFL_HD_CONFIG_DIR")
+    # the runner writes the configs once before starting the workers; only build them when run on its own
+    paths = (existing_configs(config_root) if config_root else None) or \
+        build_configs(soapfl_dir, config_root or tempfile.mkdtemp(prefix="hypodeduce-"))
     soapfl_run.get_config = lambda company: paths
     sys.argv = [os.path.join(soapfl_dir, "run.py")] + argv
     soapfl_run.main()

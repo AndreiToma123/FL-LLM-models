@@ -19,6 +19,8 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
     p.add_argument("--exclude", default="", help="same syntax as --bugs")
     p.add_argument("--include-deprecated", action="store_true",
                    help="include the 7 IDs SoapFL's run_all.py skips (395 bugs instead of 388)")
+    p.add_argument("--subset-of", type=int, default=0,
+                   help="draw --pilot N from the stratified sample of this size (e.g. 100 = the baseline bugs)")
 
 
 def _add_pipeline(p: argparse.ArgumentParser) -> None:
@@ -37,7 +39,8 @@ def _hd_args(args) -> dict:
 
 
 def _select(args):
-    return select_bugs(args.bugs, args.pilot, args.sample_seed, args.exclude, args.include_deprecated)
+    return select_bugs(args.bugs, args.pilot, args.sample_seed, args.exclude, args.include_deprecated,
+                       subset_of=args.subset_of)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("model", help="preset name from configs/models.json (see `models`)")
     p.add_argument("--n", type=int, default=100, help="number of bugs (stratified sample, same bugs every time)")
     p.add_argument("--select", default="", help="explicit bugs instead of a sample, e.g. Lang-1,Math-3")
+    p.add_argument("--subset-of", type=int, default=0,
+                   help="take the --n bugs from the stratified sample of this size (100 = the baseline bugs)")
     p.add_argument("--jobs", type=int, default=2)
     p.add_argument("--name", default=None, help="run name (default: run<N>-<model>)")
     p.add_argument("--tag", default=None, help="exact Ollama tag if several are installed")
@@ -109,10 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reports-dir", default=os.path.join(ROOT, "reports"))
     p.add_argument("--python", default=None)
     p.add_argument("--defects4j-home", default=None)
-    p.add_argument("--timeout", type=int, default=3600)
+    p.add_argument("--timeout", type=int, default=None,
+                   help="seconds per bug attempt (default 3600; 10800 for --pipeline hypodeduce)")
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument("--presets", default=None)
     _add_pipeline(p)
+
+    p = sub.add_parser("compare", help="two runs on their common bugs: Top-N, McNemar test, cost")
+    p.add_argument("run_a")
+    p.add_argument("run_b")
+    p.add_argument("--soapfl-dir", default=DEFAULT_SOAPFL)
+    p.add_argument("--out", default=None, help="also write the table to this markdown file")
 
     p = sub.add_parser("export", help="copy summaries/results of a run (no checkouts) to a folder")
     p.add_argument("run_dir")
@@ -173,7 +185,7 @@ def main(argv=None) -> int:
                               reports_dir=args.reports_dir, python=args.python,
                               defects4j_home=args.defects4j_home, timeout=args.timeout,
                               skip_preflight=args.skip_preflight, presets_path=args.presets,
-                              pipeline=args.pipeline, hd=_hd_args(args))
+                              pipeline=args.pipeline, hd=_hd_args(args), subset_of=args.subset_of)
 
     if args.cmd == "list-bugs":
         bugs = _select(args)
@@ -228,6 +240,19 @@ def main(argv=None) -> int:
         print(f"done: {summary['status_counts']} (already finished: {summary['skipped_finished']})")
         print(f"next: python -m fl_tools score {summary['out_dir']} && "
               f"python -m fl_tools funnel {summary['out_dir']}")
+        return 0
+
+    if args.cmd == "compare":
+        from .compare import compare_runs, format_markdown
+        for d in (args.run_a, args.run_b):
+            if not os.path.isdir(d):
+                print(f"no such run folder: {d}", file=sys.stderr)
+                return 2
+        md = format_markdown(compare_runs(args.run_a, args.run_b, args.soapfl_dir))
+        print(md)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(md + "\n")
         return 0
 
     if args.cmd in ("score", "funnel", "export", "ties") and not os.path.isdir(args.run_dir):

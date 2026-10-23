@@ -133,12 +133,18 @@ def stratified_sample(bugs: Sequence[Bug], n: int, seed: int = 0) -> List[Bug]:
 
 
 def select_bugs(bugs_spec: str = "", pilot: int = 0, seed: int = 0, exclude: str = "",
-                include_deprecated: bool = False) -> List[Bug]:
-    """Resolve CLI selection flags to a bug list."""
+                include_deprecated: bool = False, subset_of: int = 0) -> List[Bug]:
+    """Resolve CLI selection flags to a bug list.
+
+    subset_of: draw the pilot sample from the stratified sample of that size (e.g. 10 bugs out of the
+    same 100 the baselines used), so small runs can be compared bug by bug with the big ones.
+    """
     bugs = parse_bugs(bugs_spec, include_deprecated) if bugs_spec else all_bugs(include_deprecated)
     if exclude:
         drop = set(parse_bugs(exclude, include_deprecated=True))
         bugs = [b for b in bugs if b not in drop]
+    if subset_of:
+        bugs = stratified_sample(bugs, subset_of, seed)
     if pilot:
         bugs = stratified_sample(bugs, pilot, seed)
     return bugs

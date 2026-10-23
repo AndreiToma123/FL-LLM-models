@@ -36,7 +36,7 @@ FAILURE_PATTERNS = [
     ("score_parse", r"Invalid Method Review Conclusion"),
     ("no_failing_test_output", r"parse_test_report|failing_tests"),
     ("auth_error", r"AuthenticationError|invalid_api_key|Incorrect API key"),
-    ("model_not_found", r"NotFoundError|model .{0,80} does not exist"),
+    ("model_not_found", r"(?<![A-Za-z])NotFoundError|model .{0,80} does not exist"),   # not FileNotFoundError
     ("rate_limited", r"RateLimitError"),
     ("server_unreachable", r"APIConnectionError|APITimeoutError|Connection error|Connection refused|Max retries exceeded|Read timed out"),
     ("defects4j_missing", r"No such file or directory: 'defects4j'|defects4j: (command )?not found"),

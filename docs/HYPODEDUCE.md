@@ -44,7 +44,7 @@ the hypothesis and the class differ slightly from SoapFL's, so results are close
 Local (Docker + Ollama), from the repo folder:
 
 ```powershell
-.\run-experiment.cmd qwen25coder -HypoDeduce -N 10      # first 10 bugs: check cost and that it works
+.\run-experiment.cmd qwen25coder -HypoDeduce -M 3 -N 10 -SubsetOf 100   # 10 of the 100 baseline bugs
 .\run-experiment.cmd qwen25coder -HypoDeduce            # the same 100 bugs as the SoapFL baseline
 .\run-experiment.cmd qwen25coder -HypoDeduce -H 3 -C 3  # another setting (RQ2 material)
 ```
@@ -58,6 +58,31 @@ ties, per-bug results). Each bug's `result.json` additionally contains a `hypode
 method, its supporting hypotheses and scores. `events.jsonl` has `hd_*` events. The exact prompts used are
 saved in the run folder (`_hypodeduce_config/`), and their hash is in `run_meta.json`; a run cannot be resumed
 with different H, C or prompts.
+
+## First real run (2026-10-23, 10 bugs, qwen2.5-coder 7B, H = C = 5, no method cap)
+
+* 8 bugs produced a ranking (1 infrastructure crash from a config-file race, fixed since; 1 known Mockito crash).
+  Top-1/3/5 = 1/1/5 of 10; the buggy method reached the ranking in 6 bugs.
+* Cost: 2,206 model calls, about 220 per bug (SoapFL about 10); Closure bugs 400-800 calls and about 55 min each.
+  The model keeps many methods per (hypothesis, class), so 150-180 methods per Closure bug get scored.
+* Pattern: retention works (two bugs SoapFL lost before the ranking now reach it), but with many candidates many
+  wrong methods also get 8-10, so the buggy method rarely ends up first. On the 5 bugs shared with the SoapFL
+  baseline: Top-1 2 vs 1, Top-5 3 vs 4 (`python -m fl_tools compare`), far too few bugs to conclude anything.
+* Consequence: use `--hd-methods 3` (our cap; the paper does not give one) and compare on bugs from the baseline
+  sample (`--subset-of 100`).
+
+## Second run (2026-10-23, 10 of the 100 baseline bugs, H = C = 5, method cap M = 3)
+
+* Same 10 bugs as in the SoapFL baseline (`--subset-of 100`); these happen to be hard ones (SoapFL 1/1/1).
+  HypoDeduce Top-1/3/5 = 0/2/3 of 9 (Mockito-18 is the known Mockito crash in both).
+* Recall: the buggy method reaches the final ranking in 7 of 9 bugs vs 2 of 9 for SoapFL (5 vs 0 discordant
+  bugs, exact McNemar p = 0.06). Class misses drop from 4 to 1.
+* Ranking: every buggy method that was scored got 8, as did most other candidates (8 of 9 bugs share their top
+  score). Hypothesis selection by best score then falls back to the first hypothesis, which supported the buggy
+  method in only 3 of 7 bugs. Re-ranking the saved scores with other rules (no hypothesis tier, support count,
+  score sum) did not change Top-1: the 1-10 scores of a 7B model do not separate the candidates.
+* Cost: 111 calls, 249k tokens, 16 min per bug (SoapFL 11 calls, 28k tokens, 3 min).
+* Reading: our HypoDeduce works as a high-recall front end; the final selection is the bottleneck (RQ3).
 
 ## Cost
 

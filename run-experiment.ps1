@@ -7,6 +7,8 @@
     .\run-experiment.ps1 llama31 -Push          # also commit and push the finished reports to GitHub
     .\run-experiment.ps1 qwen25coder -HypoDeduce -N 10          # our HypoDeduce re-implementation (H=5, C=5)
     .\run-experiment.ps1 qwen25coder -HypoDeduce -H 3 -C 3 -N 10   # other numbers of hypotheses / classes
+    .\run-experiment.ps1 qwen25coder -HypoDeduce -M 3 -N 10 -SubsetOf 100
+          # at most 3 methods per (hypothesis, class); the 10 bugs are taken from the 100 baseline bugs
 
   Easiest: use  .\run-experiment.cmd qwen25coder  (same thing, works even when PowerShell blocks scripts)
   If it stops (sleep, Ctrl+C, crash), run the same command again: finished bugs are skipped.
@@ -19,7 +21,9 @@ param(
     [switch]$Push,
     [switch]$HypoDeduce,
     [int]$H = 5,
-    [int]$C = 5
+    [int]$C = 5,
+    [int]$M = 0,
+    [int]$SubsetOf = 0
 )
 
 Set-Location $PSScriptRoot
@@ -41,8 +45,14 @@ Add-Type -Namespace Win -Name Power -MemberDefinition '[DllImport("kernel32.dll"
 $extra = @()
 $suffix = ""
 if ($HypoDeduce) {
-    $extra = @("--pipeline", "hypodeduce", "--hd-hypotheses", "$H", "--hd-classes", "$C")
+    $extra = @("--pipeline", "hypodeduce", "--hd-hypotheses", "$H", "--hd-classes", "$C", "--hd-methods", "$M")
     $suffix = "-hd-h$($H)c$($C)"
+    if ($M -gt 0) { $suffix += "m$M" }
+}
+$size = "$N"
+if ($SubsetOf -gt $N) {
+    $extra += @("--subset-of", "$SubsetOf")
+    $size = "$($N)of$($SubsetOf)"
 }
 docker compose run --rm soapfl python -m fl_tools experiment $Model --n $N --jobs $Jobs @extra
 $code = $LASTEXITCODE
@@ -54,7 +64,7 @@ if ($code -ne 0) {
     exit $code
 }
 
-$report = "reports\run$N-$Model$suffix"
+$report = "reports\run$size-$Model$suffix"
 Write-Host "`nFinished. Open $report\summary.md and $report\funnel.md" -ForegroundColor Green
 if ($Push) {
     git add reports

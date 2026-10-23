@@ -20,7 +20,8 @@ from .score import score_run
 def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int = 2, name: Optional[str] = None,
                    tag: Optional[str] = None, seed: int = 0, sample_seed: int = 0, soapfl_dir: str,
                    results_dir: str, reports_dir: str, python: Optional[str] = None,
-                   defects4j_home: Optional[str] = None, timeout: int = 3600, skip_preflight: bool = False,
+                   defects4j_home: Optional[str] = None, timeout: Optional[int] = None,
+                   skip_preflight: bool = False, subset_of: int = 0,
                    presets_path: Optional[str] = None, pipeline: str = "soapfl", hd: Optional[dict] = None,
                    progress=print) -> int:
     try:
@@ -46,10 +47,15 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
     suffix = ""
     if pipeline == "hypodeduce":
         hd = configure_hypodeduce(hd or {})
-        suffix = f"-hd-h{hd['hypotheses']}c{hd['classes']}"
+        suffix = f"-hd-h{hd['hypotheses']}c{hd['classes']}" + (f"m{hd['methods']}" if hd["methods"] else "")
+        if hd["selection"] != "max":
+            suffix += f"-{hd['selection']}"
         progress("      HypoDeduce: " + ", ".join(f"{k}={v}" for k, v in hd.items()))
-    bugs = select_bugs(select, 0 if select else n, sample_seed)
-    name = name or (f"run{len(bugs)}-{model_key}{suffix}" if not select else f"sel-{model_key}{suffix}")
+    if timeout is None:
+        timeout = 10800 if pipeline == "hypodeduce" else 3600
+    bugs = select_bugs(select, 0 if select else n, sample_seed, subset_of=0 if select else subset_of)
+    size = f"{len(bugs)}of{subset_of}" if subset_of and not select and subset_of > len(bugs) else f"{len(bugs)}"
+    name = name or (f"run{size}-{model_key}{suffix}" if not select else f"sel-{model_key}{suffix}")
     progress(f"[2/5] {len(bugs)} bugs ({', '.join(f'{k} {v}' for k, v in count_by_project(bugs).items())}); "
              f"run name {name}")
 

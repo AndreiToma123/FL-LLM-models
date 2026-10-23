@@ -5,7 +5,8 @@
 #   csc/submit.sh <preset> --n 10             10 bugs (same stratified sample as locally)
 #   csc/submit.sh <preset>                    100 bugs (default)
 #   csc/submit.sh <preset> --select Lang-1,Math-3
-#   csc/submit.sh <preset> --hypodeduce --n 10 [--hd-h 5 --hd-c 5]   our HypoDeduce re-implementation
+#   csc/submit.sh <preset> --hypodeduce --n 10 [--hd-h 5 --hd-c 5 --hd-m 3]   our HypoDeduce re-implementation
+#   add --subset-of 100 to take the --n bugs from the 100 baseline bugs
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
 #
@@ -19,7 +20,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
-PIPELINE=soapfl; HD_H=5; HD_C=5
+PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -34,6 +35,8 @@ while [ $# -gt 0 ]; do
     --hypodeduce) PIPELINE=hypodeduce ;;
     --hd-h) HD_H="$2"; shift ;;
     --hd-c) HD_C="$2"; shift ;;
+    --hd-m) HD_M="$2"; shift ;;
+    --subset-of) SUBSET_OF="$2"; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -62,8 +65,14 @@ ls "$MODEL_DIR"/*.safetensors >/dev/null 2>&1 || die "weights of $HF_REPO missin
 
 PIPELINE_ARGS=""; SUFFIX=""
 if [ "$PIPELINE" = hypodeduce ]; then
-  PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C"
+  PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C --hd-methods $HD_M --timeout 10800"
   SUFFIX="-hd-h${HD_H}c${HD_C}"
+  [ "$HD_M" != 0 ] && SUFFIX="${SUFFIX}m${HD_M}"
+fi
+SIZE="$N"
+if [ "$SUBSET_OF" != 0 ] && [ "$SUBSET_OF" -gt "$N" ]; then
+  PIPELINE_ARGS="$PIPELINE_ARGS --subset-of $SUBSET_OF"
+  SIZE="${N}of${SUBSET_OF}"
 fi
 
 if [ "$SMOKE" = 1 ]; then
@@ -76,7 +85,7 @@ else
   if [ -n "$SELECT" ]; then
     NAME="${NAME:-sel-$PRESET$SUFFIX-csc}"
   else
-    NAME="${NAME:-run$N-$PRESET$SUFFIX-csc}"
+    NAME="${NAME:-run$SIZE-$PRESET$SUFFIX-csc}"
   fi
   PARTITION="${PARTITION:-gpumedium}"
   # generous limit: billing counts elapsed time only; the job stops itself when the bugs are done

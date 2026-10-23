@@ -22,6 +22,13 @@ def prompts_digest() -> str:
     return h.hexdigest()[:16]
 
 
+def existing_configs(dest_root: str):
+    """Paths of configs already written (by the runner, before the workers start), or None."""
+    paths = tuple(os.path.join(dest_root, CONFIG_NAME, n)
+                  for n in ("ChatChainConfig.json", "PhaseConfig.json", "RoleConfig.json"))
+    return paths if all(os.path.exists(p) for p in paths) else None
+
+
 def build_configs(soapfl_dir: str, dest_root: str) -> Tuple[str, str, str]:
     """Write <dest_root>/HypoDeduce/{ChatChainConfig,PhaseConfig,RoleConfig}.json and return their paths.
 
@@ -43,7 +50,7 @@ def build_configs(soapfl_dir: str, dest_root: str) -> Tuple[str, str, str]:
     paths = []
     for name, data in (("ChatChainConfig.json", chain), ("PhaseConfig.json", phases), ("RoleConfig.json", roles)):
         path = os.path.join(out_dir, name)
-        tmp = path + ".tmp"
+        tmp = f"{path}.{os.getpid()}.tmp"     # unique per process: parallel workers must not collide
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, path)      # atomic: parallel workers may read while another writes
