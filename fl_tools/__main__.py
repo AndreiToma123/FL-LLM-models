@@ -131,6 +131,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", action="store_true", help="list the selectors and exit")
     p.add_argument("--reveal-test", action="store_true",
                    help="also report the test part of the split (only once the choices are frozen on dev)")
+    p.add_argument("--judge-model", default=None,
+                   help="model for S5/S2 (default: the source run's SOAPFL_MODEL_NAME from run_meta.json)")
+    p.add_argument("--k", type=int, default=8, help="max candidates the judge sees per bug (default 8)")
+    p.add_argument("--shortlist", choices=["top-tie", "top-k"], default="top-tie",
+                   help="top-tie = the tied top group (SoapFL); top-k = K best raw scores across tiers (HypoDeduce)")
+    p.add_argument("--cache", default=os.path.join(DEFAULT_RESULTS, "judge_cache.jsonl"),
+                   help="judge answer cache (re-runs never repeat a call)")
+    p.add_argument("--jobs", type=int, default=1, help="bugs judged in parallel (1 for Ollama; more on vLLM)")
+    p.add_argument("--check-logprobs", action="store_true",
+                   help="only check whether the endpoint returns log-probabilities (needed for S2) and exit; "
+                        "give the run folder too so the run's model is used")
 
     p = sub.add_parser("compare", help="two runs on their common bugs: Top-N, McNemar test, cost")
     p.add_argument("run_a")
@@ -255,11 +266,38 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "select":
+        from .selection import judges  # noqa: F401  (registers S5, S2, S5+S2)
         from .selection import selectors as sel_registry
+        from .selection.llm import JudgeClient, JudgeError, probe_logprobs
         if args.list:
             for name, sel in sel_registry.REGISTRY.items():
-                print(f"{name:10s} {sel.description}")
+                print(f"{name:10s} {'[model calls] ' if sel.model_calls else ''}{sel.description}")
             return 0
+        names = [n.strip() for n in args.selector.split(",") if n.strip()]
+        model = args.judge_model
+        if not model and args.run_dir and os.path.exists(os.path.join(args.run_dir, "run_meta.json")):
+            import json
+            meta = json.load(open(os.path.join(args.run_dir, "run_meta.json"), encoding="utf-8"))
+            model = (meta.get("llm_env") or {}).get("SOAPFL_MODEL_NAME")
+        model = model or os.environ.get("SOAPFL_MODEL_NAME")
+        needs_model = args.check_logprobs or any(n in sel_registry.REGISTRY and sel_registry.REGISTRY[n].model_calls
+                                                 for n in names)
+        client = None
+        if needs_model:
+            if not model:
+                print("no judge model: give --judge-model or a run folder with run_meta.json", file=sys.stderr)
+                return 2
+            try:
+                client = JudgeClient(model, cache_path=None if args.check_logprobs else args.cache)
+                if args.check_logprobs:
+                    r = probe_logprobs(client)
+                    print(f"endpoint {client.base_url}, model {model}: log-probabilities "
+                          f"{'SUPPORTED' if r['supported'] else 'NOT returned (S2 and S5+S2 cannot run here)'}")
+                    print(f"answer {r['answer']!r}; top tokens {r['top_logprobs']}")
+                    return 0 if r["supported"] else 1
+            except JudgeError as exc:
+                print(exc, file=sys.stderr)
+                return 2
         if not os.path.isdir(args.run_dir):
             print(f"no such run folder: {args.run_dir}", file=sys.stderr)
             return 2
@@ -267,13 +305,21 @@ def main(argv=None) -> int:
         from .selection.split import DEFAULT_SPLIT
         split = None if (args.split or "").lower() == "none" else (args.split or DEFAULT_SPLIT)
         try:
-            out = replay(args.run_dir, [n.strip() for n in args.selector.split(",") if n.strip()], seed=args.seed,
-                         draws=args.draws, split_path=split, out_root=args.out_root, write=not args.no_write,
-                         soapfl_dir=DEFAULT_SOAPFL, reveal_test=args.reveal_test)
+            out = replay(args.run_dir, names, seed=args.seed, draws=args.draws, split_path=split,
+                         out_root=args.out_root, write=not args.no_write, soapfl_dir=DEFAULT_SOAPFL,
+                         reveal_test=args.reveal_test, client=client, k=args.k, shortlist=args.shortlist,
+                         jobs=args.jobs)
         except KeyError as exc:
             print(exc.args[0], file=sys.stderr)
             return 2
+        except (JudgeError, ValueError) as exc:
+            print(f"selection stopped: {exc}", file=sys.stderr)
+            return 2
         print(out["markdown"])
+        if client is not None:
+            st = client.stats
+            print(f"judge: {st['calls']} new calls, {st['cached']} from cache, "
+                  f"{st['prompt_tokens'] + st['completion_tokens']} tokens, {st['seconds']:.0f} s")
         for path in out["written"]:
             print("wrote", path)
         return 0

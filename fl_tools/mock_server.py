@@ -193,11 +193,12 @@ def start_mock_server(port: int = 0,
                 if m.get("role") == "user":
                     last_user = str(m.get("content", ""))
                     break
-            text, reason = reply, finish_reason
+            text, reason, token_logprobs = reply, finish_reason, None
             for pattern, rule in compiled:
                 if pattern.search(last_user):
                     text = rule["reply"]
                     reason = rule.get("finish_reason", finish_reason)
+                    token_logprobs = rule.get("logprobs")     # {token: logprob} for the first output token
                     break
             if think:
                 text = "<think>Let me reason about this first.</think>\n" + text
@@ -214,6 +215,12 @@ def start_mock_server(port: int = 0,
                     "finish_reason": reason,
                 }],
             }
+            if body.get("logprobs") and token_logprobs:
+                top = sorted(token_logprobs.items(), key=lambda kv: -kv[1])[:int(body.get("top_logprobs") or 5)]
+                first = text[:1]
+                payload["choices"][0]["logprobs"] = {"content": [{
+                    "token": first, "logprob": token_logprobs.get(first, top[0][1]),
+                    "top_logprobs": [{"token": t, "logprob": lp} for t, lp in top]}]}
             if not omit_usage:
                 payload["usage"] = {"prompt_tokens": prompt_tokens,
                                     "completion_tokens": completion_tokens,

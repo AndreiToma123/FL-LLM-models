@@ -2,10 +2,11 @@
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 from ..compare import mcnemar_exact
-from . import metrics, selectors
+from . import judges, metrics, prompts, selectors   # judges registers S5, S2, S5+S2
 from .candidates import BugCase, load_cases
 from .split import DEFAULT_SPLIT, load_split, part_of
 
@@ -29,8 +30,33 @@ def _paired(cases, orders_a, orders_b, k=1):
     return {"only_source": only_a, "only_selector": only_b, "p": mcnemar_exact(only_a, only_b)}
 
 
+def _cost(cases: List[BugCase], infos: Dict[str, dict]) -> dict:
+    keys = ("calls", "cached_calls", "tokens", "seconds", "pairs", "draws", "position_inconsistent")
+    tot = {k: 0 for k in keys}
+    judged = 0
+    for c in cases:
+        info = infos.get(c.bug) or {}
+        judged += bool(info.get("shortlist")) and len(info["shortlist"]) > 1
+        for k in keys:
+            tot[k] += info.get(k, 0) or 0
+    tot["seconds"] = round(tot["seconds"], 1)
+    tot["bugs_judged"] = judged
+    tot["calls_per_judged_bug"] = round(tot["calls"] / judged, 1) if judged else 0
+    return tot
+
+
+def _shortlist_oracle(cases: List[BugCase], infos: Dict[str, dict], orders: Dict[str, List[dict]]) -> int:
+    """Top-1 reachable by this selector: the buggy method is in the judged shortlist (or already first)."""
+    n = 0
+    for c in cases:
+        short = set((infos.get(c.bug) or {}).get("shortlist") or [])
+        first = (orders.get(c.bug) or c.candidates or [{}])[:1]
+        n += bool(short & c.truth) or bool(first and first[0].get("method_name") in c.truth)
+    return n
+
+
 def write_run(src_run: str, dest: str, cases: List[BugCase], orders: Dict[str, List[dict]],
-              infos: Dict[str, dict], selector: selectors.Selector, seed: int) -> None:
+              infos: Dict[str, dict], selector: selectors.Selector, seed: int, extra: Optional[dict] = None) -> None:
     """Same layout as an exported run (bugs/<dir>/...), so score/funnel/ties/compare read it unchanged."""
     if os.path.isdir(dest):
         shutil.rmtree(dest)
@@ -41,7 +67,8 @@ def write_run(src_run: str, dest: str, cases: List[BugCase], orders: Dict[str, L
     meta_path = os.path.join(src_run, "run_meta.json")
     meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
     meta["selection"] = {"source_run": os.path.basename(os.path.normpath(src_run)), "selector": selector.name,
-                         "description": selector.description, "seed": seed, "model_calls": selector.model_calls}
+                         "description": selector.description, "seed": seed, "model_calls": selector.model_calls,
+                         **(extra or {})}
     with open(os.path.join(dest, "run_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     for case in cases:
@@ -63,9 +90,12 @@ def write_run(src_run: str, dest: str, cases: List[BugCase], orders: Dict[str, L
 
 def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 2000,
            split_path: Optional[str] = DEFAULT_SPLIT, out_root: Optional[str] = None, write: bool = True,
-           soapfl_dir: Optional[str] = None, reveal_test: bool = False) -> dict:
+           soapfl_dir: Optional[str] = None, reveal_test: bool = False, client=None, k: int = 8,
+           shortlist: str = "top-tie", jobs: int = 1) -> dict:
     """reveal_test=False reports only the dev part of the split: choose selectors and settings on dev, then
-    run once with reveal_test=True. Without a split (e.g. HypoDeduce lists, test-only) everything is shown."""
+    run once with reveal_test=True. Without a split (e.g. HypoDeduce lists, test-only) everything is shown.
+    Model-based selectors (S5, S2, S5+S2) need `client` (a JudgeClient); while the test part is hidden they
+    only judge the dev bugs (test bugs keep the source order), so no GPU time is spent on hidden bugs."""
     cases = load_cases(run_dir, soapfl_dir)
     split = load_split(split_path) if split_path and os.path.exists(split_path) else None
     run_name = os.path.basename(os.path.normpath(run_dir))
@@ -85,11 +115,34 @@ def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 
         }
     for name in selector_names:
         sel = selectors.get(name)
-        orders, infos = {}, {}
-        for c in cases:
-            if c.candidates:
-                orders[c.bug], infos[c.bug] = sel.order(c, seed)
-        entry = {"description": sel.description, "parts": {}}
+        extra = {}
+        if sel.model_calls:
+            if client is None:
+                raise ValueError(f"selector {name} makes model calls: give a model endpoint (see `select --help`)")
+            sel.configure(client, k=k, mode=shortlist)
+            extra = {"judge_model": client.model, "shortlist": shortlist, "k": k, "prompt_version": prompts.version(),
+                     "judged_parts": ["dev"] if report["test_hidden"] else ["all"]}
+        todo = [c for c in cases if c.candidates]
+        if sel.model_calls and report["test_hidden"]:
+            todo = [c for c in todo if part_of(c.bug, split) == "dev"]
+        orders = {c.bug: list(c.candidates) for c in cases if c.candidates}
+        infos = {c.bug: {"not_judged": True} for c in cases if c.candidates} if sel.model_calls else {}
+
+        def one(c):
+            return c.bug, sel.order(c, seed)
+        if sel.model_calls and jobs > 1:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                results = list(pool.map(one, todo))
+        else:
+            results = []
+            for i, c in enumerate(todo, 1):
+                results.append(one(c))
+                if sel.model_calls:
+                    info = results[-1][1][1]
+                    print(f"  [{name}] {i}/{len(todo)} {c.bug}: {info.get('calls', 0)} new calls", flush=True)
+        for bug, (order, info) in results:
+            orders[bug], infos[bug] = order, info
+        entry = {"description": sel.description, "parts": {}, **({"settings": extra} if extra else {})}
         for part in parts:
             sub = _subset(cases, split, part)
             m = metrics.evaluate(sub, orders)
@@ -99,12 +152,17 @@ def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 
             m["gain_vs_random"] = round(m["top1"] - rnd, 2)
             m["oracle_gap_recovered"] = round((m["top1"] - rnd) / (orc - rnd), 3) if orc > rnd else None
             m["mcnemar_top1_vs_source"] = _paired(sub, source_orders, orders, 1)
+            if sel.model_calls:
+                m["cost"] = _cost(sub, infos)
+                m["shortlist_oracle_top1"] = _shortlist_oracle(sub, infos, orders)
             entry["parts"][part] = m
         report["selectors"][name] = entry
         if write:
             dest = os.path.join(out_root, f"{run_name}-sel-{name}")
-            write_run(run_dir, dest, cases, orders, infos, sel, seed)
+            write_run(run_dir, dest, cases, orders, infos, sel, seed, extra)
             report["written"].append(dest)
+    if write:
+        _merge_previous(report, os.path.join(out_root, f"{run_name}-selection.json"))
     report["markdown"] = format_markdown(report)
     if write:
         path = os.path.join(out_root, f"{run_name}-selection.md")
@@ -116,9 +174,27 @@ def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 
     return report
 
 
+def _merge_previous(report: dict, path: str) -> None:
+    """Keep selectors of an earlier replay of the same run (same parts shown) in the summary, so running S5 after
+    S0/S1 does not drop their rows. Rows of the new run win; nothing is merged if the parts differ."""
+    if not os.path.exists(path):
+        return
+    try:
+        old = json.load(open(path, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if list(old.get("parts", {})) != list(report["parts"]) or old.get("seed") != report["seed"]:
+        return
+    merged = {n: e for n, e in old.get("selectors", {}).items() if n not in report["selectors"]}
+    merged.update(report["selectors"])
+    report["selectors"] = merged
+
+
 def format_markdown(r: dict) -> str:
     lines = [f"## Selection replay on {r['run']} ({r['n_bugs']} bugs, seed {r['seed']})", "",
-             "No new model calls for S0/S0r/S1*. Selectors only reorder methods inside the source run's ties.", ""]
+             "S0/S0r/S1* make no model calls and only reorder inside the source run's ties. Model-based selectors "
+             "re-rank a shortlist; with shortlist top-k they may cross score tiers, so the tie oracle is not their "
+             "bound (see 'Top-1 reachable in shortlist').", ""]
     for part, ref in r["parts"].items():
         rnd = ref["random_ties"]
         lines += [f"### {part} ({ref['n']} bugs; infrastructure failures {ref['infra_failures']}; buggy method among "
@@ -138,6 +214,19 @@ def format_markdown(r: dict) -> str:
                          f"{m['gain_vs_source']:+d} | {m['gain_vs_random']:+.1f} | {gap} | "
                          f"{m['mcnemar_top1_vs_source']['p']:.3f} |")
         lines.append("")
+        judged = [(n, e) for n, e in r["selectors"].items() if "cost" in e["parts"][part]]
+        if judged:
+            lines += ["Model-based selectors, cost and reach on this part:", "",
+                      "| Selector | judge model | shortlist (K) | bugs judged | new calls | cached | tokens | GPU seconds | "
+                      "pairs drawn / pairs (position-inconsistent) | Top-1 reachable in shortlist |",
+                      "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+            for n, e in judged:
+                c, st = e["parts"][part]["cost"], e.get("settings", {})
+                pairs = f"{c['draws']} / {c['pairs']} ({c['position_inconsistent']})" if c["pairs"] else ""
+                lines.append(f"| {n} | {st.get('judge_model', '')} | {st.get('shortlist', '')} ({st.get('k', '')}) | "
+                             f"{c['bugs_judged']} | {c['calls']} | {c['cached_calls']} | {c['tokens']} | {c['seconds']} | "
+                             f"{pairs} | {e['parts'][part]['shortlist_oracle_top1']} |")
+            lines.append("")
     lines.append("Selectors: " + "; ".join(f"**{n}** = {e['description']}" for n, e in r["selectors"].items()))
     lines.append("")
     lines.append("A Top-1 inside the random-ties 95% range is not evidence of a better selector.")

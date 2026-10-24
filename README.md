@@ -46,7 +46,8 @@ Both use the same `fl_tools`, SoapFL patch, presets, bug sample and analyses, so
   at least one hypothesis keeps, hypothesis selection. Details and our design choices: [`docs/HYPODEDUCE.md`](docs/HYPODEDUCE.md).
 
 * **Final-selection framework** (RQ3): `python -m fl_tools select reports/<run>` re-ranks the candidate lists a
-  finished run stored, without re-running the pipeline. Details and results: [`docs/SELECTION.md`](docs/SELECTION.md).
+  finished run stored, without re-running the pipeline. Lexical tie-breakers (S1) need no model; the pairwise
+  judge (S5) and the log-prob score (S2, S5+S2) make a few cached calls per bug (Windows: `run-select.cmd`). Details and results: [`docs/SELECTION.md`](docs/SELECTION.md).
 
 ## Any Linux box with a GPU (manual setup)
 

@@ -59,8 +59,43 @@ oracle only 3, S1 0/1/3. The oracle is low because HypoDeduce's ties are inside 
 method is often below all methods of the selected hypothesis, where a tie-breaker cannot reach it. For these
 lists a selector must be allowed to re-rank a shortlist across tiers (next step).
 
-## Next selectors (model-based; see the spec)
+## Model-based selectors: S5 pairwise, then S2 log-prob as a second layer
 
-S2 expected score from log-probabilities, S4 listwise with permutations, S5 pairwise in both orders, run on a
-shortlist of the top candidates; then the same on the HypoDeduce lists with a shortlist that ignores the
-hypothesis tier. These make new model calls (a few per bug) and are cached.
+Code: `fl_tools/selection/judges.py`, prompts `prompts.py` (their hash is stored as `prompt_version`), client
+`llm.py` (same endpoint variables as the pipelines: `SOAPFL_BASE_URL` or `SOAPFL_UDS`).
+
+| Name | What it does | Calls per bug (shortlist of n) |
+|---|---|---|
+| S5 | every pair of shortlisted methods is shown in **both orders** ("A or B?"); a pair is a win only if both answers agree, else a draw. Ranked by Copeland score (wins - losses); remaining ties keep the source order | n(n-1) |
+| S2 | one call per method asks for one digit 0-9; the score is the expected value over the digit tokens' log-probabilities (continuous, so far fewer ties than SoapFL's integer scores) | n |
+| S5+S2 | S5 first; methods still tied on Copeland score are ordered by S2 (computed only for them) | n(n-1) + tied |
+
+Shortlist (`--shortlist`, at most `--k` methods, default 8): `top-tie` = the tied top group of the source
+run (SoapFL lists; only this group decides Top-1), `top-k` = the K best raw scores across HypoDeduce's
+hypothesis tiers. The report adds, per model-based selector: bugs judged, new and cached calls, tokens,
+seconds, drawn pairs and position-inconsistent pairs (both orders answered, but the answers disagree:
+a direct measure of position bias), and how many Top-1 hits the shortlist makes reachable.
+
+Inputs shown to the judge: the failure analysis the source run stored and the method name (without
+package), documentation and code. Never the bug id, the project, the ground truth, or the source run's
+score and reason. Temperature 0, fixed seed; every answer is cached in `results/judge_cache.jsonl`, so
+re-running (or revealing the test part) repeats no call. While the test part is hidden, only the dev bugs
+are judged.
+
+Local (Windows, Docker + Ollama):
+
+```
+run-select.cmd --check-logprobs                                  # does Ollama return log-probs? (needed for S2)
+run-select.cmd reports/run100-qwen25coder --selector S5          # dev only: 35 bugs, about 408 short calls
+run-select.cmd reports/run100-qwen25coder --selector S5+S2       # adds about 120 calls at most, cached S5 reused
+run-select.cmd reports/run100-qwen25coder --selector S0,S1,S5,S5+S2 --reveal-test   # once, choices frozen
+run-select.cmd reports/run10of100-qwen25coder-hd-h5c5m3 --split none --shortlist top-k --selector S5,S5+S2
+```
+
+Cost estimate for the baseline (top-tie, K = 8): dev 35 judged bugs, 408 S5 calls and at most 123 S2
+calls; all 100 bugs 65 judged, 762 S5 calls, at most 226 S2 calls. Prompts are about 1.7k tokens and the
+answer 1-2 tokens, so a call costs about the prompt processing time. K = 8 loses no reachable hit on the
+baseline (shortlist reach = tie oracle: 27 dev, 48 all).
+
+If the endpoint returns no log-probabilities, S2 and S5+S2 stop with a clear message; S5 still runs.
+vLLM on CSC returns them.
