@@ -120,6 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--presets", default=None)
     _add_pipeline(p)
 
+    p = sub.add_parser("select", help="RQ3: replay final-selection strategies on a finished run's candidate lists")
+    p.add_argument("run_dir", nargs="?", default="")
+    p.add_argument("--selector", default="S0,S0r,S1,S1-body", help="comma list; see `select --list`")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--draws", type=int, default=2000, help="random tie orders for the S0r expectation")
+    p.add_argument("--split", default=None, help="dev/test split file (default configs/selection_split.json; 'none' = off)")
+    p.add_argument("--out-root", default=None, help="where to write <run>-sel-<selector>/ (default: next to the run)")
+    p.add_argument("--no-write", action="store_true")
+    p.add_argument("--list", action="store_true", help="list the selectors and exit")
+    p.add_argument("--reveal-test", action="store_true",
+                   help="also report the test part of the split (only once the choices are frozen on dev)")
+
     p = sub.add_parser("compare", help="two runs on their common bugs: Top-N, McNemar test, cost")
     p.add_argument("run_a")
     p.add_argument("run_b")
@@ -240,6 +252,30 @@ def main(argv=None) -> int:
         print(f"done: {summary['status_counts']} (already finished: {summary['skipped_finished']})")
         print(f"next: python -m fl_tools score {summary['out_dir']} && "
               f"python -m fl_tools funnel {summary['out_dir']}")
+        return 0
+
+    if args.cmd == "select":
+        from .selection import selectors as sel_registry
+        if args.list:
+            for name, sel in sel_registry.REGISTRY.items():
+                print(f"{name:10s} {sel.description}")
+            return 0
+        if not os.path.isdir(args.run_dir):
+            print(f"no such run folder: {args.run_dir}", file=sys.stderr)
+            return 2
+        from .selection.replay import replay
+        from .selection.split import DEFAULT_SPLIT
+        split = None if (args.split or "").lower() == "none" else (args.split or DEFAULT_SPLIT)
+        try:
+            out = replay(args.run_dir, [n.strip() for n in args.selector.split(",") if n.strip()], seed=args.seed,
+                         draws=args.draws, split_path=split, out_root=args.out_root, write=not args.no_write,
+                         soapfl_dir=DEFAULT_SOAPFL, reveal_test=args.reveal_test)
+        except KeyError as exc:
+            print(exc.args[0], file=sys.stderr)
+            return 2
+        print(out["markdown"])
+        for path in out["written"]:
+            print("wrote", path)
         return 0
 
     if args.cmd == "compare":

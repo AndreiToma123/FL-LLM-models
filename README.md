@@ -45,6 +45,9 @@ Both use the same `fl_tools`, SoapFL patch, presets, bug sample and analyses, so
   prompts) and only changes the control flow: several hypotheses, C classes per hypothesis, retention of anything
   at least one hypothesis keeps, hypothesis selection. Details and our design choices: [`docs/HYPODEDUCE.md`](docs/HYPODEDUCE.md).
 
+* **Final-selection framework** (RQ3): `python -m fl_tools select reports/<run>` re-ranks the candidate lists a
+  finished run stored, without re-running the pipeline. Details and results: [`docs/SELECTION.md`](docs/SELECTION.md).
+
 ## Any Linux box with a GPU (manual setup)
 
 ```bash
