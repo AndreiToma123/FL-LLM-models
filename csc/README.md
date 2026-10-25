@@ -52,6 +52,9 @@ csc/submit.sh qwen25coder --smoke     # 1 bug (Lang-1) on gputest, at most 15 mi
 csc/submit.sh qwen25coder --n 10      # 10 bugs (same stratified sample as locally)
 csc/submit.sh qwen25coder             # 100 bugs
 csc/submit.sh qwen25coder32           # the 32B coder model (download it first)
+csc/submit.sh qwen25coder --n all                          # all 388 Defects4J 1.4.0 bugs (dataset 1)
+csc/submit.sh qwen25coder --smoke --dataset d4j2new        # 1 bug (Cli-1) of dataset 2
+csc/submit.sh qwen25coder --dataset d4j2new --n all        # all 444 bugs Defects4J 2.0 added (dataset 2)
 squeue --me                           # is it running?
 tail -f /scratch/project_2021789/$USER/fl/logs/fl-<run>-<jobid>.out
 ```

@@ -42,7 +42,7 @@ def check_patch_applied(soapfl_dir: str) -> List[Check]:
                               f"`git -C {soapfl_dir} apply patches/0001-open-model-support.patch`")]
 
 
-def check_defects4j(defects4j_home: Optional[str]) -> List[Check]:
+def check_defects4j(defects4j_home: Optional[str], project: str = "Lang") -> List[Check]:
     out: List[Check] = []
     exe = shutil.which("defects4j")
     if defects4j_home:
@@ -54,11 +54,11 @@ def check_defects4j(defects4j_home: Optional[str]) -> List[Check]:
     env = os.environ.copy()
     env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
     try:
-        proc = subprocess.run([exe, "info", "-p", "Lang"], capture_output=True, text=True, timeout=120, env=env)
+        proc = subprocess.run([exe, "info", "-p", project], capture_output=True, text=True, timeout=120, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [("fail", "defects4j", f"could not run {exe}: {exc}")]
     if proc.returncode != 0:
-        out.append(("fail", "defects4j", f"`defects4j info -p Lang` failed: {proc.stderr.strip()[:200]}"))
+        out.append(("fail", "defects4j", f"`defects4j info -p {project}` failed: {proc.stderr.strip()[:200]}"))
     else:
         out.append(("ok", "defects4j", f"works ({exe})"))
     return out
@@ -77,10 +77,10 @@ def check_java() -> List[Check]:
                              f"may fail at compile/test time")]
 
 
-def check_overlay(soapfl_dir: str, defects4j_home: Optional[str]) -> List[Check]:
+def check_overlay(soapfl_dir: str, defects4j_home: Optional[str], version: Optional[str] = None) -> List[Check]:
     """SoapFL ships Defects4J_mod, which must be copied over the Defects4J install."""
     from .bugs import VERSION
-    overlay = os.path.join(soapfl_dir, "Defects4J_mod", f"defects4j-{VERSION}-jvm-mod")
+    overlay = os.path.join(soapfl_dir, "Defects4J_mod", f"defects4j-{version or VERSION}-jvm-mod")
     if not os.path.isdir(overlay):
         return [("fail", "overlay", f"no {overlay}: SoapFL ships overlays only for Defects4J 1.4.0 and 2.0.0")]
     if not defects4j_home or not os.path.isdir(defects4j_home):
@@ -244,8 +244,14 @@ def check_endpoint(base_url: Optional[str], model: Optional[str], api_key: str =
 
 
 def run_preflight(soapfl_dir: str, python: Optional[str] = None, defects4j_home: Optional[str] = None,
-                  skip_endpoint: bool = False, skip_defects4j: bool = False) -> List[Check]:
-    defects4j_home = defects4j_home or os.environ.get("DEFECTS4J_HOME")
+                  skip_endpoint: bool = False, skip_defects4j: bool = False, dataset: str = "d4j14") -> List[Check]:
+    from .bugs import DATASETS
+    from .bugs import defects4j_home as dataset_home
+    spec = DATASETS[dataset]
+    if dataset == "d4j14":
+        defects4j_home = defects4j_home or os.environ.get("DEFECTS4J_HOME")
+    else:
+        defects4j_home = defects4j_home or dataset_home(dataset)
     checks: List[Check] = []
     if not os.path.isdir(soapfl_dir):
         return [("fail", "soapfl", f"{soapfl_dir} does not exist: run scripts/setup_soapfl.sh")]
@@ -254,8 +260,8 @@ def run_preflight(soapfl_dir: str, python: Optional[str] = None, defects4j_home:
     checks += check_python_modules(python)
     if not skip_defects4j:
         checks += check_java()
-        checks += check_defects4j(defects4j_home)
-        checks += check_overlay(soapfl_dir, defects4j_home)
+        checks += check_defects4j(defects4j_home, next(iter(spec["table"])) if dataset != "d4j14" else "Lang")
+        checks += check_overlay(soapfl_dir, defects4j_home, spec["version"])
     checks += check_tiktoken_cache()
     if not skip_endpoint:
         base = os.environ.get("SOAPFL_BASE_URL") or os.environ.get("OPENAI_BASE_URL") \

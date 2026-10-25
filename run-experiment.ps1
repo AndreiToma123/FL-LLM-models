@@ -9,6 +9,7 @@
     .\run-experiment.ps1 qwen25coder -HypoDeduce -H 3 -C 3 -N 10   # other numbers of hypotheses / classes
     .\run-experiment.ps1 qwen25coder -HypoDeduce -M 3 -N 10 -SubsetOf 100
           # at most 3 methods per (hypothesis, class); the 10 bugs are taken from the 100 baseline bugs
+    .\run-experiment.ps1 qwen25coder -Dataset d4j2new -N 12   # dataset 2 (Defects4J 2.0 new bugs): 1 bug per project
 
   Easiest: use  .\run-experiment.cmd qwen25coder  (same thing, works even when PowerShell blocks scripts)
   If it stops (sleep, Ctrl+C, crash), run the same command again: finished bugs are skipped.
@@ -23,7 +24,8 @@ param(
     [int]$H = 5,
     [int]$C = 5,
     [int]$M = 0,
-    [int]$SubsetOf = 0
+    [int]$SubsetOf = 0,
+    [ValidateSet("d4j14", "d4j2new")][string]$Dataset = "d4j14"
 )
 
 Set-Location $PSScriptRoot
@@ -48,6 +50,10 @@ if ($HypoDeduce) {
     $extra = @("--pipeline", "hypodeduce", "--hd-hypotheses", "$H", "--hd-classes", "$C", "--hd-methods", "$M")
     $suffix = "-hd-h$($H)c$($C)"
     if ($M -gt 0) { $suffix += "m$M" }
+}
+if ($Dataset -ne "d4j14") {
+    $extra += @("--dataset", $Dataset)
+    $suffix += "-$Dataset"
 }
 $size = "$N"
 if ($SubsetOf -gt $N) {

@@ -23,7 +23,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
                    defects4j_home: Optional[str] = None, timeout: Optional[int] = None,
                    skip_preflight: bool = False, subset_of: int = 0,
                    presets_path: Optional[str] = None, pipeline: str = "soapfl", hd: Optional[dict] = None,
-                   progress=print) -> int:
+                   dataset: str = "d4j14", progress=print) -> int:
     try:
         presets = load_presets(presets_path)
         if model_key not in presets:
@@ -53,7 +53,9 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
         progress("      HypoDeduce: " + ", ".join(f"{k}={v}" for k, v in hd.items()))
     if timeout is None:
         timeout = 10800 if pipeline == "hypodeduce" else 3600
-    bugs = select_bugs(select, 0 if select else n, sample_seed, subset_of=0 if select else subset_of)
+    bugs = select_bugs(select, 0 if select else n, sample_seed, subset_of=0 if select else subset_of, dataset=dataset)
+    if dataset != "d4j14":
+        suffix += f"-{dataset}"
     size = f"{len(bugs)}of{subset_of}" if subset_of and not select and subset_of > len(bugs) else f"{len(bugs)}"
     name = name or (f"run{size}-{model_key}{suffix}" if not select else f"sel-{model_key}{suffix}")
     progress(f"[2/5] {len(bugs)} bugs ({', '.join(f'{k} {v}' for k, v in count_by_project(bugs).items())}); "
@@ -63,7 +65,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
         progress("[3/5] preflight skipped")
     else:
         progress("[3/5] preflight (the first model call loads the model into memory and can take a few minutes) ...")
-        checks = run_preflight(soapfl_dir, python, defects4j_home)
+        checks = run_preflight(soapfl_dir, python, defects4j_home, dataset=dataset)
         progress(format_checks(checks))
         if any(c[0] == "fail" for c in checks):
             progress("preflight failed; fix the lines marked [FAIL] and run the same command again")

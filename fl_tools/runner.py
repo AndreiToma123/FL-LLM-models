@@ -26,7 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
-from .bugs import VERSION, Bug
+from .bugs import VERSION, Bug, dataset_of_version
+from .bugs import defects4j_home as dataset_defects4j_home
 from .results import snapshot_ground_truth
 
 # (class, regex searched in the tail of the run log), first match wins
@@ -130,7 +131,7 @@ def check_or_write_meta(out_dir: str, meta: dict, allow_change: bool = False) ->
     for key in ("config", "model_type", "lenient", "seed"):
         if old.get(key) != meta.get(key):
             problems.append(f"{key}: was {old.get(key)!r}, now {meta.get(key)!r}")
-    for key, default in (("pipeline", "soapfl"), ("hypodeduce_prompts_digest", None)):
+    for key, default in (("pipeline", "soapfl"), ("hypodeduce_prompts_digest", None), ("dataset", None)):
         if old.get(key, default) != meta.get(key, default):
             problems.append(f"{key}: was {old.get(key, default)!r}, now {meta.get(key, default)!r}")
     for key in META_GUARDED_ENV:
@@ -172,6 +173,7 @@ class Runner:
         self.config, self.model, self.lenient, self.seed = config, model, lenient, seed
         self.jobs, self.timeout, self.retries = max(1, jobs), timeout, retries
         self.python = python or sys.executable
+        self.defects4j_home_override = defects4j_home       # explicit --defects4j-home wins for every bug
         self.defects4j_home = defects4j_home or os.environ.get("DEFECTS4J_HOME")
         self.patches_dir = patches_dir or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "patches")
         self.allow_meta_change = allow_meta_change
@@ -197,17 +199,27 @@ class Runner:
             "PYTHONHASHSEED": "0",
             "PYTHONUNBUFFERED": "1",
         })
-        if self.defects4j_home:
-            env["PATH"] = os.path.join(self.defects4j_home, "framework", "bin") + os.pathsep + env.get("PATH", "")
+        home = self.defects4j_home_for(bug)
+        if home:
+            env["PATH"] = os.path.join(home, "framework", "bin") + os.pathsep + env.get("PATH", "")
+            env["DEFECTS4J_HOME"] = home
         if self.pipeline == "hypodeduce":
             env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             env["SOAPFL_HD_CONFIG_DIR"] = os.path.join(self.out_dir, "_hypodeduce_config")
             env["SOAPFL_DIR"] = self.soapfl_dir
         return env
 
+    def defects4j_home_for(self, bug: Bug) -> Optional[str]:
+        """Dataset 1 uses DEFECTS4J_HOME as before; dataset 2 (Defects4J 2.0) its own installation."""
+        if self.defects4j_home_override:
+            return self.defects4j_home_override
+        if bug.version == VERSION:
+            return self.defects4j_home
+        return dataset_defects4j_home(bug.version)
+
     def _command(self, bug: Bug) -> List[str]:
         entry = ["-m", "fl_tools.hypodeduce.soapfl_entry"] if self.pipeline == "hypodeduce" else ["run.py"]
-        return [self.python, *entry, "--config", self.config, "--version", VERSION,
+        return [self.python, *entry, "--config", self.config, "--version", bug.version,
                 "--project", bug.project, "--bugID", str(bug.id), "--output", self.out_dir,
                 "--model", self.model]
 
@@ -302,9 +314,15 @@ class Runner:
 
     # ------------------------------------------------------------------ batch
     def run(self, bugs: List[Bug]) -> dict:
+        versions = sorted({b.version for b in bugs})
+        if len(versions) > 1:
+            raise ValueError(f"one run must stay within one dataset; got Defects4J versions {versions}")
         os.makedirs(self.out_dir, exist_ok=True)
         meta = build_meta(self.name, self.soapfl_dir, self.config, self.model, self.lenient, self.seed,
                           self.patches_dir, self.pipeline)
+        if versions and versions[0] != VERSION:     # dataset 1 runs keep their old metadata unchanged
+            meta["dataset"] = dataset_of_version(versions[0])
+            meta["defects4j_version"] = versions[0]
         check_or_write_meta(self.out_dir, meta, self.allow_meta_change)
         if self.pipeline == "hypodeduce":
             # the exact chain and prompts used, kept with the results (written once, before the workers start)

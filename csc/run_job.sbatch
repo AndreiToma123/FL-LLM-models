@@ -102,7 +102,7 @@ SF=(apptainer exec --cleanenv --writable-tmpfs --env-file "$WORK/soapfl.env"
     --bind="$(csc-common-bind)" --bind="$TMPDIR" --bind="$WORK/cache:/opt/SoapFL/cache"
     --bind="$FL_REPO:/work/repo" --pwd /work/repo "$SOAPFL_SIF")
 
-"${SF[@]}" python -m fl_tools preflight | tee "$JOB_LOGS/preflight.txt"
+"${SF[@]}" python -m fl_tools preflight --dataset "${FL_DATASET:-d4j14}" | tee "$JOB_LOGS/preflight.txt"
 [ "${PIPESTATUS[0]}" = 0 ] || fail "preflight failed (see above)"
 
 if [ -n "$FL_SELECT" ]; then SELECTION=(--bugs "$FL_SELECT")

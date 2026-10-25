@@ -45,6 +45,9 @@ Both use the same `fl_tools`, SoapFL patch, presets, bug sample and analyses, so
   prompts) and only changes the control flow: several hypotheses, C classes per hypothesis, retention of anything
   at least one hypothesis keeps, hypothesis selection. Details and our design choices: [`docs/HYPODEDUCE.md`](docs/HYPODEDUCE.md).
 
+* **Two datasets:** Defects4J 1.4.0 (SoapFL's 388 bugs, default) and the 444 bugs Defects4J 2.0 added
+  (`--dataset d4j2new`, Windows `-Dataset d4j2new`, CSC `--dataset d4j2new`). Details: [`docs/DATASET2.md`](docs/DATASET2.md).
+
 * **Final-selection framework** (RQ3): `python -m fl_tools select reports/<run>` re-ranks the candidate lists a
   finished run stored, without re-running the pipeline. Lexical tie-breakers (S1) need no model; the pairwise
   judge (S5) and the log-prob score (S2, S5+S2) make a few cached calls per bug (Windows: `run-select.cmd`). With the failure

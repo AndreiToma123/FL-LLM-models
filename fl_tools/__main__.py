@@ -21,6 +21,8 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
                    help="include the 7 IDs SoapFL's run_all.py skips (395 bugs instead of 388)")
     p.add_argument("--subset-of", type=int, default=0,
                    help="draw --pilot N from the stratified sample of this size (e.g. 100 = the baseline bugs)")
+    p.add_argument("--dataset", choices=["d4j14", "d4j2new"], default="d4j14",
+                   help="d4j14 = Defects4J 1.4.0 (SoapFL's 388 bugs, default); d4j2new = the 444 bugs Defects4J 2.0 added")
 
 
 def _add_pipeline(p: argparse.ArgumentParser) -> None:
@@ -40,7 +42,7 @@ def _hd_args(args) -> dict:
 
 def _select(args):
     return select_bugs(args.bugs, args.pilot, args.sample_seed, args.exclude, args.include_deprecated,
-                       subset_of=args.subset_of)
+                       subset_of=args.subset_of, dataset=args.dataset)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--defects4j-home", default=None)
     p.add_argument("--skip-endpoint", action="store_true")
     p.add_argument("--skip-defects4j", action="store_true")
+    p.add_argument("--dataset", choices=["d4j14", "d4j2new"], default="d4j14")
 
     p = sub.add_parser("list-bugs", help="print the selected bugs and per-project counts")
     _add_selection(p)
@@ -104,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--select", default="", help="explicit bugs instead of a sample, e.g. Lang-1,Math-3")
     p.add_argument("--subset-of", type=int, default=0,
                    help="take the --n bugs from the stratified sample of this size (100 = the baseline bugs)")
+    p.add_argument("--dataset", choices=["d4j14", "d4j2new"], default="d4j14",
+                   help="d4j14 = Defects4J 1.4.0 (default); d4j2new = the 444 bugs Defects4J 2.0 added")
     p.add_argument("--jobs", type=int, default=2)
     p.add_argument("--name", default=None, help="run name (default: run<N>-<model>)")
     p.add_argument("--tag", default=None, help="exact Ollama tag if several are installed")
@@ -239,7 +244,8 @@ def main(argv=None) -> int:
                               reports_dir=args.reports_dir, python=args.python,
                               defects4j_home=args.defects4j_home, timeout=args.timeout,
                               skip_preflight=args.skip_preflight, presets_path=args.presets,
-                              pipeline=args.pipeline, hd=_hd_args(args), subset_of=args.subset_of)
+                              pipeline=args.pipeline, hd=_hd_args(args), subset_of=args.subset_of,
+                              dataset=args.dataset)
 
     if args.cmd == "list-bugs":
         bugs = _select(args)
@@ -250,7 +256,7 @@ def main(argv=None) -> int:
     if args.cmd == "preflight":
         from .preflight import format_checks, run_preflight
         checks = run_preflight(args.soapfl_dir, args.python, args.defects4j_home,
-                               args.skip_endpoint, args.skip_defects4j)
+                               args.skip_endpoint, args.skip_defects4j, dataset=args.dataset)
         print(format_checks(checks))
         return 1 if any(c[0] == "fail" for c in checks) else 0
 
@@ -270,7 +276,7 @@ def main(argv=None) -> int:
             return 0
         if not args.skip_preflight:
             from .preflight import format_checks, run_preflight
-            checks = run_preflight(args.soapfl_dir, args.python, args.defects4j_home)
+            checks = run_preflight(args.soapfl_dir, args.python, args.defects4j_home, dataset=args.dataset)
             if any(c[0] == "fail" for c in checks):
                 print(format_checks(checks), file=sys.stderr)
                 print("preflight failed (use --skip-preflight to override)", file=sys.stderr)

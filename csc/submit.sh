@@ -7,6 +7,8 @@
 #   csc/submit.sh <preset> --select Lang-1,Math-3
 #   csc/submit.sh <preset> --hypodeduce --n 10 [--hd-h 5 --hd-c 5 --hd-m 3]   our HypoDeduce re-implementation
 #   add --subset-of 100 to take the --n bugs from the 100 baseline bugs
+#   csc/submit.sh <preset> --n all                        all 388 bugs of Defects4J 1.4.0 (dataset 1)
+#   csc/submit.sh <preset> --dataset d4j2new --n all      all 444 bugs Defects4J 2.0 added (dataset 2)
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
 #
@@ -20,7 +22,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
-PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0
+PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --hd-c) HD_C="$2"; shift ;;
     --hd-m) HD_M="$2"; shift ;;
     --subset-of) SUBSET_OF="$2"; shift ;;
+    --dataset) DATASET="$2"; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -69,6 +72,11 @@ if [ "$PIPELINE" = hypodeduce ]; then
   SUFFIX="-hd-h${HD_H}c${HD_C}"
   [ "$HD_M" != 0 ] && SUFFIX="${SUFFIX}m${HD_M}"
 fi
+case "$DATASET" in d4j14|d4j2new) ;; *) die "unknown dataset $DATASET (d4j14 or d4j2new)" ;; esac
+if [ "$DATASET" != d4j14 ]; then
+  PIPELINE_ARGS="$PIPELINE_ARGS --dataset $DATASET"
+  SUFFIX="${SUFFIX}-$DATASET"
+fi
 SIZE="$N"
 if [ "$SUBSET_OF" != 0 ] && [ "$SUBSET_OF" -gt "$N" ]; then
   PIPELINE_ARGS="$PIPELINE_ARGS --subset-of $SUBSET_OF"
@@ -76,7 +84,7 @@ if [ "$SUBSET_OF" != 0 ] && [ "$SUBSET_OF" -gt "$N" ]; then
 fi
 
 if [ "$SMOKE" = 1 ]; then
-  SELECT="${SELECT:-Lang-1}"
+  if [ "$DATASET" = d4j14 ]; then SELECT="${SELECT:-Lang-1}"; else SELECT="${SELECT:-Cli-1}"; fi
   NAME="${NAME:-smoke-$PRESET$SUFFIX-csc}"
   PARTITION="${PARTITION:-gputest}"
   TIME="${TIME:-00:15:00}"
@@ -99,7 +107,7 @@ JOB_ENV="$FL_ROOT/logs/$NAME-$(date +%Y%m%d-%H%M%S).env"
 {
   for v in PRESET:FL_PRESET NAME:FL_RUN N:FL_N SELECT:FL_SELECT JOBS:FL_JOBS SEED:FL_SEED HF_REPO:FL_HF_REPO \
            MODEL_DIR:FL_MODEL_DIR CTX:FL_CTX MAX_TOKENS:FL_MAX_TOKENS EXTRA_BODY:FL_EXTRA_BODY \
-           ENFORCE_EAGER:FL_ENFORCE_EAGER FL_REPO:FL_REPO PIPELINE_ARGS:FL_PIPELINE_ARGS; do
+           ENFORCE_EAGER:FL_ENFORCE_EAGER FL_REPO:FL_REPO PIPELINE_ARGS:FL_PIPELINE_ARGS DATASET:FL_DATASET; do
     src="${v%%:*}"; printf '%s=%q\n' "${v#*:}" "${!src}"
   done
 } > "$JOB_ENV"

@@ -66,7 +66,7 @@ def outer_class(cls: str) -> str:
 
 
 def summarize(tests: List[dict], code: Dict[str, dict], n_failing_total: int, bug: str,
-              source_note: str) -> dict:
+              source_note: str, version: str = VERSION) -> dict:
     """Assemble the per-bug file from per-test facts. Per covered method: how many failing tests ran it and
     the smallest stack depth at which its name appears (0 = top frame; overloads share a name)."""
     methods: Dict[str, dict] = {}
@@ -80,7 +80,7 @@ def summarize(tests: List[dict], code: Dict[str, dict], n_failing_total: int, bu
             d = depth_of.get(method_key(m))
             if d is not None and (e["stack_depth"] is None or d < e["stack_depth"]):
                 e["stack_depth"] = d
-    return {"format": FORMAT, "bug": bug, "version": VERSION, "tool": f"fl_tools {__version__}",
+    return {"format": FORMAT, "bug": bug, "version": version, "tool": f"fl_tools {__version__}",
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "source": source_note,
             "failing_tests_total": n_failing_total, "tests": tests, "methods": methods, "method_code": code}
 
@@ -211,7 +211,7 @@ def gather_bug(bug: Bug, backend, work_root: str, results_root: str, candidate_c
         for t in tests:
             t["covered_methods"] = sorted({inst_to_src.get(i, i) for i in t.pop("covered_methods_inst")})
         note = "checkout reused from results/" if temp_checkout is None else "fresh buggy checkout"
-        return summarize(tests, code, len(triggers), bug.name, note)
+        return summarize(tests, code, len(triggers), bug.name, note, bug.version)
     finally:
         if temp_checkout and os.path.isdir(os.path.dirname(temp_checkout)):
             shutil.rmtree(os.path.dirname(temp_checkout), ignore_errors=True)
@@ -239,14 +239,29 @@ def bugs_of_run(run_dir: str) -> List[str]:
     return sorted(names)
 
 
+_BASE_ENV = None
+
+
 def _one(args) -> dict:
     import warnings
     # SoapFL's tree-sitter version prints a harmless FutureWarning in every worker; keep the progress readable
     warnings.filterwarnings("ignore", category=FutureWarning, module="tree_sitter")
     bug_dirname, soapfl_dir, work_root, results_root, classes, out_dir, copy_dir, max_tests = args
     started = time.time()
+    bug = bug_from_dirname(bug_dirname)
+    # the Defects4J installation of this bug's dataset (workers are reused, so always reset PATH)
+    from .bugs import defects4j_home
+    global _BASE_ENV
+    if _BASE_ENV is None:
+        _BASE_ENV = (os.environ.get("PATH", ""), os.environ.get("DEFECTS4J_HOME"))
+    if _BASE_ENV[1] is not None:
+        os.environ["DEFECTS4J_HOME"] = _BASE_ENV[1]
+    home = defects4j_home(bug.version)
+    if home:
+        os.environ["PATH"] = os.path.join(home, "framework", "bin") + os.pathsep + _BASE_ENV[0]
+        os.environ["DEFECTS4J_HOME"] = home
     try:
-        ctx = gather_bug(bug_from_dirname(bug_dirname), SoapFLBackend(soapfl_dir), work_root, results_root,
+        ctx = gather_bug(bug, SoapFLBackend(soapfl_dir), work_root, results_root,
                          set(classes), max_tests)
         ctx["seconds"] = round(time.time() - started, 1)
         path = os.path.join(out_dir, bug_dirname + ".json")

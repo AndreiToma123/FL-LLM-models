@@ -43,3 +43,38 @@ def test_stratified(n):
 def test_select():
     assert len(select_bugs(pilot=20)) == 20
     assert "Lang-1" not in [b.name for b in select_bugs("Lang", exclude="Lang-1")]
+
+
+def test_dataset2_table_and_names():
+    from fl_tools.bugs import DATASETS, defects4j_home
+    bugs = all_bugs(dataset="d4j2new")
+    assert len(bugs) == 444 and count_by_project(bugs)["JacksonDatabind"] == 112
+    assert "Cli-6" not in {b.name for b in bugs}                     # deprecated in Defects4J 2.0
+    b = parse_bugs("Closure-150", dataset="d4j2new")[0]
+    assert b.dirname == "d4j2.0.0-Closure-150" and bug_from_dirname(b.dirname) == b
+    with pytest.raises(ValueError):
+        parse_bugs("Closure-10", dataset="d4j2new")                   # a 1.4.0 bug, not new in 2.0
+    with pytest.raises(ValueError):
+        parse_bugs("Jsoup-1")                                        # not in dataset 1
+    assert DATASETS["d4j2new"]["version"] == "2.0.0"
+    pilot = select_bugs(pilot=12, dataset="d4j2new")
+    assert len(count_by_project(pilot)) == 12                        # one bug per project
+    assert [b.name for b in select_bugs(pilot=100)][:3] == [b.name for b in select_bugs(pilot=100)][:3]
+    assert count_by_project(select_bugs(pilot=100))["Mockito"] == 13  # dataset-1 sample unchanged (legacy rule)
+
+
+def test_runner_uses_bug_version_and_dataset_home(tmp_path, monkeypatch):
+    from fl_tools.runner import Runner
+    home2 = tmp_path / "d4j2"
+    (home2 / "framework" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("DEFECTS4J2_HOME", str(home2))
+    monkeypatch.setenv("DEFECTS4J_HOME", str(tmp_path / "d4j1"))
+    r = Runner(name="x", results_dir=str(tmp_path), soapfl_dir=str(tmp_path))
+    b2 = parse_bugs("Jsoup-1", dataset="d4j2new")[0]
+    cmd = r._command(b2)
+    assert cmd[cmd.index("--version") + 1] == "2.0.0"
+    env = r._env(b2)
+    assert env["PATH"].startswith(str(home2)) and env["DEFECTS4J_HOME"] == str(home2)
+    assert r._env(parse_bugs("Lang-1")[0])["DEFECTS4J_HOME"] == str(tmp_path / "d4j1")
+    with pytest.raises(ValueError):
+        r.run([b2, parse_bugs("Lang-1")[0]])
