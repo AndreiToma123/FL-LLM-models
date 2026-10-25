@@ -103,6 +103,22 @@ From: ubuntu:22.04
     TIKTOKEN_CACHE_DIR=/opt/tiktoken /opt/venv/bin/python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" || true
     /opt/venv/bin/python -c "import openai, tree_sitter, tiktoken, tenacity, numpy; print('python deps ok')"
 
+    # SoapFL ships its tree-sitter grammar library (functions/methodExtractor/myparser/my-languages.so) prebuilt for
+    # x86-64 only, so on the ARM GPU nodes every method extraction fails ("language not supported", first Roihu
+    # smoke test 2026-10-25). Rebuild it for this architecture from tree-sitter-java commit 4708c4f (2023-01-26):
+    # checked on x86 to produce parse trees IDENTICAL to SoapFL's shipped library for all 132 Java files of the
+    # Defects4J framework (v0.20.2 matched only 13). Only Java is needed (SoapFL parses Java only).
+    if [ "$(uname -m)" != x86_64 ]; then
+        /opt/venv/bin/pip install --no-cache-dir setuptools
+        git clone -q https://github.com/tree-sitter/tree-sitter-java.git /tmp/tree-sitter-java
+        git -C /tmp/tree-sitter-java checkout -q 4708c4f24ff9cbee63a874cf25fdcaea3e8dd255
+        SO=/opt/SoapFL/functions/methodExtractor/myparser/my-languages.so
+        mv "$SO" "$SO.x86_64"
+        /opt/venv/bin/python -c "from tree_sitter import Language; Language.build_library('$SO', ['/tmp/tree-sitter-java'])"
+        rm -rf /tmp/tree-sitter-java
+    fi
+    /opt/venv/bin/python -W ignore -c "from tree_sitter import Language, Parser; p = Parser(); p.set_language(Language('/opt/SoapFL/functions/methodExtractor/myparser/my-languages.so', 'java')); t = p.parse(b'class A { int f(int x) { return x; } }'); assert 'method_declaration' in t.root_node.sexp(); print('tree-sitter java grammar ok')"
+
 %labels
     Description SoapFL c9f75f4 + open-model patch, Defects4J 1.4.0 and 2.0 (4c41759), Java 8, Python 3.11
 
