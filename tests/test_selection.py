@@ -211,3 +211,145 @@ def test_summary_keeps_earlier_selectors(tmp_path):
     replay(run, ["S0", "S1"], split_path=None, out_root=str(tmp_path / "o"), draws=10)
     out = replay(run, ["S1-body"], split_path=None, out_root=str(tmp_path / "o"), draws=10)
     assert list(out["selectors"]) == ["S0", "S1", "S1-body"] and "| S1 |" in out["markdown"]
+
+
+# ---------------------------------------------------------------- failure-context selectors S6, S8a, S8b
+from fl_tools.selection import agent
+
+CTX = {"failing_tests_total": 1, "tests": [{
+    "name": "a.BTest::testParse", "output": "bad sign",
+    "stack_trace": ["--- a.BTest::testParse", "java.lang.NumberFormatException: bad sign",
+                    "\tat a.B.parseValue(B.java:12)", "\tat a.BTest.testParse(BTest.java:7)"],
+    "frames": [{"class": "a.B", "method": "parseValue", "line": 12, "key": "a.B::parseValue"},
+               {"class": "a.BTest", "method": "testParse", "line": 7, "key": "a.BTest::testParse"}],
+    "test_method": {"class": "a.BTest", "signature": "testParse()", "code": "void testParse() { B.parseValue(\"-1\"); }"},
+    "covered_methods": ["a.B::parseValue(String)", "a.B::toString()"]}],
+    "methods": {"a.B::parseValue(String)": {"failing_tests_covering": 1, "stack_depth": 0},
+                "a.B::toString()": {"failing_tests_covering": 1, "stack_depth": None}},
+    "method_code": {"a.B::helper()": {"code": "int helper() { return 1; }", "doc": ""}}}
+
+
+def _case_ctx(ctx=CTX):
+    return BugCase("Lang-1", "Lang", "x", {"a.B::parseValue(String)"}, _cands(), context=ctx)
+
+
+def test_s6_stack_tiebreak_without_model():
+    order, info = selectors.get("S6").order(_case_ctx())
+    assert order[0]["method_name"] == "a.B::parseValue(String)" and order[-1]["method_name"] == "a.B::low()"
+    assert selectors.get("S6").order(_case_ctx(None))[1] == {"no_context": True}
+
+
+def test_s8a_prompt_carries_evidence_and_skips_bugs_without_context(server):
+    client = JudgeClient("mock-model", base_url=server.url)
+    sel = judges.S8a().configure(client)
+    order, info = sel.order(_case_ctx())
+    assert order[0]["method_name"] == "a.B::parseValue(String)"
+    sent = [m["messages"][1]["content"] for m in server.requests if "Evidence:" in m["messages"][1]["content"]]
+    assert any("on the stack trace of a failing test at depth 0" in t for t in sent)
+    assert all("Failing test a.BTest::testParse" in t and "not on the stack trace" in t for t in sent)
+    assert "a.B" not in prompts.short_name("a.B::f()").split("::")[0][:-1]     # package dropped
+    n = len(server.requests)
+    order, info = sel.order(_case_ctx(None))
+    assert info["no_context"] and len(server.requests) == n                 # no calls without context
+
+
+AGENT_RULES = [
+    {"match_last": r"Step limit reached", "tool_calls": [{"name": "submit_ranking", "arguments": {"ranking": ["C2"]}}]},
+    {"match_last": r"C3: B::parseValue", "tool_calls": [{"name": "get_coverage", "arguments": {"label": "C3"}}]},
+    {"match_last": r"C1: B::parseValue", "tool_calls": [{"name": "get_coverage", "arguments": {"label": "C1"}}]},
+    {"match_last": r"^C3 B::parseValue.*depth 0", "tool_calls": [{"name": "submit_ranking", "arguments": {"ranking": ["C3"]}}]},
+    {"match_last": r"^C1 B::parseValue.*depth 0", "tool_calls": [{"name": "submit_ranking", "arguments": {"ranking": ["C1"]}}]},
+]
+
+
+def test_s8b_native_tool_loop_forward_and_reversed(tmp_path):
+    srv = start_mock_server(rules=AGENT_RULES)
+    try:
+        client = JudgeClient("mock-model", base_url=srv.url, cache_path=str(tmp_path / "c.jsonl"))
+        sel = agent.S8b().configure(client, max_steps=6)
+        order, info = sel.order(_case_ctx())
+        assert order[0]["method_name"] == "a.B::parseValue(String)" and info["top1_agree"]
+        assert info["tool_calls"] == 2 and info["calls"] == 4 and not info.get("invalid_actions")
+        assert srv.requests[0]["tools"] and srv.requests[1]["messages"][-1]["role"] == "tool"
+        again = agent.S8b().configure(JudgeClient("mock-model", base_url=srv.url, cache_path=str(tmp_path / "c.jsonl")))
+        assert again.order(_case_ctx())[1]["calls"] == 0                  # whole loop replayed from cache
+    finally:
+        srv.stop()
+
+
+def test_s8b_json_protocol_and_step_cap():
+    rules = [{"match_last": r"Step limit reached", "reply": '{"tool": "submit_ranking", "args": {"ranking": ["C2", "C1"]}}'},
+             {"match_last": r".", "reply": '{"tool": "list_failing_tests", "args": {}}'}]
+    srv = start_mock_server(rules=rules)
+    try:
+        sel = agent.S8b().configure(JudgeClient("mock-model", base_url=srv.url), max_steps=3, protocol="json")
+        order, info = sel.order(_case_ctx())
+        assert info["tool_calls"] == 6 and info["forced_submit"] == 2       # 3 per run, forward + reversed
+        assert "tools" not in srv.requests[0] and "JSON object" in srv.requests[0]["messages"][0]["content"]
+        # forward: C2 = other(); reversed: C2 = other() as well (3 candidates) -> other() first
+        assert order[0]["method_name"] == "a.B::other()"
+    finally:
+        srv.stop()
+
+
+def test_agent_tools_never_expose_truth_or_source_score():
+    labelled = {"C1": dict(_cands()[2], reason="LEAK reason", score=8)}
+    t = agent.Tools(CTX, labelled)
+    for name, args in [("list_failing_tests", {}), ("get_test", {"index": 1}), ("get_stack_trace", {"index": 1}),
+                       ("get_candidate", {"label": "C1"}), ("get_coverage", {"label": "c1"}),
+                       ("search_methods", {"query": "parse"}), ("get_method_code", {"method": "B::helper()"})]:
+        answer, valid = t.call(name, args)
+        assert valid and "LEAK" not in answer, name
+    assert t.call("get_test", {"index": 9})[1] is False and t.call("nope", {})[1] is False
+    assert agent.parse_ranking("C2 > c1", ["C1", "C2", "C3"]) == ["C2", "C1", "C3"]
+    assert agent.parse_json_action('ok {"tool": "get_test", "args": {"index": 1}}') == ("get_test", {"index": 1})
+
+
+def test_gate_scores_policies_offline(server, tmp_path):
+    from fl_tools.selection.gate import gate
+    truth = ["a.B::parseValue(String)"]
+    run = _run(tmp_path, {"Lang-1": (truth, _cands()), "Lang-2": (["x.Y::f()"], [_m("x.Y::f()", 9), _m("x.Y::g()", 3)])})
+    client = JudgeClient("mock-model", base_url=server.url)
+    replay(run, ["S1", "S5"], split_path=None, out_root=str(tmp_path / "out"), draws=10, client=client)
+    out = gate(run, ["S1", "S5"], split_path=None, out_root=str(tmp_path / "out"))
+    rows = {r["policy"]: r for r in out["parts"]["all"]["rows"]}
+    assert set(rows) == {"S0", "S0 > S1", "S0 > S5", "S0 > S1 > S5"}
+    assert rows["S0"]["calls"] == 0 and rows["S0 > S5"]["calls"] == 6 and rows["S0 > S5"]["top1"] == 2
+    # S1 is "always confident", so S0 > S1 > S5 never reaches S5
+    assert rows["S0 > S1 > S5"]["calls"] == 0 and rows["S0 > S1"]["pareto"] and not rows["S0 > S5"]["pareto"]
+    assert os.path.exists(str(tmp_path / "out" / "run-gate.md"))
+
+
+def test_s8b_accepts_tool_calls_written_as_text_and_stops_after_two_invalid():
+    # Qwen-style: the endpoint returns the tool call as text, not as a native tool call
+    rules = [{"match_last": r"C3: B::parseValue", "reply": '<tool_call>\n{"name": "get_coverage", "arguments": {"label": "C3"}}\n</tool_call>'},
+             {"match_last": r"C1: B::parseValue", "reply": '```json\n{"name": "get_coverage", "arguments": "{\\"label\\": \\"C1\\"}"}\n```'},
+             {"match_last": r"RESULT of get_coverage:\nC3 B::parseValue", "reply": '{"name": "submit_ranking", "arguments": {"ranking": ["C3"]}}'},
+             {"match_last": r"RESULT of get_coverage:\nC1 B::parseValue", "reply": '{"function": {"name": "submit_ranking", "arguments": {"ranking": ["C1"]}}}'}]
+    srv = start_mock_server(rules=rules)
+    try:
+        order, info = agent.S8b().configure(JudgeClient("mock-model", base_url=srv.url)).order(_case_ctx())
+        assert order[0]["method_name"] == "a.B::parseValue(String)" and info["tool_calls"] == 2 and info["top1_agree"]
+    finally:
+        srv.stop()
+    srv = start_mock_server(reply="I think the bug is somewhere in the parser.")
+    try:
+        order, info = agent.S8b().configure(JudgeClient("mock-model", base_url=srv.url)).order(_case_ctx())
+        assert info["forced_submit"] == 2 and info["steps"] == 6 and len(info["invalid_samples"]) == 2
+        assert info["failed_runs"] == ["forward", "reversed"] and order == _cands()
+    finally:
+        srv.stop()
+
+
+def test_summary_tolerates_rows_from_older_versions(server, tmp_path):
+    run = _run(tmp_path, {"Lang-1": (["a.B::parseValue(String)"], _cands())})
+    out_root = tmp_path / "o"
+    client = JudgeClient("mock-model", base_url=server.url)
+    replay(run, ["S5"], split_path=None, out_root=str(out_root), draws=10, client=client)
+    js = out_root / "run-selection.json"
+    old = json.loads(js.read_text())
+    for k in ("no_context", "steps", "tool_calls"):
+        old["selectors"]["S5"]["parts"]["all"]["cost"].pop(k)
+    js.write_text(json.dumps(old))
+    out = replay(run, ["S6"], split_path=None, out_root=str(out_root), draws=10, client=client)
+    assert "| S5 |" in out["markdown"] and "| S6 |" in out["markdown"]

@@ -46,12 +46,14 @@ class JudgeClient:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def chat(self, messages: List[dict], max_tokens: int = 4, temperature: float = 0.0, seed: int = 0,
-             logprobs: bool = False, top_logprobs: int = 0) -> dict:
+             logprobs: bool = False, top_logprobs: int = 0, tools: Optional[List[dict]] = None) -> dict:
         payload = {"model": self.model, "messages": messages, "max_tokens": max_tokens,
                    "temperature": temperature, "seed": seed}
         if logprobs:
             payload["logprobs"] = True
             payload["top_logprobs"] = top_logprobs
+        if tools:
+            payload["tools"] = tools
         key = self._key(payload)
         with self._lock:
             if key in self._cache:
@@ -83,7 +85,18 @@ class JudgeClient:
         tops = []
         for tok in ((choice.get("logprobs") or {}).get("content") or [])[:1]:
             tops = [(t.get("token", ""), float(t.get("logprob", -1e9))) for t in tok.get("top_logprobs") or []]
-        response = {"text": content, "top_logprobs": tops, "prompt_tokens": usage.get("prompt_tokens", 0),
+        calls = []
+        for i, tc in enumerate((choice.get("message") or {}).get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except json.JSONDecodeError:
+                    args = {"_unparsed": args}
+            calls.append({"id": tc.get("id") or f"call_{i}", "name": fn.get("name", ""), "arguments": args or {}})
+        response = {"text": content, "top_logprobs": tops, "tool_calls": calls,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0), "seconds": round(seconds, 3)}
         with self._lock:
             self.stats["calls"] += 1
@@ -96,6 +109,22 @@ class JudgeClient:
                 with open(self.cache_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"key": key, "model": self.model, "response": response}) + "\n")
         return dict(response, cached=False)
+
+
+PROBE_TOOL = {"type": "function", "function": {
+    "name": "get_method_code", "description": "Return the source code of a Java method.",
+    "parameters": {"type": "object", "properties": {"method": {"type": "string", "description": "Class::method"}},
+                   "required": ["method"]}}}
+
+
+def probe_tools(client: JudgeClient) -> dict:
+    """Does the endpoint return native tool calls (OpenAI `tools` API)? Needed for S8b's native protocol;
+    otherwise S8b uses its JSON action protocol."""
+    r = client.chat([{"role": "user", "content": "Use the tool to get the code of the method Foo::bar(int). "
+                                                  "Do not answer in text."}],
+                    max_tokens=128, tools=[PROBE_TOOL])
+    ok = any(c["name"] == "get_method_code" and "method" in c["arguments"] for c in r["tool_calls"])
+    return {"supported": ok, "tool_calls": r["tool_calls"], "text": r["text"][:200]}
 
 
 def probe_logprobs(client: JudgeClient) -> dict:

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 from ..compare import mcnemar_exact
-from . import judges, metrics, prompts, selectors   # judges registers S5, S2, S5+S2
+from . import agent, judges, metrics, prompts, selectors   # noqa: F401  judges/agent register S5, S2, S5+S2, S6, S8*
 from .candidates import BugCase, load_cases
 from .split import DEFAULT_SPLIT, load_split, part_of
 
@@ -31,14 +31,15 @@ def _paired(cases, orders_a, orders_b, k=1):
 
 
 def _cost(cases: List[BugCase], infos: Dict[str, dict]) -> dict:
-    keys = ("calls", "cached_calls", "tokens", "seconds", "pairs", "draws", "position_inconsistent")
+    keys = ("calls", "cached_calls", "tokens", "seconds", "pairs", "draws", "position_inconsistent", "no_context",
+            "steps", "tool_calls", "invalid_actions", "forced_submit", "unparsed_final", "top1_agree")
     tot = {k: 0 for k in keys}
     judged = 0
     for c in cases:
         info = infos.get(c.bug) or {}
         judged += bool(info.get("shortlist")) and len(info["shortlist"]) > 1
         for k in keys:
-            tot[k] += info.get(k, 0) or 0
+            tot[k] += int(info.get(k, 0) or 0) if k != "seconds" else (info.get(k, 0) or 0)
     tot["seconds"] = round(tot["seconds"], 1)
     tot["bugs_judged"] = judged
     tot["calls_per_judged_bug"] = round(tot["calls"] / judged, 1) if judged else 0
@@ -91,18 +92,20 @@ def write_run(src_run: str, dest: str, cases: List[BugCase], orders: Dict[str, L
 def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 2000,
            split_path: Optional[str] = DEFAULT_SPLIT, out_root: Optional[str] = None, write: bool = True,
            soapfl_dir: Optional[str] = None, reveal_test: bool = False, client=None, k: int = 8,
-           shortlist: str = "top-tie", jobs: int = 1) -> dict:
+           shortlist: str = "top-tie", jobs: int = 1, agent_steps: int = 6, agent_protocol: str = "native",
+           context_dir: Optional[str] = None) -> dict:
     """reveal_test=False reports only the dev part of the split: choose selectors and settings on dev, then
     run once with reveal_test=True. Without a split (e.g. HypoDeduce lists, test-only) everything is shown.
     Model-based selectors (S5, S2, S5+S2) need `client` (a JudgeClient); while the test part is hidden they
     only judge the dev bugs (test bugs keep the source order), so no GPU time is spent on hidden bugs."""
-    cases = load_cases(run_dir, soapfl_dir)
+    cases = load_cases(run_dir, soapfl_dir, context_dir)
     split = load_split(split_path) if split_path and os.path.exists(split_path) else None
     run_name = os.path.basename(os.path.normpath(run_dir))
     out_root = out_root or os.path.dirname(os.path.normpath(run_dir))
     source_orders = {c.bug: list(c.candidates) for c in cases if c.candidates}
     parts = (["dev", "test", "all"] if reveal_test else ["dev"]) if split else ["all"]
     report = {"run": run_name, "n_bugs": len(cases), "seed": seed, "parts": {}, "selectors": {}, "written": [],
+              "with_context": sum(1 for c in cases if c.context),
               "test_hidden": bool(split) and not reveal_test}
     for part in parts:
         sub = _subset(cases, split, part)
@@ -119,9 +122,17 @@ def replay(run_dir: str, selector_names: List[str], seed: int = 0, draws: int = 
         if sel.model_calls:
             if client is None:
                 raise ValueError(f"selector {name} makes model calls: give a model endpoint (see `select --help`)")
-            sel.configure(client, k=k, mode=shortlist)
-            extra = {"judge_model": client.model, "shortlist": shortlist, "k": k, "prompt_version": prompts.version(),
+            if isinstance(sel, agent.S8b):
+                sel.configure(client, k=k, mode=shortlist, max_steps=agent_steps, protocol=agent_protocol)
+            else:
+                sel.configure(client, k=k, mode=shortlist)
+            extra = {"judge_model": client.model, "shortlist": shortlist, "k": k,
+                     "prompt_version": prompts.version(getattr(sel, "uses_evidence", False)),
                      "judged_parts": ["dev"] if report["test_hidden"] else ["all"]}
+            if isinstance(sel, agent.S8b):
+                import hashlib, inspect
+                extra.update({"agent_steps": agent_steps, "agent_protocol": agent_protocol,
+                              "agent_version": hashlib.sha256(inspect.getsource(agent).encode()).hexdigest()[:12]})
         todo = [c for c in cases if c.candidates]
         if sel.model_calls and report["test_hidden"]:
             todo = [c for c in todo if part_of(c.bug, split) == "dev"]
@@ -215,6 +226,7 @@ def format_markdown(r: dict) -> str:
                          f"{m['mcnemar_top1_vs_source']['p']:.3f} |")
         lines.append("")
         judged = [(n, e) for n, e in r["selectors"].items() if "cost" in e["parts"][part]]
+        agent_notes = []
         if judged:
             lines += ["Model-based selectors, cost and reach on this part:", "",
                       "| Selector | judge model | shortlist (K) | bugs judged | new calls | cached | tokens | GPU seconds | "
@@ -222,11 +234,23 @@ def format_markdown(r: dict) -> str:
                       "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"]
             for n, e in judged:
                 c, st = e["parts"][part]["cost"], e.get("settings", {})
+                c = {k: c.get(k, 0) for k in ("calls", "cached_calls", "tokens", "seconds", "pairs", "draws",
+                                              "position_inconsistent", "no_context", "steps", "tool_calls",
+                                              "invalid_actions", "forced_submit", "unparsed_final", "top1_agree",
+                                              "bugs_judged")}   # rows merged from older summaries lack new keys
                 pairs = f"{c['draws']} / {c['pairs']} ({c['position_inconsistent']})" if c["pairs"] else ""
+                judged_txt = f"{c['bugs_judged']}" + (f" (no context: {c['no_context']})" if c["no_context"] else "")
                 lines.append(f"| {n} | {st.get('judge_model', '')} | {st.get('shortlist', '')} ({st.get('k', '')}) | "
-                             f"{c['bugs_judged']} | {c['calls']} | {c['cached_calls']} | {c['tokens']} | {c['seconds']} | "
-                             f"{pairs} | {e['parts'][part]['shortlist_oracle_top1']} |")
+                             f"{judged_txt} | {c['calls']} | {c['cached_calls']} | {c['tokens']} | {c['seconds']} | "
+                             f"{pairs} | {e['parts'][part].get('shortlist_oracle_top1', '')} |")
+                if c["steps"]:
+                    agent_notes.append(f"{n}: {c['steps']} agent turns, {c['tool_calls']} tool calls, "
+                                       f"{c['invalid_actions']} invalid actions, {c['forced_submit']} forced submits, "
+                                       f"{c['unparsed_final']} unparsed final answers, forward/reversed top-1 agree in "
+                                       f"{c['top1_agree']} of {c['bugs_judged']} bugs")
             lines.append("")
+            if agent_notes:
+                lines += ["Agent behaviour: " + "; ".join(agent_notes), ""]
     lines.append("Selectors: " + "; ".join(f"**{n}** = {e['description']}" for n, e in r["selectors"].items()))
     lines.append("")
     lines.append("A Top-1 inside the random-ties 95% range is not evidence of a better selector.")

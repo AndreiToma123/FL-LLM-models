@@ -139,9 +139,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cache", default=os.path.join(DEFAULT_RESULTS, "judge_cache.jsonl"),
                    help="judge answer cache (re-runs never repeat a call)")
     p.add_argument("--jobs", type=int, default=1, help="bugs judged in parallel (1 for Ollama; more on vLLM)")
+    p.add_argument("--agent-steps", type=int, default=6, help="S8b: max tool calls per investigation (default 6)")
+    p.add_argument("--agent-protocol", choices=["native", "json"], default="native",
+                   help="S8b: native tool calls, or one JSON action per turn (for endpoints without tools)")
+    p.add_argument("--context-dir", default=None,
+                   help="failure-context folder (default: _failure_context next to the run folder)")
+    p.add_argument("--check-tools", action="store_true",
+                   help="only check whether the endpoint returns native tool calls (S8b) and exit")
     p.add_argument("--check-logprobs", action="store_true",
                    help="only check whether the endpoint returns log-probabilities (needed for S2) and exit; "
                         "give the run folder too so the run's model is used")
+
+    p = sub.add_parser("context", help="export the failure context (failing tests, stack traces, coverage, "
+                                       "test code) of the bugs of finished runs; CPU only, resumable")
+    p.add_argument("run_dirs", nargs="+", help="run folders (reports/<run> or results/<run>): their bugs and candidate classes")
+    p.add_argument("--jobs", type=int, default=2, help="bugs in parallel (each runs Defects4J tests)")
+    p.add_argument("--max-tests", type=int, default=3, help="failing tests per bug (the total is recorded)")
+    p.add_argument("--bugs", default="", help="only these bugs, e.g. Lang-1,Math-3")
+    p.add_argument("--part", choices=["dev", "test", "all"], default="all",
+                   help="only the bugs of this part of the selection split")
+    p.add_argument("--soapfl-dir", default=DEFAULT_SOAPFL)
+    p.add_argument("--results-dir", default=DEFAULT_RESULTS)
+    p.add_argument("--reports-dir", default=os.path.join(ROOT, "reports"),
+                   help="also copy the files to <reports>/_failure_context ('none' = do not copy)")
+
+    p = sub.add_parser("gate", help="B: score confidence-gated escalation policies offline from existing "
+                                    "selector replays (no model calls)")
+    p.add_argument("run_dir")
+    p.add_argument("--ladder", default="S6,S5,S8a,S8b",
+                   help="selectors in escalation order; every ordered sub-ladder is scored (default S6,S5,S8a,S8b)")
+    p.add_argument("--margin", type=float, default=0.5, help="S2/S8a-lp confidence: expected-score gap of the top two")
+    p.add_argument("--split", default=None)
+    p.add_argument("--reveal-test", action="store_true")
+    p.add_argument("--out-root", default=None)
+    p.add_argument("--no-write", action="store_true")
 
     p = sub.add_parser("compare", help="two runs on their common bugs: Top-N, McNemar test, cost")
     p.add_argument("run_a")
@@ -266,9 +297,9 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "select":
-        from .selection import judges  # noqa: F401  (registers S5, S2, S5+S2)
+        from .selection import agent, judges  # noqa: F401  (register S5, S2, S5+S2, S6, S8a, S8a-lp, S8b)
         from .selection import selectors as sel_registry
-        from .selection.llm import JudgeClient, JudgeError, probe_logprobs
+        from .selection.llm import JudgeClient, JudgeError, probe_logprobs, probe_tools
         if args.list:
             for name, sel in sel_registry.REGISTRY.items():
                 print(f"{name:10s} {'[model calls] ' if sel.model_calls else ''}{sel.description}")
@@ -280,7 +311,7 @@ def main(argv=None) -> int:
             meta = json.load(open(os.path.join(args.run_dir, "run_meta.json"), encoding="utf-8"))
             model = (meta.get("llm_env") or {}).get("SOAPFL_MODEL_NAME")
         model = model or os.environ.get("SOAPFL_MODEL_NAME")
-        needs_model = args.check_logprobs or any(n in sel_registry.REGISTRY and sel_registry.REGISTRY[n].model_calls
+        needs_model = args.check_logprobs or args.check_tools or any(n in sel_registry.REGISTRY and sel_registry.REGISTRY[n].model_calls
                                                  for n in names)
         client = None
         if needs_model:
@@ -288,7 +319,14 @@ def main(argv=None) -> int:
                 print("no judge model: give --judge-model or a run folder with run_meta.json", file=sys.stderr)
                 return 2
             try:
-                client = JudgeClient(model, cache_path=None if args.check_logprobs else args.cache)
+                client = JudgeClient(model, cache_path=None if (args.check_logprobs or args.check_tools) else args.cache)
+                if args.check_tools:
+                    r = probe_tools(client)
+                    print(f"endpoint {client.base_url}, model {model}: native tool calls "
+                          f"{'SUPPORTED' if r['supported'] else 'NOT returned (S8b will use its JSON action protocol)'}")
+                    print(f"tool calls {r['tool_calls']}; text {r['text']!r}")
+                    if not args.check_logprobs:
+                        return 0 if r["supported"] else 1
                 if args.check_logprobs:
                     r = probe_logprobs(client)
                     print(f"endpoint {client.base_url}, model {model}: log-probabilities "
@@ -308,7 +346,8 @@ def main(argv=None) -> int:
             out = replay(args.run_dir, names, seed=args.seed, draws=args.draws, split_path=split,
                          out_root=args.out_root, write=not args.no_write, soapfl_dir=DEFAULT_SOAPFL,
                          reveal_test=args.reveal_test, client=client, k=args.k, shortlist=args.shortlist,
-                         jobs=args.jobs)
+                         jobs=args.jobs, agent_steps=args.agent_steps, agent_protocol=args.agent_protocol,
+                         context_dir=args.context_dir)
         except KeyError as exc:
             print(exc.args[0], file=sys.stderr)
             return 2
@@ -321,6 +360,44 @@ def main(argv=None) -> int:
             print(f"judge: {st['calls']} new calls, {st['cached']} from cache, "
                   f"{st['prompt_tokens'] + st['completion_tokens']} tokens, {st['seconds']:.0f} s")
         for path in out["written"]:
+            print("wrote", path)
+        return 0
+
+    if args.cmd == "context":
+        from .context import export_contexts
+        only = {b.strip() for b in args.bugs.split(",") if b.strip()}
+        if args.part != "all":
+            from .selection.split import DEFAULT_SPLIT, load_split
+            part = set(load_split(DEFAULT_SPLIT)[args.part])
+            only = (only & part) if only else part
+        for d in args.run_dirs:
+            if not os.path.isdir(d):
+                print(f"no such run folder: {d}", file=sys.stderr)
+                return 2
+        rows = export_contexts(args.run_dirs, args.soapfl_dir, args.results_dir,
+                               None if args.reports_dir.lower() == "none" else args.reports_dir,
+                               jobs=args.jobs, max_tests=args.max_tests, only=only or None)
+        failed = [r for r in rows if not r["ok"]]
+        print(f"done: {len(rows) - len(failed)} collected, {len(failed)} failed"
+              + (f" ({', '.join(r['bug'] for r in failed)})" if failed else ""))
+        return 1 if failed else 0
+
+    if args.cmd == "gate":
+        from .selection.gate import gate
+        from .selection.split import DEFAULT_SPLIT
+        if not os.path.isdir(args.run_dir):
+            print(f"no such run folder: {args.run_dir}", file=sys.stderr)
+            return 2
+        split = None if (args.split or "").lower() == "none" else (args.split or DEFAULT_SPLIT)
+        try:
+            out = gate(args.run_dir, [n.strip() for n in args.ladder.split(",") if n.strip()], margin=args.margin,
+                       split_path=split, reveal_test=args.reveal_test, out_root=args.out_root,
+                       soapfl_dir=DEFAULT_SOAPFL, write=not args.no_write)
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        print(out["markdown"])
+        for path in out.get("written", []):
             print("wrote", path)
         return 0
 

@@ -20,6 +20,7 @@ from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 
 from ..ties import _groups
+from . import evidence as ev
 from . import prompts
 from .candidates import BugCase
 from .llm import JudgeClient, JudgeError
@@ -53,6 +54,7 @@ def shortlist(candidates: List[dict], mode: str, k: int) -> Tuple[List[int], Lis
 
 class JudgeSelector(Selector):
     model_calls = True
+    uses_evidence = False      # True: prompts carry the failure context (S8a); needs `fl_tools context` output
 
     def __init__(self):
         self.client: Optional[JudgeClient] = None
@@ -63,8 +65,12 @@ class JudgeSelector(Selector):
         return self
 
     # ------------------------------------------------------------------ pieces
-    def _expected(self, failure: str, c: dict, seed: int, log: dict) -> float:
-        r = self.client.chat(prompts.pointwise(failure, c), max_tokens=1, seed=seed, logprobs=True, top_logprobs=20)
+    def _ev(self, ctx, c):
+        return ev.evidence_lines(ctx, c.get("method_name", "")) if self.uses_evidence else None
+
+    def _expected(self, failure: str, c: dict, seed: int, log: dict, ctx=None) -> float:
+        r = self.client.chat(prompts.pointwise(failure, c, self._ev(ctx, c)), max_tokens=1, seed=seed,
+                             logprobs=True, top_logprobs=20)
         self._count(r, log)
         if not r["top_logprobs"]:
             raise JudgeError("the endpoint returned no log-probabilities, so S2 cannot run here. Ollama returns them "
@@ -83,12 +89,13 @@ class JudgeSelector(Selector):
         total = sum(probs.values())
         return sum(d * p for d, p in probs.items()) / total
 
-    def _pairwise(self, failure: str, cands: List[dict], seed: int, log: dict) -> Dict[int, int]:
+    def _pairwise(self, failure: str, cands: List[dict], seed: int, log: dict, ctx=None) -> Dict[int, int]:
         score = {i: 0 for i in range(len(cands))}
         draws = inconsistent = 0
         for i, j in combinations(range(len(cands)), 2):
-            r1 = self.client.chat(prompts.pairwise(failure, cands[i], cands[j]), max_tokens=2, seed=seed)
-            r2 = self.client.chat(prompts.pairwise(failure, cands[j], cands[i]), max_tokens=2, seed=seed)
+            ei, ej = self._ev(ctx, cands[i]), self._ev(ctx, cands[j])
+            r1 = self.client.chat(prompts.pairwise(failure, cands[i], cands[j], ei, ej), max_tokens=2, seed=seed)
+            r2 = self.client.chat(prompts.pairwise(failure, cands[j], cands[i], ej, ei), max_tokens=2, seed=seed)
             self._count(r1, log)
             self._count(r2, log)
             c1, c2 = prompts.parse_choice(r1["text"]), prompts.parse_choice(r2["text"])
@@ -112,7 +119,7 @@ class JudgeSelector(Selector):
         log["tokens"] = log.get("tokens", 0) + (r.get("prompt_tokens") or 0) + (r.get("completion_tokens") or 0)
         log["seconds"] = round(log.get("seconds", 0.0) + (0.0 if r.get("cached") else r.get("seconds", 0.0)), 3)
 
-    def judge(self, cands: List[dict], failure: str, seed: int, log: dict) -> List[int]:
+    def judge(self, cands: List[dict], failure: str, seed: int, log: dict, ctx=None) -> List[int]:
         raise NotImplementedError
 
     def order(self, case: BugCase, seed: int = 0):
@@ -123,8 +130,14 @@ class JudgeSelector(Selector):
         log = {"shortlist": [cands[i]["method_name"] for i in head], "mode": self.mode, "k": self.k}
         if len(head) < 2:
             return list(cands), dict(log, calls=0)
+        if self.uses_evidence and not case.context:
+            # no failure context for this bug (export failed or not run): keep the source order, count it
+            return list(cands), dict(log, calls=0, no_context=True, shortlist=[])
         sub = [cands[i] for i in head]
-        new = self.judge(sub, prompts.failure_text(sub), seed, log)
+        failure = prompts.failure_text(sub)
+        if self.uses_evidence:
+            failure = ev.failure_block(case.context, failure)
+        new = self.judge(sub, failure, seed, log, case.context)
         return [sub[i] for i in new] + [cands[i] for i in rest], log
 
 
@@ -132,8 +145,8 @@ class S5(JudgeSelector):
     name = "S5"
     description = "pairwise judge on the shortlist, both orders, Copeland score; remaining ties keep source order"
 
-    def judge(self, cands, failure, seed, log):
-        score = self._pairwise(failure, cands, seed, log)
+    def judge(self, cands, failure, seed, log, ctx=None):
+        score = self._pairwise(failure, cands, seed, log, ctx)
         log["copeland"] = {cands[i]["method_name"]: s for i, s in score.items()}
         return sorted(range(len(cands)), key=lambda i: -score[i])
 
@@ -142,8 +155,8 @@ class S2(JudgeSelector):
     name = "S2"
     description = "expected 0-9 score from the judge's digit log-probabilities on the shortlist"
 
-    def judge(self, cands, failure, seed, log):
-        exp = [self._expected(failure, c, seed, log) for c in cands]
+    def judge(self, cands, failure, seed, log, ctx=None):
+        exp = [self._expected(failure, c, seed, log, ctx) for c in cands]
         log["expected_score"] = {c["method_name"]: round(e, 4) for c, e in zip(cands, exp)}
         return sorted(range(len(cands)), key=lambda i: -exp[i])
 
@@ -152,8 +165,8 @@ class S5S2(JudgeSelector):
     name = "S5+S2"
     description = "pairwise judge first (Copeland); candidates still tied are ordered by the S2 expected score"
 
-    def judge(self, cands, failure, seed, log):
-        score = self._pairwise(failure, cands, seed, log)
+    def judge(self, cands, failure, seed, log, ctx=None):
+        score = self._pairwise(failure, cands, seed, log, ctx)
         log["copeland"] = {cands[i]["method_name"]: s for i, s in score.items()}
         exp: Dict[int, float] = {}
         by_score: Dict[int, List[int]] = {}
@@ -162,10 +175,46 @@ class S5S2(JudgeSelector):
         for members in by_score.values():
             if len(members) > 1:                 # S2 only where pairwise left a tie
                 for i in members:
-                    exp[i] = self._expected(failure, cands[i], seed, log)
+                    exp[i] = self._expected(failure, cands[i], seed, log, ctx)
         log["expected_score"] = {cands[i]["method_name"]: round(e, 4) for i, e in exp.items()}
         return sorted(range(len(cands)), key=lambda i: (-score[i], -exp.get(i, 0.0)))
 
 
-for _sel in (S5(), S2(), S5S2()):
+class S8a(S5):
+    name = "S8a"
+    uses_evidence = True
+    description = ("S5 with a fixed evidence bundle from the failure context: failing tests, error output, stack "
+                   "frames and test code, plus per method its stack depth and coverage by failing tests (no loop)")
+
+
+class S8aLP(S2):
+    name = "S8a-lp"
+    uses_evidence = True
+    description = "S2 (log-prob 0-9 score) with the same evidence bundle as S8a"
+
+
+class S8aS2(S5S2):
+    name = "S8a+S2"
+    uses_evidence = True
+    description = "S5+S2 with the S8a evidence bundle: evidence pairwise first, evidence log-prob score breaks its draws"
+
+
+class S6(Selector):
+    """No model calls: inside each tie group, methods on a failing test's stack first (shallower first), then
+    by the share of failing tests that executed them; equal keys keep the source order."""
+    name = "S6"
+    description = ("stack-trace and coverage tie-breaker (no model): on the stack first, shallower first, then "
+                   "share of failing tests that executed the method")
+
+    def order(self, case, seed=0):
+        if not case.context:
+            return list(case.candidates), {"no_context": True}
+        out = []
+        for g in _groups(case.candidates):
+            out += sorted(g, key=lambda c: ev.stack_key(case.context, c.get("method_name", "")), reverse=True)
+        return out, {"keys": {c["method_name"]: list(ev.stack_key(case.context, c["method_name"]))
+                              for c in case.candidates}}
+
+
+for _sel in (S5(), S2(), S5S2(), S8a(), S8aLP(), S8aS2(), S6()):
     REGISTRY[_sel.name] = _sel

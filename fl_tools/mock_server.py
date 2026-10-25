@@ -96,7 +96,7 @@ def start_mock_server(port: int = 0,
     """
     state = {"requests": [], "api_requests": [], "n": 0, "lock": threading.Lock(),
              "models": dict(ollama_models) if ollama_models is not None else None}
-    compiled = [(re.compile(r["match"], re.S), r) for r in (rules or [])]
+    compiled = [(re.compile(r.get("match") or r.get("match_last") or "", re.S), r) for r in (rules or [])]
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -193,12 +193,15 @@ def start_mock_server(port: int = 0,
                 if m.get("role") == "user":
                     last_user = str(m.get("content", ""))
                     break
-            text, reason, token_logprobs = reply, finish_reason, None
+            last_any = str(messages[-1].get("content", "")) if messages else ""
+            text, reason, token_logprobs, tool_calls = reply, finish_reason, None, None
             for pattern, rule in compiled:
-                if pattern.search(last_user):
-                    text = rule["reply"]
+                target = last_any if "match_last" in rule else last_user   # match_last: last message of any role
+                if pattern.search(target):
+                    text = rule.get("reply", "")
                     reason = rule.get("finish_reason", finish_reason)
                     token_logprobs = rule.get("logprobs")     # {token: logprob} for the first output token
+                    tool_calls = rule.get("tool_calls")       # [{"name", "arguments"}] -> OpenAI tool_calls
                     break
             if think:
                 text = "<think>Let me reason about this first.</think>\n" + text
@@ -215,6 +218,12 @@ def start_mock_server(port: int = 0,
                     "finish_reason": reason,
                 }],
             }
+            if tool_calls:
+                payload["choices"][0]["message"]["tool_calls"] = [
+                    {"id": f"call_{n}_{i}", "type": "function",
+                     "function": {"name": c["name"], "arguments": json.dumps(c.get("arguments", {}))}}
+                    for i, c in enumerate(tool_calls)]
+                payload["choices"][0]["finish_reason"] = "tool_calls"
             if body.get("logprobs") and token_logprobs:
                 top = sorted(token_logprobs.items(), key=lambda kv: -kv[1])[:int(body.get("top_logprobs") or 5)]
                 first = text[:1]
