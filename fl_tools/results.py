@@ -139,10 +139,17 @@ def load_records(run_dir: str, soapfl_dir: Optional[str] = None,
     if only is not None:
         names &= {b.name for b in only}
     records: List[BugRecord] = []
+    meta = read_json(os.path.join(run_dir, "run_meta.json")) or {}
+    run_version = meta.get("defects4j_version")          # set for dataset-2 runs only
     for name in sorted(names, key=lambda n: (n.split("-")[0], int(n.split("-")[1]))):
         project, bug_id = name.split("-")
-        bug = Bug(project, int(bug_id))
         bug_dir = dirs.get(name)
+        if bug_dir:   # the folder name carries the Defects4J version (d4j2.0.0-...): dataset 2 bugs keep it
+            bug = bug_from_dirname(os.path.basename(bug_dir.rstrip(os.sep)))
+        elif run_version:
+            bug = Bug(project, int(bug_id), run_version)
+        else:
+            bug = Bug(project, int(bug_id))
         record = BugRecord(bug=bug, dir=bug_dir, run=runs.get(name))
         if bug_dir:
             record.result = read_json(os.path.join(bug_dir, "result.json"))

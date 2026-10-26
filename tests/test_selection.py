@@ -353,3 +353,18 @@ def test_summary_tolerates_rows_from_older_versions(server, tmp_path):
     js.write_text(json.dumps(old))
     out = replay(run, ["S6"], split_path=None, out_root=str(out_root), draws=10, client=client)
     assert "| S5 |" in out["markdown"] and "| S6 |" in out["markdown"]
+
+
+def test_dataset2_cases_keep_version_and_find_context(tmp_path):
+    root = tmp_path / "reports" / "run"
+    d = root / "bugs" / "d4j2.0.0-Jsoup-1"
+    d.mkdir(parents=True)
+    (d / "ground_truth.json").write_text(json.dumps({"buggy_methods": ["x.Y::f()"]}))
+    (d / "result.json").write_text(json.dumps({"buggy_methods": [_m("x.Y::f()", 8), _m("x.Y::g()", 8)]}))
+    (root / "runs.jsonl").write_text(json.dumps({"bug": "Jsoup-1", "status": "ok"}))
+    (root / "run_meta.json").write_text(json.dumps({"dataset": "d4j2new", "defects4j_version": "2.0.0"}))
+    ctxdir = tmp_path / "reports" / "_failure_context"
+    ctxdir.mkdir()
+    (ctxdir / "d4j2.0.0-Jsoup-1.json").write_text(json.dumps(CTX))
+    cases = load_cases(str(root))
+    assert cases[0].record.bug.dirname == "d4j2.0.0-Jsoup-1" and cases[0].context is not None
