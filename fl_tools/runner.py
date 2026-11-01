@@ -48,8 +48,9 @@ RETRYABLE = {"server_unreachable", "rate_limited", "timeout", "killed_oom"}
 # settings that must not change when a run directory is resumed
 META_GUARDED_ENV = ["SOAPFL_MODEL_NAME", "SOAPFL_CONTEXT_LIMIT", "SOAPFL_EXTRA_BODY", "SOAPFL_STRIP_THINK",
                     "SOAPFL_MAX_COMPLETION_TOKENS", "SOAPFL_TOKEN_MARGIN",
-                    "SOAPFL_HD_HYPOTHESES", "SOAPFL_HD_CLASSES", "SOAPFL_HD_METHODS", "SOAPFL_HD_SELECTION"]
-PIPELINES = ("soapfl", "hypodeduce")
+                    "SOAPFL_HD_HYPOTHESES", "SOAPFL_HD_CLASSES", "SOAPFL_HD_METHODS", "SOAPFL_HD_SELECTION",
+                    "SOAPFL_CA_MODE", "SOAPFL_CA_K"]
+PIPELINES = ("soapfl", "hypodeduce", "classaug")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -112,6 +113,10 @@ def build_meta(name: str, soapfl_dir: str, config: str, model: str, lenient: boo
     if pipeline == "hypodeduce":
         from .hypodeduce.config import prompts_digest
         meta["hypodeduce_prompts_digest"] = prompts_digest()
+    if pipeline == "classaug":
+        import hashlib
+        with open(os.path.join(REPO_ROOT, "fl_tools", "classaug.py"), "rb") as f:
+            meta["classaug_digest"] = hashlib.sha256(f.read()).hexdigest()[:16]
     return meta
 
 
@@ -131,7 +136,8 @@ def check_or_write_meta(out_dir: str, meta: dict, allow_change: bool = False) ->
     for key in ("config", "model_type", "lenient", "seed"):
         if old.get(key) != meta.get(key):
             problems.append(f"{key}: was {old.get(key)!r}, now {meta.get(key)!r}")
-    for key, default in (("pipeline", "soapfl"), ("hypodeduce_prompts_digest", None), ("dataset", None)):
+    for key, default in (("pipeline", "soapfl"), ("hypodeduce_prompts_digest", None), ("dataset", None),
+                         ("classaug_digest", None)):
         if old.get(key, default) != meta.get(key, default):
             problems.append(f"{key}: was {old.get(key, default)!r}, now {meta.get(key, default)!r}")
     for key in META_GUARDED_ENV:
@@ -206,6 +212,14 @@ class Runner:
         if self.pipeline == "hypodeduce":
             env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             env["SOAPFL_HD_CONFIG_DIR"] = os.path.join(self.out_dir, "_hypodeduce_config")
+        if self.pipeline == "classaug":
+            # the bug's free class ranking from its failure context (no context = plain SoapFL for this bug)
+            from .classaug import ENV_RANKING, rank_classes
+            from .context import load_context
+            env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            ctx = load_context(os.environ.get("SOAPFL_CA_CONTEXT"), bug.dirname)
+            env[ENV_RANKING] = json.dumps(rank_classes(ctx)[:20])
+            env["SOAPFL_DIR"] = self.soapfl_dir
             env["SOAPFL_DIR"] = self.soapfl_dir
         return env
 
@@ -218,7 +232,8 @@ class Runner:
         return dataset_defects4j_home(bug.version)
 
     def _command(self, bug: Bug) -> List[str]:
-        entry = ["-m", "fl_tools.hypodeduce.soapfl_entry"] if self.pipeline == "hypodeduce" else ["run.py"]
+        entry = {"hypodeduce": ["-m", "fl_tools.hypodeduce.soapfl_entry"],
+                 "classaug": ["-m", "fl_tools.classaug"]}.get(self.pipeline, ["run.py"])
         return [self.python, *entry, "--config", self.config, "--version", bug.version,
                 "--project", bug.project, "--bugID", str(bug.id), "--output", self.out_dir,
                 "--model", self.model]

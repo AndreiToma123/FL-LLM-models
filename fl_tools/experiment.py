@@ -23,6 +23,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
                    defects4j_home: Optional[str] = None, timeout: Optional[int] = None,
                    skip_preflight: bool = False, subset_of: int = 0,
                    presets_path: Optional[str] = None, pipeline: str = "soapfl", hd: Optional[dict] = None,
+                   ca: Optional[dict] = None,
                    dataset: str = "d4j14", progress=print) -> int:
     try:
         presets = load_presets(presets_path)
@@ -51,6 +52,10 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
         if hd["selection"] != "max":
             suffix += f"-{hd['selection']}"
         progress("      HypoDeduce: " + ", ".join(f"{k}={v}" for k, v in hd.items()))
+    if pipeline == "classaug":
+        ca = configure_classaug(ca or {})
+        suffix = f"-ca{ca['k']}" + ("g" if ca["mode"] == "gated" else "")
+        progress("      class augmentation: " + ", ".join(f"{k}={v}" for k, v in ca.items()))
     if timeout is None:
         timeout = 10800 if pipeline == "hypodeduce" else 3600
     bugs = select_bugs(select, 0 if select else n, sample_seed, subset_of=0 if select else subset_of, dataset=dataset)
@@ -105,6 +110,23 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
 
 
 HD_DEFAULTS = {"hypotheses": 5, "classes": 5, "methods": 0, "selection": "max"}
+
+
+CA_DEFAULTS = {"k": 3, "mode": "always", "context": None}
+
+
+def configure_classaug(ca: dict) -> dict:
+    """Class augmentation settings, exported as SOAPFL_CA_* (mode and K are guarded in run_meta.json)."""
+    cfg = {k: (ca.get(k) if ca.get(k) is not None else v) for k, v in CA_DEFAULTS.items()}
+    if cfg["mode"] not in ("always", "gated"):
+        raise ValueError(f"unknown class augmentation mode {cfg['mode']!r}")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg["context"] = os.path.abspath(cfg["context"] or os.path.join(root, "reports", "_failure_context"))
+    if not os.path.isdir(cfg["context"]):
+        raise ValueError(f"failure-context folder {cfg['context']} not found (run `fl_tools context` first)")
+    os.environ["SOAPFL_CA_MODE"], os.environ["SOAPFL_CA_K"] = cfg["mode"], str(cfg["k"])
+    os.environ["SOAPFL_CA_CONTEXT"] = cfg["context"]
+    return cfg
 
 
 def configure_hypodeduce(hd: dict) -> dict:

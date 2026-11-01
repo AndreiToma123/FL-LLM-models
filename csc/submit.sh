@@ -9,6 +9,8 @@
 #   add --subset-of 100 to take the --n bugs from the 100 baseline bugs
 #   csc/submit.sh <preset> --n all                        all 388 bugs of Defects4J 1.4.0 (dataset 1)
 #   csc/submit.sh <preset> --dataset d4j2new --n all      all 444 bugs Defects4J 2.0 added (dataset 2)
+#   csc/submit.sh <preset> --classaug [--ca-k 3] [--ca-mode always|gated] --n all
+#                                             SoapFL + free class ranking (RQ1: always, RQ2: gated)
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
 #
@@ -22,7 +24,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
-PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14
+PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14; CA_K=3; CA_MODE=always
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -40,6 +42,9 @@ while [ $# -gt 0 ]; do
     --hd-m) HD_M="$2"; shift ;;
     --subset-of) SUBSET_OF="$2"; shift ;;
     --dataset) DATASET="$2"; shift ;;
+    --classaug) PIPELINE=classaug ;;
+    --ca-k) CA_K="$2"; shift ;;
+    --ca-mode) CA_MODE="$2"; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -71,6 +76,12 @@ if [ "$PIPELINE" = hypodeduce ]; then
   PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C --hd-methods $HD_M --timeout 10800"
   SUFFIX="-hd-h${HD_H}c${HD_C}"
   [ "$HD_M" != 0 ] && SUFFIX="${SUFFIX}m${HD_M}"
+fi
+if [ "$PIPELINE" = classaug ]; then
+  case "$CA_MODE" in always|gated) ;; *) die "unknown --ca-mode $CA_MODE (always or gated)" ;; esac
+  [ -d "$FL_REPO/reports/_failure_context" ] || die "reports/_failure_context missing: git pull (it is in the repository)"
+  PIPELINE_ARGS="--pipeline classaug --ca-k $CA_K --ca-mode $CA_MODE"
+  SUFFIX="-ca${CA_K}$( [ "$CA_MODE" = gated ] && echo g )"
 fi
 case "$DATASET" in d4j14|d4j2new) ;; *) die "unknown dataset $DATASET (d4j14 or d4j2new)" ;; esac
 if [ "$DATASET" != d4j14 ]; then

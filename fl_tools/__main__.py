@@ -26,13 +26,23 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
 
 
 def _add_pipeline(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--pipeline", choices=["soapfl", "hypodeduce"], default="soapfl",
-                   help="soapfl = baseline; hypodeduce = our re-implementation of HypoDeduce (ICSE-NIER 2026)")
+    p.add_argument("--pipeline", choices=["soapfl", "hypodeduce", "classaug"], default="soapfl",
+                   help="soapfl = baseline; hypodeduce = our re-implementation of HypoDeduce (ICSE-NIER 2026); "
+                        "classaug = SoapFL plus the free class ranking (RQ1 / RQ2)")
     p.add_argument("--hd-hypotheses", type=int, default=None, help="HypoDeduce H (default 5, as in the paper)")
     p.add_argument("--hd-classes", type=int, default=None, help="HypoDeduce C, classes per hypothesis (default 5)")
     p.add_argument("--hd-methods", type=int, default=None,
                    help="HypoDeduce: max methods per (hypothesis, class), 0 = all (default 0)")
     p.add_argument("--hd-selection", default=None, help="HypoDeduce hypothesis selection: max | mean_top3")
+    p.add_argument("--ca-k", type=int, default=None, help="classaug: heuristic top-K classes added (default 3)")
+    p.add_argument("--ca-mode", choices=["always", "gated"], default=None,
+                   help="classaug: always add (RQ1) or only when SoapFL's class is not the heuristic top-1 (RQ2)")
+    p.add_argument("--ca-context", default=None,
+                   help="classaug: failure-context folder (default reports/_failure_context in the repo)")
+
+
+def _ca_args(args) -> dict:
+    return {"k": args.ca_k, "mode": args.ca_mode, "context": args.ca_context}
 
 
 def _hd_args(args) -> dict:
@@ -244,7 +254,7 @@ def main(argv=None) -> int:
                               reports_dir=args.reports_dir, python=args.python,
                               defects4j_home=args.defects4j_home, timeout=args.timeout,
                               skip_preflight=args.skip_preflight, presets_path=args.presets,
-                              pipeline=args.pipeline, hd=_hd_args(args), subset_of=args.subset_of,
+                              pipeline=args.pipeline, hd=_hd_args(args), ca=_ca_args(args), subset_of=args.subset_of,
                               dataset=args.dataset)
 
     if args.cmd == "list-bugs":
@@ -284,6 +294,9 @@ def main(argv=None) -> int:
         if args.pipeline == "hypodeduce":
             from .experiment import configure_hypodeduce
             print("HypoDeduce: " + ", ".join(f"{k}={v}" for k, v in configure_hypodeduce(_hd_args(args)).items()))
+        if args.pipeline == "classaug":
+            from .experiment import configure_classaug
+            print("class augmentation: " + ", ".join(f"{k}={v}" for k, v in configure_classaug(_ca_args(args)).items()))
             if args.config == "Default":
                 args.config = "HypoDeduce"
         runner = Runner(name=args.name, results_dir=args.results_dir, soapfl_dir=args.soapfl_dir,
