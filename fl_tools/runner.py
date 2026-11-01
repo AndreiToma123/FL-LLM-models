@@ -43,7 +43,9 @@ FAILURE_PATTERNS = [
     ("defects4j_missing", r"No such file or directory: 'defects4j'|defects4j: (command )?not found"),
     ("local_model_name_missing", r"SOAPFL_MODEL_NAME"),
 ]
-RETRYABLE = {"server_unreachable", "rate_limited", "timeout", "killed_oom"}
+# A bug that hits the per-bug time limit is NOT retried: the second attempt makes the same model calls and times out
+# again (HypoDeduce on CSC, 2026-11-01: Closure bugs ran 3 h + 3 h while the rest of the GPU sat idle).
+RETRYABLE = {"server_unreachable", "rate_limited", "killed_oom"}
 
 # settings that must not change when a run directory is resumed
 META_GUARDED_ENV = ["SOAPFL_MODEL_NAME", "SOAPFL_CONTEXT_LIMIT", "SOAPFL_EXTRA_BODY", "SOAPFL_STRIP_THINK",
