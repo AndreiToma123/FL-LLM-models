@@ -81,7 +81,9 @@ if [ "$PIPELINE" = classaug ]; then
   case "$CA_MODE" in always|gated) ;; *) die "unknown --ca-mode $CA_MODE (always or gated)" ;; esac
   [ -d "$FL_REPO/reports/_failure_context" ] || die "reports/_failure_context missing: git pull (it is in the repository)"
   PIPELINE_ARGS="--pipeline classaug --ca-k $CA_K --ca-mode $CA_MODE"
-  SUFFIX="-ca${CA_K}$( [ "$CA_MODE" = gated ] && echo g )"
+  # (not `$( [ ... ] && echo g )`: under `set -e` its false test ends the script silently in `always` mode)
+  SUFFIX="-ca${CA_K}"
+  if [ "$CA_MODE" = gated ]; then SUFFIX="${SUFFIX}g"; fi
 fi
 case "$DATASET" in d4j14|d4j2new) ;; *) die "unknown dataset $DATASET (d4j14 or d4j2new)" ;; esac
 if [ "$DATASET" != d4j14 ]; then
