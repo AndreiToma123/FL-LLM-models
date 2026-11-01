@@ -40,17 +40,31 @@ def _tokens(name: str) -> set:
     return {t.lower() for t in re.split(r"[^A-Za-z0-9]+", s) if len(t) > 2}
 
 
+TEST_SUFFIXES = ("Test", "Tests", "TestCase", "TestSuite")
+TEST_PACKAGES = (".test.", ".tests.", ".junit.")
+
+
+def is_test_class(c: str, failing_test_classes=()) -> bool:
+    """Test code is never the bug (Defects4J bugs are in production code). Chart's tests are named
+    `...junit.FooTests`, which the first version missed (found in the 2026-11-01 local smoke test)."""
+    simple = c.split(".")[-1]
+    return (c in failing_test_classes or simple.endswith(TEST_SUFFIXES)
+            or any(p in f".{c}." for p in TEST_PACKAGES))
+
+
 def rank_classes(ctx: Optional[dict]) -> List[str]:
     """Classes executed by the failing tests, most suspicious first (fixed key, no tuning)."""
     if not ctx:
         return []
-    test_toks = set()
+    test_toks, test_classes = set(), set()
     for t in ctx.get("tests") or []:
-        test_toks |= _tokens(t["name"].split("::")[0].replace("Test", ""))
+        cls = t["name"].split("::")[0]
+        test_classes.add(outer_class(cls))
+        test_toks |= _tokens(re.sub(r"Tests?$", "", cls))
     feats: Dict[str, dict] = {}
     for m, e in (ctx.get("methods") or {}).items():
         c = class_of_method(m)
-        if c.endswith("Test") or ".test." in c:
+        if is_test_class(c, test_classes):
             continue
         f = feats.setdefault(c, {"depth": None, "cov": 0, "nm": 0})
         d = e.get("stack_depth")

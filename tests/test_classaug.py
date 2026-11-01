@@ -72,3 +72,12 @@ def test_runner_passes_ranking_and_entry(tmp_path, monkeypatch):
     assert json.loads(r._env(parse_bugs("Lang-2", include_deprecated=True)[0])[classaug.ENV_RANKING]) == []
     with pytest.raises(ValueError):
         configure_classaug({"context": str(tmp_path / "missing")})
+
+
+def test_test_classes_never_ranked():
+    ctx = {"tests": [{"name": "org.jfree.chart.plot.junit.PiePlot3DTests::testDraw", "frames": []}],
+           "methods": {"org.jfree.chart.plot.junit.PiePlot3DTests::testDraw()": {"failing_tests_covering": 1, "stack_depth": 0},
+                       "org.jfree.chart.plot.PiePlot3D::draw()": {"failing_tests_covering": 1, "stack_depth": 1},
+                       "org.jfree.chart.plot.PiePlot::initialise()": {"failing_tests_covering": 1, "stack_depth": None},
+                       "a.b.FooTestCase::setUp()": {"failing_tests_covering": 1, "stack_depth": None}}}
+    assert classaug.rank_classes(ctx) == ["org.jfree.chart.plot.PiePlot3D", "org.jfree.chart.plot.PiePlot"]
