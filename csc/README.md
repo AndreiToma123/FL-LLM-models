@@ -64,6 +64,27 @@ Reports land in `reports/<run>/` of the clone on Roihu. Get them to your PC with
 `scp -r andreist@roihu-gpu.csc.fi:/projappl/project_2021789/FL-LLM-models/reports/<run> reports/`
 or commit and push from Roihu.
 
+## Selector replays (RQ3 judge) on CSC
+
+The selectors (S0 ... S8a+S2, S8b) and the offline gate only re-read the candidate lists of a finished run in
+`reports/<run>/`; on CSC the judge is served by vLLM (same bf16 model as the SoapFL runs), not Ollama.
+
+```bash
+bash csc/submit_select.sh qwen25coder run12-qwen25coder-d4j2new --smoke                 # 15-min check
+bash csc/submit_select.sh qwen25coder runall-qwen25coder-csc,runall-qwen25coder-ca3-csc  # several runs, one job
+bash csc/submit_select.sh qwen25coder <hypodeduce run> --shortlist top-k                 # HypoDeduce lists
+bash csc/submit_select.sh qwen25coder run100-qwen25coder --split default --reveal-test   # dev/test protocol
+```
+
+- Default selectors = the frozen RQ3 set `S0,S0r,S1,S6,S5,S5+S2,S8a,S8a+S2`; default gate ladder `S6,S8a+S2`.
+- Reports go to `reports/judge-vllm/` (`<run>-sel-*`, `<run>-selection.md`, `<run>-gate.md`,
+  `<run>-judge-job.json` with elapsed time and GPU BU), so the Ollama-judge reports next to the runs stay.
+- Judge answers are cached per run in `$FL_ROOT/judge-cache/<run>.jsonl`: re-submitting the same command after a
+  time limit continues where it stopped.
+- `--context` first exports the failure context of bugs missing in `reports/_failure_context` (runs their failing
+  tests; all 832 dataset-1/2 bugs already have one, so only needed for other bugs).
+- vLLM gets `--enable-auto-tool-choice --tool-call-parser hermes` for the agent selector S8b (native tool calls).
+
 ## Spending the GPU budget carefully
 
 - Debug locally first. Use `--smoke` (15 min max) before any larger CSC run.
