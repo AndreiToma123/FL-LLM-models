@@ -34,17 +34,18 @@ rsync -a "$PERSIST/" "$WORK/results/$RUN/" --exclude _jobs
 # Excluding all of tmp/ made repeated runs crash outright (FileNotFoundError, class-augmentation runs).
 CACHE_FILTER=(--exclude '*.partial')   # (non-empty: an empty array trips set -u in older bash)
 rsync -a "${CACHE_FILTER[@]}" "$SOAPFL_CACHE/" "$WORK/cache/"
-# self-heal entries saved by older jobs without tmp/ or without the instrumentation logs: drop the pickle so SoapFL
-# re-runs (and compiles) the failing tests and re-creates every file it needs (one slower first run per bug)
+# self-heal entries saved by older jobs without tmp/ or without the instrumentation logs: remove the WHOLE entry
+# (only in this job's copy), so SoapFL rebuilds it from scratch: compile, run the failing tests, instrument (one slower
+# first run per bug). Dropping only the pickle is not enough: SoapFL then sees stack_trace.txt, skips the compile
+# ("test already run") and instruments an uncompiled checkout (Mockito: no run_test.log, 2026-11-02).
 HEALED=0
 for d in "$WORK"/cache/*/; do
-  [ -f "${d}test_failure.pkl" ] || continue
   if [ -z "$(find "${d}tmp" -name stack_trace.txt -print -quit 2>/dev/null)" ] \
-     || [ -z "$(find "${d}tmp" -name inst_src.log -print -quit 2>/dev/null)" ]; then
-    rm -f "${d}test_failure.pkl"; HEALED=$((HEALED + 1))
+     || [ -z "$(find "${d}tmp" -name inst_test.log -print -quit 2>/dev/null)" ]; then
+    rm -rf "$d"; HEALED=$((HEALED + 1))
   fi
 done
-log "cache: $(ls -d "$WORK"/cache/*/ 2>/dev/null | wc -l) bug entries restored, $HEALED without failing-test traces or instrumentation logs will be rebuilt"
+log "cache: $(ls -d "$WORK"/cache/*/ 2>/dev/null | wc -l) bug entries restored, $HEALED incomplete (no failing-test traces or instrumentation logs) and will be rebuilt from scratch"
 
 sync_back() {
   rsync -a --exclude 'buggy/' --exclude 'fixed/' "$WORK/results/$RUN/" "$PERSIST/"
