@@ -24,7 +24,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
                    skip_preflight: bool = False, subset_of: int = 0,
                    presets_path: Optional[str] = None, pipeline: str = "soapfl", hd: Optional[dict] = None,
                    ca: Optional[dict] = None,
-                   dataset: str = "d4j14", progress=print) -> int:
+                   dataset: str = "d4j14", safety: Optional[dict] = None, progress=print) -> int:
     try:
         presets = load_presets(presets_path)
         if model_key not in presets:
@@ -57,7 +57,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
         suffix = f"-ca{ca['k']}" + ("g" if ca["mode"] == "gated" else "")
         progress("      class augmentation: " + ", ".join(f"{k}={v}" for k, v in ca.items()))
     if timeout is None:
-        timeout = 10800 if pipeline == "hypodeduce" else 3600
+        timeout = 3600          # HypoDeduce too: its slowest finished bug on CSC took 16 min (2026-11-01)
     bugs = select_bugs(select, 0 if select else n, sample_seed, subset_of=0 if select else subset_of, dataset=dataset)
     if dataset != "d4j14":
         suffix += f"-{dataset}"
@@ -80,7 +80,7 @@ def run_experiment(model_key: str, *, n: int = 100, select: str = "", jobs: int 
     runner = Runner(name=name, results_dir=results_dir, soapfl_dir=soapfl_dir, model="LOCAL", lenient=True,
                     pipeline=pipeline, config="HypoDeduce" if pipeline == "hypodeduce" else "Default",
                     seed=seed, jobs=jobs, timeout=timeout, python=python, defects4j_home=defects4j_home,
-                    progress=progress)
+                    progress=progress, **(safety or {}))
     try:
         summary = runner.run(bugs)
     except MetaMismatch as exc:

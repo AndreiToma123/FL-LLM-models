@@ -25,6 +25,24 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
                    help="d4j14 = Defects4J 1.4.0 (SoapFL's 388 bugs, default); d4j2new = the 444 bugs Defects4J 2.0 added")
 
 
+def _add_safety(p: argparse.ArgumentParser) -> None:
+    """GPU-budget safeguards of the runner (see Runner)."""
+    p.add_argument("--retry-failed", action="store_true",
+                   help="also re-run bugs whose last attempt in this run failed for good (default: skip them)")
+    p.add_argument("--tail-factor", type=float, default=3.0,
+                   help="once every bug has started, stop a bug after this many times the 95th percentile of the "
+                        "finished bugs' run time (0 = off; default 3)")
+    p.add_argument("--tail-min", type=int, default=600, help="tail guard never stops a bug before this many seconds")
+    p.add_argument("--breaker-rate", type=float, default=0.5,
+                   help="stop the whole run when more than this share of the finished attempts failed (0 = off)")
+    p.add_argument("--breaker-min", type=int, default=30, help="circuit breaker waits for this many finished attempts")
+
+
+def _safety(args) -> dict:
+    return {"retry_failed": args.retry_failed, "tail_factor": args.tail_factor, "tail_min": args.tail_min,
+            "breaker_rate": args.breaker_rate, "breaker_min": args.breaker_min}
+
+
 def _add_pipeline(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pipeline", choices=["soapfl", "hypodeduce", "classaug"], default="soapfl",
                    help="soapfl = baseline; hypodeduce = our re-implementation of HypoDeduce (ICSE-NIER 2026); "
@@ -90,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show what would run, do nothing")
     p.add_argument("--skip-preflight", action="store_true")
     _add_pipeline(p)
+    _add_safety(p)
 
     p = sub.add_parser("score", help="Top-1/3/5 table for a run")
     p.add_argument("run_dir")
@@ -129,11 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reports-dir", default=os.path.join(ROOT, "reports"))
     p.add_argument("--python", default=None)
     p.add_argument("--defects4j-home", default=None)
-    p.add_argument("--timeout", type=int, default=None,
-                   help="seconds per bug attempt (default 3600; 10800 for --pipeline hypodeduce)")
+    p.add_argument("--timeout", type=int, default=None, help="seconds per bug attempt (default 3600)")
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument("--presets", default=None)
     _add_pipeline(p)
+    _add_safety(p)
 
     p = sub.add_parser("select", help="RQ3: replay final-selection strategies on a finished run's candidate lists")
     p.add_argument("run_dir", nargs="?", default="")
@@ -255,7 +274,7 @@ def main(argv=None) -> int:
                               defects4j_home=args.defects4j_home, timeout=args.timeout,
                               skip_preflight=args.skip_preflight, presets_path=args.presets,
                               pipeline=args.pipeline, hd=_hd_args(args), ca=_ca_args(args), subset_of=args.subset_of,
-                              dataset=args.dataset)
+                              dataset=args.dataset, safety=_safety(args))
 
     if args.cmd == "list-bugs":
         bugs = _select(args)
@@ -302,7 +321,8 @@ def main(argv=None) -> int:
         runner = Runner(name=args.name, results_dir=args.results_dir, soapfl_dir=args.soapfl_dir,
                         pipeline=args.pipeline, config=args.config, model=args.model, lenient=not args.strict, seed=args.seed,
                         jobs=args.jobs, timeout=args.timeout, retries=args.retries, python=args.python,
-                        defects4j_home=args.defects4j_home, allow_meta_change=args.allow_meta_change)
+                        defects4j_home=args.defects4j_home, allow_meta_change=args.allow_meta_change,
+                        **_safety(args))
         try:
             summary = runner.run(bugs)
         except MetaMismatch as exc:
@@ -310,7 +330,11 @@ def main(argv=None) -> int:
             return 1
         except KeyboardInterrupt:
             return 130
-        print(f"done: {summary['status_counts']} (already finished: {summary['skipped_finished']})")
+        print(f"done: {summary['status_counts']} (already finished: {summary['skipped_finished']}, "
+              f"skipped earlier failures: {summary['skipped_failed']})")
+        if summary.get("circuit_breaker"):
+            print("STOPPED BY THE " + summary["circuit_breaker"], file=sys.stderr)
+            return 3
         print(f"next: python -m fl_tools score {summary['out_dir']} && "
               f"python -m fl_tools funnel {summary['out_dir']}")
         return 0

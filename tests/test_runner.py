@@ -23,6 +23,8 @@ if a.bugID == "3":
     print("ValueError: Invalid Method Review Conclusion"); sys.exit(1)
 if a.bugID == "4":
     time.sleep(30)
+if int(a.bugID) >= 100:
+    print("AssertionError: Error: No instrument file:"); sys.exit(1)
 json.dump({"buggy_methods": [{"class_name": "A", "method_name": "A::f()", "score": 9}], "buggy_codes": {}},
           open(os.path.join(d, "result.json"), "w"))
 json.dump({"buggy_methods": ["A::f()"]}, open(os.path.join(d, "ground_truth.json"), "w"))
@@ -56,7 +58,31 @@ def test_batch_resume_and_classification(tmp_path, soapfl):
     assert sum(1 for x in runs if x["bug"] == "Lang-2") == 2
     assert sum(1 for x in runs if x["bug"] == "Lang-3") == 1  # not transient -> no retry
     out2 = make(tmp_path, soapfl).run(bugs)
-    assert out2["skipped_finished"] == 1 and out2["ran"] == 2
+    # Lang-3 failed for good -> skipped on resume; Lang-2 (server unreachable, transient) is tried again
+    assert out2["skipped_finished"] == 1 and out2["skipped_failed"] == 1 and out2["ran"] == 1
+    out3 = make(tmp_path, soapfl, retry_failed=True).run(bugs)
+    assert out3["skipped_failed"] == 0 and out3["ran"] == 2
+
+
+def test_tail_guard_stops_a_straggler(tmp_path, soapfl):
+    """Once every bug has started, a bug running far longer than the finished ones is stopped
+    (2026-11-02: one hung bug held the GPU for hours while the other 387 were done)."""
+    bugs = parse_bugs("Lang-5:14") + parse_bugs("Lang-4")
+    r = make(tmp_path, soapfl, timeout=60, retries=0, jobs=11, tail_factor=3, tail_min=2, heartbeat=0.3)
+    out = r.run(bugs)
+    rows = {x["bug"]: x for x in (json.loads(l) for l in open(os.path.join(r.out_dir, "runs.jsonl")))}
+    assert rows["Lang-4"]["status"] == "timeout" and rows["Lang-4"]["error_class"] == "tail_timeout"
+    assert rows["Lang-4"]["wall_s"] < 20
+    assert out["status_counts"] == {"ok": 10, "timeout": 1}
+
+
+def test_circuit_breaker(tmp_path, soapfl):
+    """Most bugs failing = broken setup: stop instead of spending the budget."""
+    r = make(tmp_path, soapfl, retries=0, jobs=2, breaker_min=6, breaker_rate=0.5)
+    out = r.run(parse_bugs("Closure-100:130"))
+    rows = [json.loads(l) for l in open(os.path.join(r.out_dir, "runs.jsonl"))]
+    assert out["circuit_breaker"]
+    assert len([x for x in rows if x["status"] == "failed"]) < 15
 
 
 def test_timeout(tmp_path, soapfl):

@@ -46,6 +46,12 @@ FAILURE_PATTERNS = [
 # A bug that hits the per-bug time limit is NOT retried: the second attempt makes the same model calls and times out
 # again (HypoDeduce on CSC, 2026-11-01: Closure bugs ran 3 h + 3 h while the rest of the GPU sat idle).
 RETRYABLE = {"server_unreachable", "rate_limited", "killed_oom"}
+# Failures that are part of the benchmark setup, not a broken run (Defects4J gives no failing-test output for some
+# Mockito bugs in our container in every pipeline): they do not count for the circuit breaker.
+EXPECTED_FAILURES = {"no_failing_test_output"}
+# A finished bug's last status that a resumed run does NOT try again unless retry_failed is set: the bug simply did
+# not work in this run (reported like the other papers do). Retryable infrastructure errors are always retried.
+FINAL_STATUSES = {"failed", "timeout", "no_result", "runner_error"}
 
 # settings that must not change when a run directory is resumed
 META_GUARDED_ENV = ["SOAPFL_MODEL_NAME", "SOAPFL_CONTEXT_LIMIT", "SOAPFL_EXTRA_BODY", "SOAPFL_STRIP_THINK",
@@ -171,7 +177,8 @@ class Runner:
                  timeout: int = 3600, retries: int = 1, python: Optional[str] = None,
                  defects4j_home: Optional[str] = None, patches_dir: Optional[str] = None,
                  allow_meta_change: bool = False, heartbeat: float = 60.0, progress: Callable[[str], None] = print,
-                 pipeline: str = "soapfl"):
+                 pipeline: str = "soapfl", retry_failed: bool = False, tail_factor: float = 3.0,
+                 tail_min: int = 600, breaker_rate: float = 0.5, breaker_min: int = 30):
         if pipeline not in PIPELINES:
             raise ValueError(f"unknown pipeline {pipeline!r}; use one of {PIPELINES}")
         self.pipeline = pipeline
@@ -190,6 +197,20 @@ class Runner:
         self._lock = threading.Lock()
         self._procs: List[subprocess.Popen] = []
         self._stopping = threading.Event()   # set on Ctrl-C / SIGTERM: no new attempts, no retries
+        # --- GPU-budget safeguards (2026-11-02: one hung bug held a whole GPU for 6 h) ---
+        # retry_failed: a resumed run also re-runs bugs whose last attempt failed for good (default: skip them)
+        # tail guard: once every bug has started, a still-running bug is stopped after
+        #   max(tail_min, tail_factor x the 95th percentile of finished bugs' run time) (0 = off)
+        # circuit breaker: after breaker_min finished attempts, stop the whole run if more than breaker_rate of them
+        #   failed (expected benchmark failures excluded): something is broken, do not burn the budget (0 = off)
+        self.retry_failed = retry_failed
+        self.tail_factor, self.tail_min = tail_factor, tail_min
+        self.breaker_rate, self.breaker_min = breaker_rate, breaker_min
+        self._pending = 0                    # bugs not yet started
+        self._ok_walls: List[float] = []     # run times of successful attempts (incl. earlier jobs of this run)
+        self._finished = 0                   # attempts finished in this job
+        self._bad = 0                        # ... of which unexpected failures
+        self.breaker_tripped = ""
 
     # ---------------------------------------------------------------- helpers
     def bug_dir(self, bug: Bug) -> str:
@@ -233,6 +254,35 @@ class Runner:
             return self.defects4j_home
         return dataset_defects4j_home(bug.version)
 
+    def _limit(self) -> float:
+        """Current time limit per attempt (seconds; 0 = none): the fixed timeout, shortened in the tail."""
+        limit = float(self.timeout) if self.timeout > 0 else 0.0
+        with self._lock:
+            tail = self._pending == 0 and self.tail_factor > 0 and len(self._ok_walls) >= 10
+            walls = sorted(self._ok_walls) if tail else []
+        if tail:
+            p95 = walls[min(len(walls) - 1, int(0.95 * len(walls)))]
+            t = max(float(self.tail_min), self.tail_factor * p95)
+            limit = min(limit, t) if limit else t
+        return limit
+
+    def _previous_rows(self) -> Dict[str, dict]:
+        last: Dict[str, dict] = {}
+        try:
+            with open(os.path.join(self.out_dir, "runs.jsonl"), "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        last[row.get("bug")] = row
+                        if row.get("status") == "ok" and row.get("wall_s"):
+                            self._ok_walls.append(float(row["wall_s"]))
+        except OSError:
+            pass
+        return last
+
     def _command(self, bug: Bug) -> List[str]:
         entry = {"hypodeduce": ["-m", "fl_tools.hypodeduce.soapfl_entry"],
                  "classaug": ["-m", "fl_tools.classaug"]}.get(self.pipeline, ["run.py"])
@@ -271,14 +321,18 @@ class Runner:
                 self._procs.append(proc)
                 if self._stopping.is_set():      # stop requested while this bug was starting
                     _kill_group(proc)
+            tail_cut = False
             try:
                 while True:
                     try:
-                        remaining = self.timeout - (time.time() - started) if self.timeout > 0 else self.heartbeat
+                        limit = self._limit()
+                        remaining = limit - (time.time() - started) if limit > 0 else self.heartbeat
                         returncode = proc.wait(timeout=max(0.1, min(self.heartbeat, remaining)))
                         break
                     except subprocess.TimeoutExpired:
-                        if self.timeout > 0 and time.time() - started >= self.timeout:
+                        limit = self._limit()
+                        if limit > 0 and time.time() - started >= limit:
+                            tail_cut = self.timeout <= 0 or limit < self.timeout
                             _kill_group(proc)
                             proc.wait()
                             status = "timeout"
@@ -297,7 +351,7 @@ class Runner:
 
         error_class = ""
         if status == "timeout":
-            error_class = "timeout"
+            error_class = "tail_timeout" if tail_cut else "timeout"
         elif self.is_finished(bug):
             status = "ok"
         elif returncode == 0:
@@ -315,6 +369,8 @@ class Runner:
 
     def run_bug(self, bug: Bug) -> dict:
         row: dict = {}
+        with self._lock:
+            self._pending -= 1
         for attempt in range(1, self.retries + 2):
             if self._stopping.is_set():
                 break
@@ -322,12 +378,41 @@ class Runner:
             if self._stopping.is_set() and row["status"] != "ok":
                 row.update(status="interrupted", error_class="interrupted")
             self._append_run(row)
+            self._account(row)
             bug_dir = self.bug_dir(bug)
             if os.path.isdir(bug_dir):
                 snapshot_ground_truth(self.soapfl_dir, bug_dir, self.python)
             if row["status"] in ("ok", "no_result", "interrupted") or row["error_class"] not in RETRYABLE:
                 break
         return row or {"bug": bug.name, "status": "interrupted", "error_class": "interrupted", "wall_s": 0}
+
+    def _account(self, row: dict) -> None:
+        """Record a finished attempt for the tail guard and the circuit breaker."""
+        trip = ""
+        with self._lock:
+            if row["status"] == "ok":
+                self._ok_walls.append(float(row.get("wall_s") or 0))
+            if row["status"] == "interrupted":
+                return
+            self._finished += 1
+            if row["status"] != "ok" and row.get("error_class") not in EXPECTED_FAILURES:
+                self._bad += 1
+            if (self.breaker_rate > 0 and not self.breaker_tripped and self._finished >= self.breaker_min
+                    and self._bad > self.breaker_rate * self._finished):
+                trip = self.breaker_tripped = (
+                    f"circuit breaker: {self._bad} of the {self._finished} finished attempts failed "
+                    f"(more than {self.breaker_rate:.0%}); stopping the run so the GPU budget is not spent on a "
+                    f"broken setup. Check the logs, fix, and re-submit (add --retry-failed to re-run the failed bugs).")
+        if trip:
+            self.progress("!!! " + trip)
+            self.stop()
+
+    def stop(self) -> None:
+        """Stop starting new bugs and kill the running ones (their rows are written as interrupted)."""
+        self._stopping.set()
+        with self._lock:
+            for proc in list(self._procs):
+                _kill_group(proc)
 
     # ------------------------------------------------------------------ batch
     def run(self, bugs: List[Bug]) -> dict:
@@ -346,10 +431,23 @@ class Runner:
             from .hypodeduce.config import build_configs
             build_configs(self.soapfl_dir, os.path.join(self.out_dir, "_hypodeduce_config"))
 
+        previous = self._previous_rows()
         todo = [b for b in bugs if not self.is_finished(b)]
         skipped = len(bugs) - len(todo)
-        self.progress(f"{len(bugs)} bugs selected, {skipped} already finished, {len(todo)} to run "
-                      f"({self.jobs} parallel, timeout {self.timeout}s) -> {self.out_dir}")
+        given_up = []
+        if not self.retry_failed:
+            given_up = [b for b in todo if previous.get(b.name, {}).get("status") in FINAL_STATUSES
+                        and previous[b.name].get("error_class") not in RETRYABLE]
+            todo = [b for b in todo if b not in given_up]
+        self._pending = len(todo)
+        self.progress(f"{len(bugs)} bugs selected, {skipped} already finished, "
+                      + (f"{len(given_up)} failed in an earlier job and skipped (use --retry-failed to re-run them), "
+                         if given_up else "")
+                      + f"{len(todo)} to run ({self.jobs} parallel, timeout {self.timeout}s, tail guard "
+                      + (f"{self.tail_factor:g} x p95 >= {self.tail_min}s" if self.tail_factor > 0 else "off")
+                      + ", circuit breaker "
+                      + (f"> {self.breaker_rate:.0%} failures after {self.breaker_min}" if self.breaker_rate > 0 else "off")
+                      + f") -> {self.out_dir}")
 
         results: List[dict] = []
         done = 0
@@ -387,5 +485,6 @@ class Runner:
         counts: Dict[str, int] = {}
         for row in results:
             counts[row["status"]] = counts.get(row["status"], 0) + 1
-        return {"selected": len(bugs), "skipped_finished": skipped, "ran": len(todo),
-                "status_counts": counts, "out_dir": self.out_dir}
+        return {"selected": len(bugs), "skipped_finished": skipped, "skipped_failed": len(given_up),
+                "ran": len(todo), "status_counts": counts, "out_dir": self.out_dir,
+                "circuit_breaker": self.breaker_tripped}

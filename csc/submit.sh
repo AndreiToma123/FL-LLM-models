@@ -11,6 +11,10 @@
 #   csc/submit.sh <preset> --dataset d4j2new --n all      all 444 bugs Defects4J 2.0 added (dataset 2)
 #   csc/submit.sh <preset> --classaug [--ca-k 3] [--ca-mode always|gated] --n all
 #                                             SoapFL + free class ranking (RQ1: always, RQ2: gated)
+# Safeguards (on by default, see fl_tools/runner.py): bugs that failed in an earlier job of the same run are NOT
+#   re-run (add --retry-failed after fixing their cause); once all bugs have started, a straggler is stopped after
+#   3 x the 95th-percentile run time of the finished bugs (min 10 min; --tail-factor F, --tail-min S, 0 = off);
+#   the run stops itself if more than half of 30+ finished attempts failed (--breaker-rate R, --breaker-min N).
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
 #
@@ -24,7 +28,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
-PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14; CA_K=3; CA_MODE=always
+SAFETY=""; PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14; CA_K=3; CA_MODE=always
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -45,6 +49,8 @@ while [ $# -gt 0 ]; do
     --classaug) PIPELINE=classaug ;;
     --ca-k) CA_K="$2"; shift ;;
     --ca-mode) CA_MODE="$2"; shift ;;
+    --retry-failed) SAFETY="$SAFETY --retry-failed" ;;
+    --tail-factor|--tail-min|--breaker-rate|--breaker-min) SAFETY="$SAFETY $1 $2"; shift ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -91,6 +97,7 @@ if [ "$DATASET" != d4j14 ]; then
   PIPELINE_ARGS="$PIPELINE_ARGS --dataset $DATASET"
   SUFFIX="${SUFFIX}-$DATASET"
 fi
+PIPELINE_ARGS="$PIPELINE_ARGS$SAFETY"
 SIZE="$N"
 if [ "$SUBSET_OF" != 0 ] && [ "$SUBSET_OF" -gt "$N" ]; then
   PIPELINE_ARGS="$PIPELINE_ARGS --subset-of $SUBSET_OF"
