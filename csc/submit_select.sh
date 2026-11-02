@@ -15,8 +15,8 @@
 #   --split S         none (default: every bug judged) | default (configs/selection_split.json dev/test) | <file>
 #   --reveal-test     with --split default: also judge and report the test part
 #   --shortlist M     top-tie (default; SoapFL lists) | top-k (HypoDeduce lists)      --k N (default 8)
-#   --out DIR         where the -sel-*/selection/gate reports go (default reports/judge-vllm, so the earlier
-#                     Ollama-judge reports next to the runs are NOT overwritten)
+#   --out DIR         where the -sel-*/selection/gate reports go (default $FL_ROOT/judge-vllm on scratch: projappl
+#                     has a 150k-file quota; a relative DIR is a folder inside the repository)
 #   --context         first export the failure context of bugs that have none (runs their failing tests;
 #                     needed for new runs whose bugs are not in reports/_failure_context; skipped bugs are free)
 #   --jobs N          bugs judged in parallel (default 32)    --time HH:MM:SS (default 04:00:00)
@@ -60,8 +60,7 @@ case "$SPLIT" in
   *) [ -f "$SPLIT" ] || die "split file $SPLIT not found" ;;
 esac
 [ "$LADDER" = none ] && LADDER=""
-if [ -z "$OUT" ]; then if [ "$SMOKE" = 1 ]; then OUT=reports/judge-vllm-smoke; else OUT=reports/judge-vllm; fi; fi
-case "$OUT" in /*) die "--out must be a folder inside the repository (e.g. reports/judge-vllm)" ;; esac
+if [ -z "$OUT" ]; then if [ "$SMOKE" = 1 ]; then OUT="$FL_ROOT/judge-vllm-smoke"; else OUT="$FL_ROOT/judge-vllm"; fi; fi
 if [ -n "$LADDER" ]; then           # the gate reads the replays of its ladder: they must be in this job (or done earlier)
   IFS=',' read -r -a L <<< "$LADDER"
   for s in "${L[@]}"; do

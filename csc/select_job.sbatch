@@ -20,7 +20,12 @@ fail() { log "FAILED: $*"; exit 1; }
 
 WORK="${TMPDIR:?}/fl-sel-$SLURM_JOB_ID"           # node-local scratch (context export checkouts), deleted after the job
 JUDGE_CACHE_DIR="$FL_ROOT/judge-cache"            # judge answers, persistent: a re-submitted job repeats no call
-OUT_DIR="$FL_REPO/$FL_OUT"                         # e.g. reports/judge-vllm
+# Reports go to scratch by default (projappl has a 150k-file quota; one full replay writes ~13k files).
+# An absolute --out is bound into the container as /work/out; a relative one is a folder inside the repository.
+case "$FL_OUT" in
+  /*) OUT_DIR="$FL_OUT"; OUT_C=/work/out ;;
+  *)  OUT_DIR="$FL_REPO/$FL_OUT"; OUT_C="/work/repo/$FL_OUT" ;;
+esac
 mkdir -p "$WORK/results/_failure_context" "$WORK/cache" "$JUDGE_CACHE_DIR" "$OUT_DIR" "$FL_ROOT/logs" \
   || fail "cannot create folders"
 log "job $SLURM_JOB_ID on $(hostname): judge $FL_PRESET ($FL_HF_REPO); runs: $FL_RUNS"
@@ -41,7 +46,7 @@ done
 } > "$WORK/fl.env"
 SF=(apptainer exec --cleanenv --writable-tmpfs --env-file "$WORK/fl.env"
     --bind="$(csc-common-bind)" --bind="$TMPDIR" --bind="$WORK/cache:/opt/SoapFL/cache"
-    --bind="$JUDGE_CACHE_DIR:/work/judge" --bind="$FL_REPO:/work/repo" --pwd /work/repo "$SOAPFL_SIF")
+    --bind="$JUDGE_CACHE_DIR:/work/judge" --bind="$FL_REPO:/work/repo" --bind="$OUT_DIR:/work/out" --pwd /work/repo "$SOAPFL_SIF")
 
 # ---------------------------------------------------------------- failure context for bugs that have none
 # Already exported bugs are copied in first, so the exporter skips them (it is resumable per file).
@@ -105,7 +110,7 @@ for r in "${RUNS[@]}"; do
   log "=== $r: select $FL_SELECTORS"
   SEL=(python -m fl_tools select "reports/$r" --selector "$FL_SELECTORS" --judge-model "$FL_PRESET"
        --split "$FL_SPLIT" --shortlist "$FL_SHORTLIST" --k "$FL_K" --jobs "$FL_SEL_JOBS"
-       --cache "/work/judge/$r.jsonl" --out-root "/work/repo/$FL_OUT" ${FL_EXTRA:-})
+       --cache "/work/judge/$r.jsonl" --out-root "$OUT_C" ${FL_EXTRA:-})
   "${SF[@]}" "${SEL[@]}" > "$JOB_LOG_DIR/$r-select.txt" 2>&1 &
   SEL_PID=$!
   wait "$SEL_PID"; rc=$?
@@ -113,7 +118,7 @@ for r in "${RUNS[@]}"; do
   tail -40 "$JOB_LOG_DIR/$r-select.txt"
   if [ "$rc" != 0 ]; then log "select on $r failed (exit $rc), see $JOB_LOG_DIR/$r-select.txt"; RC=$rc; continue; fi
   if [ -n "$FL_LADDER" ]; then
-    GATE=(python -m fl_tools gate "reports/$r" --ladder "$FL_LADDER" --split "$FL_SPLIT" --out-root "/work/repo/$FL_OUT")
+    GATE=(python -m fl_tools gate "reports/$r" --ladder "$FL_LADDER" --split "$FL_SPLIT" --out-root "$OUT_C")
     [[ " ${FL_EXTRA:-} " == *" --reveal-test "* ]] && GATE+=(--reveal-test)
     "${SF[@]}" "${GATE[@]}" > "$JOB_LOG_DIR/$r-gate.txt" 2>&1 || log "gate on $r failed, see $JOB_LOG_DIR/$r-gate.txt"
     head -20 "$JOB_LOG_DIR/$r-gate.txt"

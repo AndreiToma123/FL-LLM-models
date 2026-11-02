@@ -77,7 +77,7 @@ bash csc/submit_select.sh qwen25coder run100-qwen25coder --split default --revea
 ```
 
 - Default selectors = the frozen RQ3 set `S0,S0r,S1,S6,S5,S5+S2,S8a,S8a+S2`; default gate ladder `S6,S8a+S2`.
-- Reports go to `reports/judge-vllm/` (`<run>-sel-*`, `<run>-selection.md`, `<run>-gate.md`,
+- Reports go to `$FL_ROOT/judge-vllm/` on scratch (projappl has a 150k-file quota; `--out reports/x` writes into the repo instead) (`<run>-sel-*`, `<run>-selection.md`, `<run>-gate.md`,
   `<run>-judge-job.json` with elapsed time and GPU BU), so the Ollama-judge reports next to the runs stay.
 - Judge answers are cached per run in `$FL_ROOT/judge-cache/<run>.jsonl`: re-submitting the same command after a
   time limit continues where it stopped.
