@@ -1,0 +1,680 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+        "org.apache.commons.compress.archivers.zip.ZipShort",
+        "org.apache.commons.compress.archivers.zip.ZipLong",
+        "org.apache.commons.compress.archivers.zip.ZipUtil"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+            "method_code": "```java\n    public void parseFromLocalFileData(\n            byte[] data, int offset, int length\n    ) throws ZipException {\n        reset();\n        this.version = signedByteToUnsignedInt(data[offset++]);\n        int uidSize = signedByteToUnsignedInt(data[offset++]);\n        byte[] uidBytes = new byte[uidSize];\n        System.arraycopy(data, offset, uidBytes, 0, uidSize);\n        offset += uidSize;\n        this.uid = new BigInteger(1, reverse(uidBytes)); // sign-bit forced positive\n\n        int gidSize = signedByteToUnsignedInt(data[offset++]);\n        byte[] gidBytes = new byte[gidSize];\n        System.arraycopy(data, offset, gidBytes, 0, gidSize);\n        this.gid = new BigInteger(1, reverse(gidBytes)); // sign-bit forced positive\n    }\n\n```",
+            "method_doc": " Populate data from this array as if it was in local file data.  @param data   an array of bytes @param offset the start offset @param length the number of bytes in the array from offset @throws java.util.zip.ZipException on error ",
+            "class_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+            "class_doc": " An extra field that stores UNIX UID/GID data (owner &amp; group ownership) for a given zip entry.  We're using the field definition given in Info-Zip's source archive: zip-3.0.tar.gz/proginfo/extrafld.txt  <pre> Local-header version:  Value         Size        Description -----         ----        ----------- 0x7875        Short       tag for this extra block type (\"ux\") TSize         Short       total data size for this block Version       1 byte      version of this extra field, currently 1 UIDSize       1 byte      Size of UID field UID           Variable    UID for this entry (little endian) GIDSize       1 byte      Size of GID field GID           Variable    GID for this entry (little endian)  Central-header version:  Value         Size        Description -----         ----        ----------- 0x7855        Short       tag for this extra block type (\"Ux\") TSize         Short       total data size for this block (0) </pre> @since 1.5 ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of UID and GID fields from the local file data. Given that the failure occurs during the parsing of zero-length UID and GID fields, it is reasonable to suspect that there is an issue with how these cases are being handled in the `parseFromLocalFileData` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])",
+            "method_code": "```java\n    static byte[] trimLeadingZeroesForceMinLength(byte[] array) {\n        if (array == null) {\n            return array;\n        }\n\n        int pos = 0;\n        for (byte b : array) {\n            if (b == 0) {\n                pos++;\n            } else {\n                break;\n            }\n        }\n\n        /*\n\n        I agonized over my choice of MIN_LENGTH=1.  Here's the situation:\n        InfoZip (the tool I am using to test interop) always sets these\n        to length=4.  And so a UID of 0 (typically root) for example is\n        encoded as {4,0,0,0,0} (len=4, 32 bits of zero), when it could just\n        as easily be encoded as {1,0} (len=1, 8 bits of zero) according to\n        the spec.\n\n        In the end I decided on MIN_LENGTH=1 for four reasons:\n\n        1.)  We are adhering to the spec as far as I can tell, and so\n             a consumer that cannot parse this is broken.\n\n        2.)  Fundamentally, zip files are about shrinking things, so\n             let's save a few bytes per entry while we can.\n\n        3.)  Of all the people creating zip files using commons-\n             compress, how many care about UNIX UID/GID attributes\n             of the files they store?   (e.g., I am probably thinking\n             way too hard about this and no one cares!)\n\n        4.)  InfoZip's tool, even though it carefully stores every UID/GID\n             for every file zipped on a unix machine (by default) currently\n             appears unable to ever restore UID/GID.\n             unzip -X has no effect on my machine, even when run as root!!!!\n\n        And thus it is decided:  MIN_LENGTH=1.\n\n        If anyone runs into interop problems from this, feel free to set\n        it to MIN_LENGTH=4 at some future time, and then we will behave\n        exactly like InfoZip (requires changes to unit tests, though).\n\n        And I am sorry that the time you spent reading this comment is now\n        gone and you can never have it back.\n\n        */\n        final int MIN_LENGTH = 1;\n\n        byte[] trimmedArray = new byte[Math.max(MIN_LENGTH, array.length - pos)];\n        int startPos = trimmedArray.length - (array.length - pos);\n        System.arraycopy(array, pos, trimmedArray, startPos, trimmedArray.length - startPos);\n        return trimmedArray;\n    }\n\n```",
+            "method_doc": " Not really for external usage, but marked \"package\" visibility to help us JUnit it.   Trims a byte array of leading zeroes while also enforcing a minimum length, and thus it really trims AND pads at the same time.  @param array byte[] array to trim & pad. @return trimmed & padded byte[] array. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+            "class_doc": " An extra field that stores UNIX UID/GID data (owner &amp; group ownership) for a given zip entry.  We're using the field definition given in Info-Zip's source archive: zip-3.0.tar.gz/proginfo/extrafld.txt  <pre> Local-header version:  Value         Size        Description -----         ----        ----------- 0x7875        Short       tag for this extra block type (\"ux\") TSize         Short       total data size for this block Version       1 byte      version of this extra field, currently 1 UIDSize       1 byte      Size of UID field UID           Variable    UID for this entry (little endian) GIDSize       1 byte      Size of GID field GID           Variable    GID for this entry (little endian)  Central-header version:  Value         Size        Description -----         ----        ----------- 0x7855        Short       tag for this extra block type (\"Ux\") TSize         Short       total data size for this block (0) </pre> @since 1.5 ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly manipulates the byte arrays representing UID and GID, which are causing issues when zero-length fields are encountered.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+            "method_code": "```java\n    public int getValue() {\n        return value;\n    }\n\n```",
+            "method_doc": " Get value as Java int. @return value as a Java int ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipShort",
+            "class_doc": " Utility class that represents a two byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the value stored in the instance variable 'value', which could be causing issues when dealing with zero-length fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)",
+            "method_code": "```java\n    public ZipShort (int value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the int to store as a ZipShort ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipShort",
+            "class_doc": " Utility class that represents a two byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the conversion of an integer to a two-byte representation, which could be causing issues when dealing with zero values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        putLong(value, result, 0);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly converts a long value to a byte array, which could be causing issues when dealing with zero-length fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+            "method_code": "```java\n    public static void putLong(long value, byte[] buf, int offset) {\n        buf[offset++] = (byte) ((value & BYTE_MASK));\n        buf[offset++] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        buf[offset++] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        buf[offset] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n    }\n\n```",
+            "method_doc": " put the value as four bytes in big endian byte order. @param value the Java long to convert to bytes @param buf the output buffer @param  offset The offset within the output buffer of the first byte to be written. must be non-negative and no larger than <tt>buf.length-4</tt> ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the conversion of a long value to a four-byte array in big-endian byte order. Given that the failure occurs during the parsing of UID and GID fields, which are represented as long values, it is reasonable to suspect that an issue in this method could lead to incorrect parsing of these fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the conversion of a long value to a four-byte array, which could be causing issues when dealing with zero-length fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+            "method_code": "```java\n    public static int signedByteToUnsignedInt(byte b) {\n        if (b >= 0) {\n            return b;\n        } else {\n            return 256 + b;\n        }\n    }\n\n```",
+            "method_doc": " Converts a signed byte into an unsigned integer representation (e.g., -1 becomes 255).  @param b byte to convert to int @return int representation of the provided byte @since 1.5 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly converts signed bytes to unsigned integers, which could lead to incorrect interpretations of zero values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)",
+            "method_code": "```java\n    public static byte unsignedIntToSignedByte(int i) {\n        if (i > 255 || i < 0) {\n            throw new IllegalArgumentException(\"Can only convert non-negative integers between [0,255] to byte: [\" + i + \"]\");\n        }\n        if (i < 128) {\n            return (byte) i;\n        } else {\n            return (byte) (i - 256);\n        }\n    }\n\n```",
+            "method_doc": " Converts an unsigned integer to a signed byte (e.g., 255 becomes -1).  @param i integer to convert to byte @return byte representation of the provided int @throws IllegalArgumentException if the provided integer is not inside the range [0,255]. @since 1.5 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly converts an unsigned integer to a signed byte, which could lead to incorrect interpretations of zero values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::reverse(byte[])",
+            "method_code": "```java\n    public static byte[] reverse(final byte[] array) {\n        final int z = array.length - 1; // position of last element\n        for (int i = 0; i < array.length / 2; i++) {\n            byte x = array[i];\n            array[i] = array[z - i];\n            array[z - i] = x;\n        }\n        return array;\n    }\n\n```",
+            "method_doc": " Reverses a byte[] array.  Reverses in-place (thus provided array is mutated), but also returns same for convenience.  @param array to reverse (mutated in-place, but also returned for convenience).  @return the reversed array (mutated in-place, but also returned for convenience). @since 1.5 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of zero-length UID and GID fields, which is likely occurring elsewhere in the codebase rather than within the `reverse` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()",
+            "method_code": "```java\n    public long getUID() { return ZipUtil.bigToLong(uid); }\n\n```",
+            "method_doc": " Gets the UID as a long.  UID is typically a 32 bit unsigned value on most UNIX systems, so we return a long to avoid integer overflow into the negatives in case values above and including 2^31 are being used.  @return the UID value. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+            "class_doc": " An extra field that stores UNIX UID/GID data (owner &amp; group ownership) for a given zip entry.  We're using the field definition given in Info-Zip's source archive: zip-3.0.tar.gz/proginfo/extrafld.txt  <pre> Local-header version:  Value         Size        Description -----         ----        ----------- 0x7875        Short       tag for this extra block type (\"ux\") TSize         Short       total data size for this block Version       1 byte      version of this extra field, currently 1 UIDSize       1 byte      Size of UID field UID           Variable    UID for this entry (little endian) GIDSize       1 byte      Size of GID field GID           Variable    GID for this entry (little endian)  Central-header version:  Value         Size        Description -----         ----        ----------- 0x7855        Short       tag for this extra block type (\"Ux\") TSize         Short       total data size for this block (0) </pre> @since 1.5 ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Overflow or Underflow Issues\n**Description:** There might be overflow or underflow issues when handling very large UID and GID values, particularly those close to the maximum representable values (e.g., `2^32 - 2`).\n\n**Location:** Within the `parseReparse` method or related methods responsible for converting byte arrays to numeric values.\n\n**Observation:** The test case `UNIX_MAX_UID_GID` involves setting both UID and GID to `2^32 - 2`, and the error occurs in the same line. This suggests that the class might be incorrectly handling large values, leading to unexpected behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the UID value from the 'uid' byte array, which could be causing overflow issues when handling large values.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getGID()",
+            "method_code": "```java\n    public long getGID() { return ZipUtil.bigToLong(gid); }\n\n```",
+            "method_doc": " Gets the GID as a long.  GID is typically a 32 bit unsigned value on most UNIX systems, so we return a long to avoid integer overflow into the negatives in case values above and including 2^31 are being used.  @return the GID value. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+            "class_doc": " An extra field that stores UNIX UID/GID data (owner &amp; group ownership) for a given zip entry.  We're using the field definition given in Info-Zip's source archive: zip-3.0.tar.gz/proginfo/extrafld.txt  <pre> Local-header version:  Value         Size        Description -----         ----        ----------- 0x7875        Short       tag for this extra block type (\"ux\") TSize         Short       total data size for this block Version       1 byte      version of this extra field, currently 1 UIDSize       1 byte      Size of UID field UID           Variable    UID for this entry (little endian) GIDSize       1 byte      Size of GID field GID           Variable    GID for this entry (little endian)  Central-header version:  Value         Size        Description -----         ----        ----------- 0x7855        Short       tag for this extra block type (\"Ux\") TSize         Short       total data size for this block (0) </pre> @since 1.5 ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Resetting Central Directory Length and Data\n**Description:** There might be an issue with resetting the central directory length and data during the parsing process, leading to inconsistent state between the initial and re-parsed data.\n\n**Location:** Within the `parseReparse` method or related methods responsible for resetting central directory data.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, which is part of a sequence of calls to `parseReparse`. This suggests that the issue might be related to how the central directory data is being handled across multiple parse operations.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the GID value from the gid array, which could be causing issues when handling large values.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::setUID(long)",
+            "method_code": "```java\n    public void setUID(long l) {\n        this.uid = ZipUtil.longToBig(l);\n    }\n\n```",
+            "method_doc": " Sets the UID.  @param l UID value to set on this extra field. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+            "class_doc": " An extra field that stores UNIX UID/GID data (owner &amp; group ownership) for a given zip entry.  We're using the field definition given in Info-Zip's source archive: zip-3.0.tar.gz/proginfo/extrafld.txt  <pre> Local-header version:  Value         Size        Description -----         ----        ----------- 0x7875        Short       tag for this extra block type (\"ux\") TSize         Short       total data size for this block Version       1 byte      version of this extra field, currently 1 UIDSize       1 byte      Size of UID field UID           Variable    UID for this entry (little endian) GIDSize       1 byte      Size of GID field GID           Variable    GID for this entry (little endian)  Central-header version:  Value         Size        Description -----         ----        ----------- 0x7855        Short       tag for this extra block type (\"Ux\") TSize         Short       total data size for this block (0) </pre> @since 1.5 ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Resetting Central Directory Length and Data\n**Description:** There might be an issue with resetting the central directory length and data during the parsing process, leading to inconsistent state between the initial and re-parsed data.\n\n**Location:** Within the `parseReparse` method or related methods responsible for resetting central directory data.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, which is part of a sequence of calls to `parseReparse`. This suggests that the issue might be related to how the central directory data is being handled across multiple parse operations.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly sets the UID value, and the failure in the test indicates an issue with how UID values are being parsed or stored.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::bigToLong(BigInteger)",
+            "method_code": "```java\n    static long bigToLong(BigInteger big) {\n        if (big.bitLength() <= 63) { // bitLength() doesn't count the sign bit.\n            return big.longValue();\n        } else {\n            throw new NumberFormatException(\"The BigInteger cannot fit inside a 64 bit java long: [\" + big + \"]\");\n        }\n    }\n\n```",
+            "method_doc": " Converts a BigInteger into a long, and blows up (NumberFormatException) if the BigInteger is too big.  @param big BigInteger to convert. @return long representation of the BigInteger. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Incorrect Parsing Logic for Large Numbers\n**Description:** The logic used to parse large numbers (e.g., 40-bit and 64-bit numbers) might be flawed, causing incorrect parsing results.\n\n**Location:** Within the `parseReparse` method or related methods responsible for parsing large numbers.\n\n**Observation:** The test cases `LENGTH_5` and `LENGTH_8` involve parsing 40-bit and 64-bit numbers, respectively, and the error occurs in the same line. This indicates that the class might have issues correctly interpreting large numbers.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly converts a BigInteger to a long, which could lead to incorrect parsing results when dealing with large numbers. The test failures in `X7875_NewUnixTest::testParseReparse` suggest that the conversion logic might be flawed, especially for 40-bit and 64-bit numbers.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::longToBig(long)",
+            "method_code": "```java\n    static BigInteger longToBig(long l) {\n        if (l < Integer.MIN_VALUE) {\n            throw new IllegalArgumentException(\"Negative longs < -2^31 not permitted: [\" + l + \"]\");\n        } else if (l < 0 && l >= Integer.MIN_VALUE) {\n            // If someone passes in a -2, they probably mean 4294967294\n            // (For example, Unix UID/GID's are 32 bit unsigned.)\n            l = ZipUtil.adjustToLong((int) l);\n        }\n        return BigInteger.valueOf(l);\n    }\n\n```",
+            "method_doc": " <p> Converts a long into a BigInteger.  Negative numbers between -1 and -2^31 are treated as unsigned 32 bit (e.g., positive) integers. Negative numbers below -2^31 cause an IllegalArgumentException to be thrown. </p>  @param l long to convert to BigInteger. @return BigInteger representation of the provided long. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "test_failure_causes": "Overflow or Underflow Issues\n**Description:** There might be overflow or underflow issues when handling very large UID and GID values, particularly those close to the maximum representable values (e.g., `2^32 - 2`).\n\n**Location:** Within the `parseReparse` method or related methods responsible for converting byte arrays to numeric values.\n\n**Observation:** The test case `UNIX_MAX_UID_GID` involves setting both UID and GID to `2^32 - 2`, and the error occurs in the same line. This suggests that the class might be incorrectly handling large values, leading to unexpected behavior.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly converts a long value to a BigInteger, which could potentially handle large values correctly. However, the current implementation does not properly handle negative values, causing issues when parsing UID and GID values near the maximum representable values.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+            "method_code": "```java\n    public void parseFromLocalFileData(\n            byte[] data, int offset, int length\n    ) throws ZipException {\n        reset();\n        this.version = signedByteToUnsignedInt(data[offset++]);\n        int uidSize = signedByteToUnsignedInt(data[offset++]);\n        byte[] uidBytes = new byte[uidSize];\n        System.arraycopy(data, offset, uidBytes, 0, uidSize);\n        offset += uidSize;\n        this.uid = new BigInteger(1, reverse(uidBytes)); // sign-bit forced positive\n\n        int gidSize = signedByteToUnsignedInt(data[offset++]);\n        byte[] gidBytes = new byte[gidSize];\n        System.arraycopy(data, offset, gidBytes, 0, gidSize);\n        this.gid = new BigInteger(1, reverse(gidBytes)); // sign-bit forced positive\n    }\n\n```",
+            "method_doc": " Populate data from this array as if it was in local file data.  @param data   an array of bytes @param offset the start offset @param length the number of bytes in the array from offset @throws java.util.zip.ZipException on error "
+        },
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])",
+            "method_code": "```java\n    static byte[] trimLeadingZeroesForceMinLength(byte[] array) {\n        if (array == null) {\n            return array;\n        }\n\n        int pos = 0;\n        for (byte b : array) {\n            if (b == 0) {\n                pos++;\n            } else {\n                break;\n            }\n        }\n\n        /*\n\n        I agonized over my choice of MIN_LENGTH=1.  Here's the situation:\n        InfoZip (the tool I am using to test interop) always sets these\n        to length=4.  And so a UID of 0 (typically root) for example is\n        encoded as {4,0,0,0,0} (len=4, 32 bits of zero), when it could just\n        as easily be encoded as {1,0} (len=1, 8 bits of zero) according to\n        the spec.\n\n        In the end I decided on MIN_LENGTH=1 for four reasons:\n\n        1.)  We are adhering to the spec as far as I can tell, and so\n             a consumer that cannot parse this is broken.\n\n        2.)  Fundamentally, zip files are about shrinking things, so\n             let's save a few bytes per entry while we can.\n\n        3.)  Of all the people creating zip files using commons-\n             compress, how many care about UNIX UID/GID attributes\n             of the files they store?   (e.g., I am probably thinking\n             way too hard about this and no one cares!)\n\n        4.)  InfoZip's tool, even though it carefully stores every UID/GID\n             for every file zipped on a unix machine (by default) currently\n             appears unable to ever restore UID/GID.\n             unzip -X has no effect on my machine, even when run as root!!!!\n\n        And thus it is decided:  MIN_LENGTH=1.\n\n        If anyone runs into interop problems from this, feel free to set\n        it to MIN_LENGTH=4 at some future time, and then we will behave\n        exactly like InfoZip (requires changes to unit tests, though).\n\n        And I am sorry that the time you spent reading this comment is now\n        gone and you can never have it back.\n\n        */\n        final int MIN_LENGTH = 1;\n\n        byte[] trimmedArray = new byte[Math.max(MIN_LENGTH, array.length - pos)];\n        int startPos = trimmedArray.length - (array.length - pos);\n        System.arraycopy(array, pos, trimmedArray, startPos, trimmedArray.length - startPos);\n        return trimmedArray;\n    }\n\n```",
+            "method_doc": " Not really for external usage, but marked \"package\" visibility to help us JUnit it.   Trims a byte array of leading zeroes while also enforcing a minimum length, and thus it really trims AND pads at the same time.  @param array byte[] array to trim & pad. @return trimmed & padded byte[] array. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+            "method_code": "```java\n    public int getValue() {\n        return value;\n    }\n\n```",
+            "method_doc": " Get value as Java int. @return value as a Java int "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)",
+            "method_code": "```java\n    public ZipShort (int value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the int to store as a ZipShort "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        putLong(value, result, 0);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+            "method_code": "```java\n    public static void putLong(long value, byte[] buf, int offset) {\n        buf[offset++] = (byte) ((value & BYTE_MASK));\n        buf[offset++] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        buf[offset++] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        buf[offset] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n    }\n\n```",
+            "method_doc": " put the value as four bytes in big endian byte order. @param value the Java long to convert to bytes @param buf the output buffer @param  offset The offset within the output buffer of the first byte to be written. must be non-negative and no larger than <tt>buf.length-4</tt> "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+            "method_code": "```java\n    public static int signedByteToUnsignedInt(byte b) {\n        if (b >= 0) {\n            return b;\n        } else {\n            return 256 + b;\n        }\n    }\n\n```",
+            "method_doc": " Converts a signed byte into an unsigned integer representation (e.g., -1 becomes 255).  @param b byte to convert to int @return int representation of the provided byte @since 1.5 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)",
+            "method_code": "```java\n    public static byte unsignedIntToSignedByte(int i) {\n        if (i > 255 || i < 0) {\n            throw new IllegalArgumentException(\"Can only convert non-negative integers between [0,255] to byte: [\" + i + \"]\");\n        }\n        if (i < 128) {\n            return (byte) i;\n        } else {\n            return (byte) (i - 256);\n        }\n    }\n\n```",
+            "method_doc": " Converts an unsigned integer to a signed byte (e.g., 255 becomes -1).  @param i integer to convert to byte @return byte representation of the provided int @throws IllegalArgumentException if the provided integer is not inside the range [0,255]. @since 1.5 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::reverse(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::reverse(byte[])",
+            "method_code": "```java\n    public static byte[] reverse(final byte[] array) {\n        final int z = array.length - 1; // position of last element\n        for (int i = 0; i < array.length / 2; i++) {\n            byte x = array[i];\n            array[i] = array[z - i];\n            array[z - i] = x;\n        }\n        return array;\n    }\n\n```",
+            "method_doc": " Reverses a byte[] array.  Reverses in-place (thus provided array is mutated), but also returns same for convenience.  @param array to reverse (mutated in-place, but also returned for convenience).  @return the reversed array (mutated in-place, but also returned for convenience). @since 1.5 "
+        },
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()",
+            "method_code": "```java\n    public long getUID() { return ZipUtil.bigToLong(uid); }\n\n```",
+            "method_doc": " Gets the UID as a long.  UID is typically a 32 bit unsigned value on most UNIX systems, so we return a long to avoid integer overflow into the negatives in case values above and including 2^31 are being used.  @return the UID value. "
+        },
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getGID()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getGID()",
+            "method_code": "```java\n    public long getGID() { return ZipUtil.bigToLong(gid); }\n\n```",
+            "method_doc": " Gets the GID as a long.  GID is typically a 32 bit unsigned value on most UNIX systems, so we return a long to avoid integer overflow into the negatives in case values above and including 2^31 are being used.  @return the GID value. "
+        },
+        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::setUID(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.X7875_NewUnix::setUID(long)",
+            "method_code": "```java\n    public void setUID(long l) {\n        this.uid = ZipUtil.longToBig(l);\n    }\n\n```",
+            "method_doc": " Sets the UID.  @param l UID value to set on this extra field. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::bigToLong(BigInteger)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::bigToLong(BigInteger)",
+            "method_code": "```java\n    static long bigToLong(BigInteger big) {\n        if (big.bitLength() <= 63) { // bitLength() doesn't count the sign bit.\n            return big.longValue();\n        } else {\n            throw new NumberFormatException(\"The BigInteger cannot fit inside a 64 bit java long: [\" + big + \"]\");\n        }\n    }\n\n```",
+            "method_doc": " Converts a BigInteger into a long, and blows up (NumberFormatException) if the BigInteger is too big.  @param big BigInteger to convert. @return long representation of the BigInteger. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::longToBig(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::longToBig(long)",
+            "method_code": "```java\n    static BigInteger longToBig(long l) {\n        if (l < Integer.MIN_VALUE) {\n            throw new IllegalArgumentException(\"Negative longs < -2^31 not permitted: [\" + l + \"]\");\n        } else if (l < 0 && l >= Integer.MIN_VALUE) {\n            // If someone passes in a -2, they probably mean 4294967294\n            // (For example, Unix UID/GID's are 32 bit unsigned.)\n            l = ZipUtil.adjustToLong((int) l);\n        }\n        return BigInteger.valueOf(l);\n    }\n\n```",
+            "method_doc": " <p> Converts a long into a BigInteger.  Negative numbers between -1 and -2^31 are treated as unsigned 32 bit (e.g., positive) integers. Negative numbers below -2^31 cause an IllegalArgumentException to be thrown. </p>  @param l long to convert to BigInteger. @return BigInteger representation of the provided long. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.zip.X7875_NewUnixTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Zero-Length Fields\n**Description:** The `X7875_NewUnix` class may be incorrectly handling zero-length UID and GID fields. Specifically, it might be interpreting zero-length fields as non-zero values, leading to incorrect parsing results.\n\n**Location:** Likely within the `parseReparse` method or related methods responsible for parsing UID and GID fields.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, suggesting that the `X7875_NewUnix` class fails when encountering zero-length UID and GID fields.",
+                "Overflow or Underflow Issues\n**Description:** There might be overflow or underflow issues when handling very large UID and GID values, particularly those close to the maximum representable values (e.g., `2^32 - 2`).\n\n**Location:** Within the `parseReparse` method or related methods responsible for converting byte arrays to numeric values.\n\n**Observation:** The test case `UNIX_MAX_UID_GID` involves setting both UID and GID to `2^32 - 2`, and the error occurs in the same line. This suggests that the class might be incorrectly handling large values, leading to unexpected behavior.",
+                "Incorrect Parsing Logic for Large Numbers\n**Description:** The logic used to parse large numbers (e.g., 40-bit and 64-bit numbers) might be flawed, causing incorrect parsing results.\n\n**Location:** Within the `parseReparse` method or related methods responsible for parsing large numbers.\n\n**Observation:** The test cases `LENGTH_5` and `LENGTH_8` involve parsing 40-bit and 64-bit numbers, respectively, and the error occurs in the same line. This indicates that the class might have issues correctly interpreting large numbers.",
+                "Resetting Central Directory Length and Data\n**Description:** There might be an issue with resetting the central directory length and data during the parsing process, leading to inconsistent state between the initial and re-parsed data.\n\n**Location:** Within the `parseReparse` method or related methods responsible for resetting central directory data.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, which is part of a sequence of calls to `parseReparse`. This suggests that the issue might be related to how the central directory data is being handled across multiple parse operations.",
+                "Incorrect Initialization of X7875_NewUnix Object\n**Description:** The `X7875_NewUnix` object might be initialized with incorrect default values, leading to unexpected behavior when parsing data.\n\n**Location:** Within the constructor or initialization method of the `X7875_NewUnix` class.\n\n**Observation:** The error occurs in the line `parseReparse(0, 0, ZERO_LEN, 0, 0);`, which implies that the issue might be related to how the `X7875_NewUnix` object is set up before parsing begins."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    9.0
+                ],
+                "2": [
+                    9,
+                    9.0
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    9.0
+                ],
+                "5": [
+                    9,
+                    9.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+                    "org.apache.commons.compress.archivers.zip.ZipShort",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipShort",
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipShort",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil",
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipShort",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil",
+                    "org.apache.commons.compress.archivers.zip.ZipShort",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix": [
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipShort": [
+                        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+                        "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::reverse(byte[])"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipShort": [
+                        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix": [
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::longToBig(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipShort": [
+                        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+                        "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::bigToLong(BigInteger)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix": [
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::trimLeadingZeroesForceMinLength(byte[])",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix": [
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getGID()",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::setUID(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipShort": [
+                        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+                        "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::reverse(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.zip.X7875_NewUnix": [
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::parseFromLocalFileData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getUID()",
+                        "org.apache.commons.compress.archivers.zip.X7875_NewUnix::getGID()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::signedByteToUnsignedInt(byte)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::unsignedIntToSignedByte(int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipShort": [
+                        "org.apache.commons.compress.archivers.zip.ZipShort::getValue()",
+                        "org.apache.commons.compress.archivers.zip.ZipShort::ZipShort(int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::putLong(long,byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ]
+                }
+            }
+        }
+    ]
+}

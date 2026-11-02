@@ -1,0 +1,685 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+        "org.apache.commons.compress.utils.ArchiveUtils",
+        "org.apache.commons.compress.archivers.tar.TarUtils",
+        "org.apache.commons.compress.archivers.zip.ZipLong",
+        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil",
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+        "org.apache.commons.compress.archivers.ArchiveInputStream"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public ArchiveInputStream createArchiveInputStream(final InputStream in)\n            throws ArchiveException {\n        if (in == null) {\n            throw new IllegalArgumentException(\"Stream must not be null.\");\n        }\n\n        if (!in.markSupported()) {\n            throw new IllegalArgumentException(\"Mark is not supported.\");\n        }\n\n        final byte[] signature = new byte[12];\n        in.mark(signature.length);\n        try {\n            int signatureLength = in.read(signature);\n            in.reset();\n            if (ZipArchiveInputStream.matches(signature, signatureLength)) {\n                return new ZipArchiveInputStream(in);\n            } else if (JarArchiveInputStream.matches(signature, signatureLength)) {\n                return new JarArchiveInputStream(in);\n            } else if (ArArchiveInputStream.matches(signature, signatureLength)) {\n                return new ArArchiveInputStream(in);\n            } else if (CpioArchiveInputStream.matches(signature, signatureLength)) {\n                return new CpioArchiveInputStream(in);\n            }\n\n            // Dump needs a bigger buffer to check the signature;\n            final byte[] dumpsig = new byte[32];\n            in.mark(dumpsig.length);\n            signatureLength = in.read(dumpsig);\n            in.reset();\n            if (DumpArchiveInputStream.matches(dumpsig, signatureLength)) {\n                return new DumpArchiveInputStream(in);\n            }\n\n            // Tar needs an even bigger buffer to check the signature; read the first block\n            final byte[] tarheader = new byte[512];\n            in.mark(tarheader.length);\n            signatureLength = in.read(tarheader);\n            in.reset();\n            if (TarArchiveInputStream.matches(tarheader, signatureLength)) {\n                return new TarArchiveInputStream(in);\n            }\n            // COMPRESS-117 - improve auto-recognition\n            if (signatureLength >= 512) {\n                try {\n                    TarArchiveInputStream tais = new TarArchiveInputStream(new ByteArrayInputStream(tarheader));\n                    // COMPRESS-191 - verify the header checksum\n                    tais.getNextEntry();\n                        return new TarArchiveInputStream(in);\n                } catch (Exception e) { // NOPMD\n                    // can generate IllegalArgumentException as well\n                    // as IOException\n                    // autodetection, simply not a TAR\n                    // ignored\n                }\n            }\n        } catch (IOException e) {\n            throw new ArchiveException(\"Could not use reset and mark operations.\", e);\n        }\n\n        throw new ArchiveException(\"No Archiver found for the stream signature\");\n    }\n\n```",
+            "method_doc": " Create an archive input stream from an input stream, autodetecting the archive type from the first few bytes of the stream. The InputStream must support marks, like BufferedInputStream.  @param in the input stream @return the archive input stream @throws ArchiveException if the archiver name is not known @throws IllegalArgumentException if the stream is null or does not support mark ",
+            "class_name": "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+            "class_doc": " <p>Factory to create Archive[In|Out]putStreams from names or the first bytes of the InputStream. In order add other implementations you should extend ArchiveStreamFactory and override the appropriate methods (and call their implementation from super of course).</p>  Compressing a ZIP-File:  <pre> final OutputStream out = new FileOutputStream(output);  ArchiveOutputStream os = new ArchiveStreamFactory().createArchiveOutputStream(ArchiveStreamFactory.ZIP, out);  os.putArchiveEntry(new ZipArchiveEntry(\"testdata/test1.xml\")); IOUtils.copy(new FileInputStream(file1), os); os.closeArchiveEntry();  os.putArchiveEntry(new ZipArchiveEntry(\"testdata/test2.xml\")); IOUtils.copy(new FileInputStream(file2), os); os.closeArchiveEntry(); os.close(); </pre>  Decompressing a ZIP-File:  <pre> final InputStream is = new FileInputStream(input);  ArchiveInputStream in = new ArchiveStreamFactory().createArchiveInputStream(ArchiveStreamFactory.ZIP, is); ZipArchiveEntry entry = (ZipArchiveEntry)in.getNextEntry(); OutputStream out = new FileOutputStream(new File(dir, entry.getName())); IOUtils.copy(in, out); out.close(); in.close(); </pre>  @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the creation of archive input streams and performs file signature checks. The failure in creating an input stream for a non-archive file indicates a problem with either the file signature detection logic or the handling of unsupported archive types.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctal(final byte[] buffer, final int offset, final int length) {\n        long    result = 0;\n        int     end = offset + length;\n        int     start = offset;\n\n        if (length < 2){\n            throw new IllegalArgumentException(\"Length \"+length+\" must be at least 2\");\n        }\n\n        if (buffer[start] == 0) {\n            return 0L;\n        }\n\n        // Skip leading spaces\n        while (start < end){\n            if (buffer[start] == ' '){\n                start++;\n            } else {\n                break;\n            }\n        }\n\n        // Must have trailing NUL or space\n        byte trailer;\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        } else {\n            throw new IllegalArgumentException(\n                    exceptionMessage(buffer, offset, length, end-1, trailer));\n        }\n        // May have additional NUL or space\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        }\n\n        for ( ;start < end; start++) {\n            final byte currentByte = buffer[start];\n            // CheckStyle:MagicNumber OFF\n            if (currentByte < '0' || currentByte > '7'){\n                throw new IllegalArgumentException(\n                        exceptionMessage(buffer, offset, length, start, currentByte));\n            }\n            result = (result << 3) + (currentByte - '0'); // convert from ASCII\n            // CheckStyle:MagicNumber ON\n        }\n\n        return result;\n    }\n\n```",
+            "method_doc": " Parse an octal string from a buffer.  <p>Leading spaces are ignored. The buffer must contain a trailing space or NUL, and may contain an additional trailing space or NUL.</p>  <p>The input buffer is allowed to contain all NULs, in which case the method returns 0L (this allows for missing fields).</p>  <p>To work-around some tar implementations that insert a leading NUL this method returns 0 if it detects a leading NUL since Commons Compress 1.4.</p>  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse - must be at least 2 bytes. @return The long value of the octal string. @throws IllegalArgumentException if the trailing space/NUL is missing or if a invalid byte is detected. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is directly involved in parsing octal strings, which is a common operation in archive formats like TAR. The error in the test indicates that AIFF files are being incorrectly identified as TAR archives, suggesting a problem with how the file signature is parsed. Since the `parseOctal` method handles the conversion of octal strings to numeric values, it is plausible that there is an issue with its implementation that affects the ability to distinguish between different archive types.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::verifyCheckSum(byte[])",
+            "method_code": "```java\n    public static boolean verifyCheckSum(byte[] header) {\n        long storedSum = 0;\n        long unsignedSum = 0;\n        long signedSum = 0;\n\n        int digits = 0;\n        for (int i = 0; i < header.length; i++) {\n            byte b = header[i];\n            if (CHKSUM_OFFSET  <= i && i < CHKSUM_OFFSET + CHKSUMLEN) {\n                if ('0' <= b && b <= '7' && digits++ < 6) {\n                    storedSum = storedSum * 8 + b - '0';\n                } else if (digits > 0) {\n                    digits = 6; // only look at the first octal digit sequence\n                }\n                b = ' ';\n            }\n            unsignedSum += 0xff & b;\n            signedSum += b;\n        }\n\n        return storedSum == unsignedSum || storedSum == signedSum\n                || storedSum > unsignedSum; // COMPRESS-177\n    }\n\n```",
+            "method_doc": " Wikipedia <a href=\"http://en.wikipedia.org/wiki/Tar_(file_format)#File_header\">says</a>: <blockquote> The checksum is calculated by taking the sum of the unsigned byte values of the header block with the eight checksum bytes taken to be ascii spaces (decimal value 32). It is stored as a six digit octal number with leading zeroes followed by a NUL and then a space. Various implementations do not adhere to this format. For better compatibility, ignore leading and trailing whitespace, and get the first six digits. In addition, some historic tar implementations treated bytes as signed. Implementations typically calculate the checksum both ways, and treat it as good if either the signed or unsigned sum matches the included checksum. </blockquote> <p> In addition there are <a href=\"https://issues.apache.org/jira/browse/COMPRESS-117\">some tar files</a> that seem to have parts of their header cleared to zero (no detectable magic bytes, etc.) but still have a reasonable-looking checksum field present. It looks like we can detect such cases reasonably well by checking whether the stored checksum is <em>greater than</em> the computed unsigned checksum. That check is unlikely to pass on some random file header, as it would need to have a valid sequence of octal digits in just the right place. <p> The return value of this method should be treated as a best-effort heuristic rather than an absolute and final truth. The checksum verification logic may well evolve over time as more special cases are encountered.  @param header tar header @return whether the checksum is reasonably good @see <a href=\"https://issues.apache.org/jira/browse/COMPRESS-191\">COMPRESS-191</a> @since 1.5 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the checksum verification logic, which is crucial for identifying archive formats. The issue described in the test failure suggests a problem with file signature detection, and the `verifyCheckSum` method is central to this process. By fixing this method, we can potentially resolve the root cause of the test failures.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+            "method_code": "```java\n    public static boolean matchAsciiBuffer(\n            String expected, byte[] buffer, int offset, int length){\n        byte[] buffer1;\n        try {\n            buffer1 = expected.getBytes(\"ASCII\");\n        } catch (UnsupportedEncodingException e) {\n            throw new RuntimeException(e); // Should not happen\n        }\n        return isEqual(buffer1, 0, buffer1.length, buffer, offset, length, false);\n    }\n\n```",
+            "method_doc": " Check if buffer contents matches Ascii String.  @param expected @param buffer @param offset @param length @return {@code true} if buffer is the same as the expected string ",
+            "class_name": "org.apache.commons.compress.utils.ArchiveUtils",
+            "class_doc": " Generic Archive utilities ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly involves comparing ASCII buffers, which could be causing issues when handling AIFF file signatures.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)",
+            "method_code": "```java\n    public static boolean isEqual(\n            final byte[] buffer1, final int offset1, final int length1,\n            final byte[] buffer2, final int offset2, final int length2,\n            boolean ignoreTrailingNulls){\n        int minLen=length1 < length2 ? length1 : length2;\n        for (int i=0; i < minLen; i++){\n            if (buffer1[offset1+i] != buffer2[offset2+i]){\n                return false;\n            }\n        }\n        if (length1 == length2){\n            return true;\n        }\n        if (ignoreTrailingNulls){\n            if (length1 > length2){\n                for(int i = length2; i < length1; i++){\n                    if (buffer1[offset1+i] != 0){\n                        return false;\n                    }\n                }\n            } else {\n                for(int i = length1; i < length2; i++){\n                    if (buffer2[offset2+i] != 0){\n                        return false;\n                    }\n                }\n            }\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Compare byte buffers, optionally ignoring trailing nulls  @param buffer1 @param offset1 @param length1 @param buffer2 @param offset2 @param length2 @param ignoreTrailingNulls @return {@code true} if buffer1 and buffer2 have same contents, having regard to trailing nulls ",
+            "class_name": "org.apache.commons.compress.utils.ArchiveUtils",
+            "class_doc": " Generic Archive utilities ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it is involved in comparing byte buffers, which could be causing the issue with AIFF file signature detection.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctalOrBinary(final byte[] buffer, final int offset,\n                                          final int length) {\n\n        if ((buffer[offset] & 0x80) == 0) {\n            return parseOctal(buffer, offset, length);\n        }\n        final boolean negative = buffer[offset] == (byte) 0xff;\n        if (length < 9) {\n            return parseBinaryLong(buffer, offset, length, negative);\n        }\n        return parseBinaryBigInteger(buffer, offset, length, negative);\n    }\n\n```",
+            "method_doc": " Compute the value contained in a byte buffer.  If the most significant bit of the first byte in the buffer is set, this bit is ignored and the rest of the buffer is interpreted as a binary number.  Otherwise, the buffer is interpreted as an octal number as per the parseOctal function above.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The long value of the octal or binary string. @throws IllegalArgumentException if the trailing space/NUL is missing or an invalid byte is detected in an octal number, or if a binary number would exceed the size of a signed long 64-bit integer. @since 1.4 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly involves parsing file headers, which can lead to incorrect identification of archive types.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+            "method_code": "```java\n    public byte[] getBytes() {\n        return ZipLong.getBytes(value);\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @return value as four bytes in big endian order ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the issue, but it's more probable that the problem lies within the `ArchiveStreamFactory`'s file signature detection logic rather than the `ZipLong::getBytes()` method itself. The `ZipLong` class is used for handling ZIP file headers, while the `ArchiveStreamFactory` needs to identify archive formats like TAR, ZIP, etc., based on their specific file signatures.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "4": 7,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        result[0] = (byte) ((value & BYTE_MASK));\n        result[BYTE_1] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        result[BYTE_2] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        result[BYTE_3] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the issue, but it's more probable that the problem lies within the `ArchiveStreamFactory`'s file signature detection logic rather than the `ZipLong::getBytes` method itself. The `getBytes` method converts a long value to a byte array, which seems correct for its intended purpose.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)",
+            "method_code": "```java\n    public static final int convert32(byte[] buffer, int offset) {\n        int i = 0;\n        i = buffer[offset + 3] << 24;\n        i += (buffer[offset + 2] << 16) & 0x00FF0000;\n        i += (buffer[offset + 1] << 8) & 0x0000FF00;\n        i += buffer[offset] & 0x000000FF;\n\n        return i;\n    }\n\n```",
+            "method_doc": " Read 4-byte integer from buffer.  @param buffer @param offset @return the 4-byte entry as an int ",
+            "class_name": "org.apache.commons.compress.archivers.dump.DumpArchiveUtil",
+            "class_doc": " Various utilities for dump archives. ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the issue, but it's more probable that the problem lies within the `ArchiveStreamFactory`'s file signature detection logic rather than this specific conversion method.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to file signature checking rather than the construction of a `ZipLong` object.",
+            "hypothesis": 4,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::matches(byte[],int)",
+            "method_code": "```java\n    public static boolean matches(byte[] signature, int length) {\n        if (length < TarConstants.VERSION_OFFSET+TarConstants.VERSIONLEN) {\n            return false;\n        }\n\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_POSIX,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_POSIX,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n                ){\n            return true;\n        }\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_GNU,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            (\n             ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_GNU_SPACE,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n            ||\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_GNU_ZERO,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n            )\n                ){\n            return true;\n        }\n        // COMPRESS-107 - recognise Ant tar files\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_ANT,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_ANT,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n                ){\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Checks if the signature matches what is expected for a tar file.  @param signature the bytes to check @param length the number of bytes to check @return true, if this stream is a tar archive stream, false otherwise ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "Buffering Issue\n**Description:** There might be an issue with how the buffer is being read or interpreted, causing the factory to misinterpret the contents of the AIFF file.\n\n**Location:** Within the `read()` method of the `ArchiveInputStream` class, or possibly within the `ArchiveStreamFactory`'s internal buffering mechanisms.\n\n**Observation Support:** The test setup involves buffering the input stream, so any issues related to buffer management could lead to incorrect identification of the file type.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly checks if the given byte array matches the signature of a tar file. Since the test is specifically about AIFF files, which are not tar files, this method's failure to correctly identify AIFF files as non-tar archives suggests that there might be an issue with how it handles different file types or their signatures.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)",
+            "method_code": "```java\n    public static String parseName(byte[] buffer, final int offset, final int length) {\n        try {\n            return parseName(buffer, offset, length, DEFAULT_ENCODING);\n        } catch (IOException ex) {\n            try {\n                return parseName(buffer, offset, length, FALLBACK_ENCODING);\n            } catch (IOException ex2) {\n                // impossible\n                throw new RuntimeException(ex2);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Parse an entry name from a buffer. Parsing stops when a NUL is found or the buffer length is reached.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The entry name. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "Incorrect MIME Type Detection\n**Description:** The `ArchiveStreamFactory` might be incorrectly identifying AIFF files as TAR files because it relies on MIME type detection, which is failing to distinguish between these two formats.\n\n**Location:** Likely within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for MIME type checking.\n\n**Observation Support:** The failure occurs when attempting to create an archive input stream from an AIFF file, indicating that the factory is mistakenly treating the AIFF file as a valid archive.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the issue, but it's not the primary culprit. The `parseName` method is responsible for parsing names from buffers, which could potentially lead to incorrect interpretations if the data is not correctly formatted. However, the root cause seems to lie in the MIME type detection logic within the `ArchiveStreamFactory`. Fixing `parseName` alone might not resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is) {\n        this(is, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "Buffering Issue\n**Description:** There might be an issue with how the buffer is being read or interpreted, causing the factory to misinterpret the contents of the AIFF file.\n\n**Location:** Within the `read()` method of the `ArchiveInputStream` class, or possibly within the `ArchiveStreamFactory`'s internal buffering mechanisms.\n\n**Observation Support:** The test setup involves buffering the input stream, so any issues related to buffer management could lead to incorrect identification of the file type.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it initializes the TarArchiveInputStream with the given InputStream. However, the issue might not be directly in this constructor but rather in how the InputStream is handled or buffered before reaching this point.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream,int,int)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is, int blockSize, int recordSize) {\n        this(is, blockSize, recordSize, null);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use @param blockSize the block size to use @param recordSize the record size to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "Buffering Issue\n**Description:** There might be an issue with how the buffer is being read or interpreted, causing the factory to misinterpret the contents of the AIFF file.\n\n**Location:** Within the `read()` method of the `ArchiveInputStream` class, or possibly within the `ArchiveStreamFactory`'s internal buffering mechanisms.\n\n**Observation Support:** The test setup involves buffering the input stream, so any issues related to buffer management could lead to incorrect identification of the file type.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly handles the creation of a TarArchiveInputStream, which could be misinterpreting the AIFF file due to its parameters.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::matches(byte[],int)",
+            "method_code": "```java\n    public static boolean matches(byte[] signature, int length) {\n        if (length < ZipArchiveOutputStream.LFH_SIG.length) {\n            return false;\n        }\n\n        return checksig(signature, ZipArchiveOutputStream.LFH_SIG) // normal file\n            || checksig(signature, ZipArchiveOutputStream.EOCD_SIG); // empty zip\n    }\n\n```",
+            "method_doc": " Checks if the signature matches what is expected for a zip file. Does not currently handle self-extracting zips which may have arbitrary leading content.  @param signature the bytes to check @param length the number of bytes to check @return true, if this stream is a zip archive stream, false otherwise ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>Note that {@link ZipArchiveEntry#getSize()} may return -1 if the DEFLATE algorithm is used, as the size information is not available from the header.</p>  <p>The {@link ZipFile} class is preferred when reading from files.</p>  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "test_failure_causes": "Buffering Issue\n**Description:** There might be an issue with how the buffer is being read or interpreted, causing the factory to misinterpret the contents of the AIFF file.\n\n**Location:** Within the `read()` method of the `ArchiveInputStream` class, or possibly within the `ArchiveStreamFactory`'s internal buffering mechanisms.\n\n**Observation Support:** The test setup involves buffering the input stream, so any issues related to buffer management could lead to incorrect identification of the file type.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly checks the signature of the input data to determine if it matches the expected ZIP file signature. Given that the test failure occurs when trying to create an input stream for a non-archive file, it suggests that the current implementation of the `matches` method might incorrectly identify AIFF files as ZIP files. By fixing the logic in this method, we can ensure that only valid ZIP files are recognized, thereby resolving the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)": {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public ArchiveInputStream createArchiveInputStream(final InputStream in)\n            throws ArchiveException {\n        if (in == null) {\n            throw new IllegalArgumentException(\"Stream must not be null.\");\n        }\n\n        if (!in.markSupported()) {\n            throw new IllegalArgumentException(\"Mark is not supported.\");\n        }\n\n        final byte[] signature = new byte[12];\n        in.mark(signature.length);\n        try {\n            int signatureLength = in.read(signature);\n            in.reset();\n            if (ZipArchiveInputStream.matches(signature, signatureLength)) {\n                return new ZipArchiveInputStream(in);\n            } else if (JarArchiveInputStream.matches(signature, signatureLength)) {\n                return new JarArchiveInputStream(in);\n            } else if (ArArchiveInputStream.matches(signature, signatureLength)) {\n                return new ArArchiveInputStream(in);\n            } else if (CpioArchiveInputStream.matches(signature, signatureLength)) {\n                return new CpioArchiveInputStream(in);\n            }\n\n            // Dump needs a bigger buffer to check the signature;\n            final byte[] dumpsig = new byte[32];\n            in.mark(dumpsig.length);\n            signatureLength = in.read(dumpsig);\n            in.reset();\n            if (DumpArchiveInputStream.matches(dumpsig, signatureLength)) {\n                return new DumpArchiveInputStream(in);\n            }\n\n            // Tar needs an even bigger buffer to check the signature; read the first block\n            final byte[] tarheader = new byte[512];\n            in.mark(tarheader.length);\n            signatureLength = in.read(tarheader);\n            in.reset();\n            if (TarArchiveInputStream.matches(tarheader, signatureLength)) {\n                return new TarArchiveInputStream(in);\n            }\n            // COMPRESS-117 - improve auto-recognition\n            if (signatureLength >= 512) {\n                try {\n                    TarArchiveInputStream tais = new TarArchiveInputStream(new ByteArrayInputStream(tarheader));\n                    // COMPRESS-191 - verify the header checksum\n                    tais.getNextEntry();\n                        return new TarArchiveInputStream(in);\n                } catch (Exception e) { // NOPMD\n                    // can generate IllegalArgumentException as well\n                    // as IOException\n                    // autodetection, simply not a TAR\n                    // ignored\n                }\n            }\n        } catch (IOException e) {\n            throw new ArchiveException(\"Could not use reset and mark operations.\", e);\n        }\n\n        throw new ArchiveException(\"No Archiver found for the stream signature\");\n    }\n\n```",
+            "method_doc": " Create an archive input stream from an input stream, autodetecting the archive type from the first few bytes of the stream. The InputStream must support marks, like BufferedInputStream.  @param in the input stream @return the archive input stream @throws ArchiveException if the archiver name is not known @throws IllegalArgumentException if the stream is null or does not support mark "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctal(final byte[] buffer, final int offset, final int length) {\n        long    result = 0;\n        int     end = offset + length;\n        int     start = offset;\n\n        if (length < 2){\n            throw new IllegalArgumentException(\"Length \"+length+\" must be at least 2\");\n        }\n\n        if (buffer[start] == 0) {\n            return 0L;\n        }\n\n        // Skip leading spaces\n        while (start < end){\n            if (buffer[start] == ' '){\n                start++;\n            } else {\n                break;\n            }\n        }\n\n        // Must have trailing NUL or space\n        byte trailer;\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        } else {\n            throw new IllegalArgumentException(\n                    exceptionMessage(buffer, offset, length, end-1, trailer));\n        }\n        // May have additional NUL or space\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        }\n\n        for ( ;start < end; start++) {\n            final byte currentByte = buffer[start];\n            // CheckStyle:MagicNumber OFF\n            if (currentByte < '0' || currentByte > '7'){\n                throw new IllegalArgumentException(\n                        exceptionMessage(buffer, offset, length, start, currentByte));\n            }\n            result = (result << 3) + (currentByte - '0'); // convert from ASCII\n            // CheckStyle:MagicNumber ON\n        }\n\n        return result;\n    }\n\n```",
+            "method_doc": " Parse an octal string from a buffer.  <p>Leading spaces are ignored. The buffer must contain a trailing space or NUL, and may contain an additional trailing space or NUL.</p>  <p>The input buffer is allowed to contain all NULs, in which case the method returns 0L (this allows for missing fields).</p>  <p>To work-around some tar implementations that insert a leading NUL this method returns 0 if it detects a leading NUL since Commons Compress 1.4.</p>  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse - must be at least 2 bytes. @return The long value of the octal string. @throws IllegalArgumentException if the trailing space/NUL is missing or if a invalid byte is detected. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::verifyCheckSum(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::verifyCheckSum(byte[])",
+            "method_code": "```java\n    public static boolean verifyCheckSum(byte[] header) {\n        long storedSum = 0;\n        long unsignedSum = 0;\n        long signedSum = 0;\n\n        int digits = 0;\n        for (int i = 0; i < header.length; i++) {\n            byte b = header[i];\n            if (CHKSUM_OFFSET  <= i && i < CHKSUM_OFFSET + CHKSUMLEN) {\n                if ('0' <= b && b <= '7' && digits++ < 6) {\n                    storedSum = storedSum * 8 + b - '0';\n                } else if (digits > 0) {\n                    digits = 6; // only look at the first octal digit sequence\n                }\n                b = ' ';\n            }\n            unsignedSum += 0xff & b;\n            signedSum += b;\n        }\n\n        return storedSum == unsignedSum || storedSum == signedSum\n                || storedSum > unsignedSum; // COMPRESS-177\n    }\n\n```",
+            "method_doc": " Wikipedia <a href=\"http://en.wikipedia.org/wiki/Tar_(file_format)#File_header\">says</a>: <blockquote> The checksum is calculated by taking the sum of the unsigned byte values of the header block with the eight checksum bytes taken to be ascii spaces (decimal value 32). It is stored as a six digit octal number with leading zeroes followed by a NUL and then a space. Various implementations do not adhere to this format. For better compatibility, ignore leading and trailing whitespace, and get the first six digits. In addition, some historic tar implementations treated bytes as signed. Implementations typically calculate the checksum both ways, and treat it as good if either the signed or unsigned sum matches the included checksum. </blockquote> <p> In addition there are <a href=\"https://issues.apache.org/jira/browse/COMPRESS-117\">some tar files</a> that seem to have parts of their header cleared to zero (no detectable magic bytes, etc.) but still have a reasonable-looking checksum field present. It looks like we can detect such cases reasonably well by checking whether the stored checksum is <em>greater than</em> the computed unsigned checksum. That check is unlikely to pass on some random file header, as it would need to have a valid sequence of octal digits in just the right place. <p> The return value of this method should be treated as a best-effort heuristic rather than an absolute and final truth. The checksum verification logic may well evolve over time as more special cases are encountered.  @param header tar header @return whether the checksum is reasonably good @see <a href=\"https://issues.apache.org/jira/browse/COMPRESS-191\">COMPRESS-191</a> @since 1.5 "
+        },
+        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+            "method_code": "```java\n    public static boolean matchAsciiBuffer(\n            String expected, byte[] buffer, int offset, int length){\n        byte[] buffer1;\n        try {\n            buffer1 = expected.getBytes(\"ASCII\");\n        } catch (UnsupportedEncodingException e) {\n            throw new RuntimeException(e); // Should not happen\n        }\n        return isEqual(buffer1, 0, buffer1.length, buffer, offset, length, false);\n    }\n\n```",
+            "method_doc": " Check if buffer contents matches Ascii String.  @param expected @param buffer @param offset @param length @return {@code true} if buffer is the same as the expected string "
+        },
+        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)": {
+            "method_name": "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)",
+            "method_code": "```java\n    public static boolean isEqual(\n            final byte[] buffer1, final int offset1, final int length1,\n            final byte[] buffer2, final int offset2, final int length2,\n            boolean ignoreTrailingNulls){\n        int minLen=length1 < length2 ? length1 : length2;\n        for (int i=0; i < minLen; i++){\n            if (buffer1[offset1+i] != buffer2[offset2+i]){\n                return false;\n            }\n        }\n        if (length1 == length2){\n            return true;\n        }\n        if (ignoreTrailingNulls){\n            if (length1 > length2){\n                for(int i = length2; i < length1; i++){\n                    if (buffer1[offset1+i] != 0){\n                        return false;\n                    }\n                }\n            } else {\n                for(int i = length1; i < length2; i++){\n                    if (buffer2[offset2+i] != 0){\n                        return false;\n                    }\n                }\n            }\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Compare byte buffers, optionally ignoring trailing nulls  @param buffer1 @param offset1 @param length1 @param buffer2 @param offset2 @param length2 @param ignoreTrailingNulls @return {@code true} if buffer1 and buffer2 have same contents, having regard to trailing nulls "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctalOrBinary(final byte[] buffer, final int offset,\n                                          final int length) {\n\n        if ((buffer[offset] & 0x80) == 0) {\n            return parseOctal(buffer, offset, length);\n        }\n        final boolean negative = buffer[offset] == (byte) 0xff;\n        if (length < 9) {\n            return parseBinaryLong(buffer, offset, length, negative);\n        }\n        return parseBinaryBigInteger(buffer, offset, length, negative);\n    }\n\n```",
+            "method_doc": " Compute the value contained in a byte buffer.  If the most significant bit of the first byte in the buffer is set, this bit is ignored and the rest of the buffer is interpreted as a binary number.  Otherwise, the buffer is interpreted as an octal number as per the parseOctal function above.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The long value of the octal or binary string. @throws IllegalArgumentException if the trailing space/NUL is missing or an invalid byte is detected in an octal number, or if a binary number would exceed the size of a signed long 64-bit integer. @since 1.4 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+            "method_code": "```java\n    public byte[] getBytes() {\n        return ZipLong.getBytes(value);\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @return value as four bytes in big endian order "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        result[0] = (byte) ((value & BYTE_MASK));\n        result[BYTE_1] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        result[BYTE_2] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        result[BYTE_3] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order "
+        },
+        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)",
+            "method_code": "```java\n    public static final int convert32(byte[] buffer, int offset) {\n        int i = 0;\n        i = buffer[offset + 3] << 24;\n        i += (buffer[offset + 2] << 16) & 0x00FF0000;\n        i += (buffer[offset + 1] << 8) & 0x0000FF00;\n        i += buffer[offset] & 0x000000FF;\n\n        return i;\n    }\n\n```",
+            "method_doc": " Read 4-byte integer from buffer.  @param buffer @param offset @return the 4-byte entry as an int "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::matches(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::matches(byte[],int)",
+            "method_code": "```java\n    public static boolean matches(byte[] signature, int length) {\n        if (length < TarConstants.VERSION_OFFSET+TarConstants.VERSIONLEN) {\n            return false;\n        }\n\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_POSIX,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_POSIX,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n                ){\n            return true;\n        }\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_GNU,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            (\n             ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_GNU_SPACE,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n            ||\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_GNU_ZERO,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n            )\n                ){\n            return true;\n        }\n        // COMPRESS-107 - recognise Ant tar files\n        if (ArchiveUtils.matchAsciiBuffer(TarConstants.MAGIC_ANT,\n                signature, TarConstants.MAGIC_OFFSET, TarConstants.MAGICLEN)\n            &&\n            ArchiveUtils.matchAsciiBuffer(TarConstants.VERSION_ANT,\n                signature, TarConstants.VERSION_OFFSET, TarConstants.VERSIONLEN)\n                ){\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Checks if the signature matches what is expected for a tar file.  @param signature the bytes to check @param length the number of bytes to check @return true, if this stream is a tar archive stream, false otherwise "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)",
+            "method_code": "```java\n    public static String parseName(byte[] buffer, final int offset, final int length) {\n        try {\n            return parseName(buffer, offset, length, DEFAULT_ENCODING);\n        } catch (IOException ex) {\n            try {\n                return parseName(buffer, offset, length, FALLBACK_ENCODING);\n            } catch (IOException ex2) {\n                // impossible\n                throw new RuntimeException(ex2);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Parse an entry name from a buffer. Parsing stops when a NUL is found or the buffer length is reached.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The entry name. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is) {\n        this(is, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream,int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream,int,int)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is, int blockSize, int recordSize) {\n        this(is, blockSize, recordSize, null);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use @param blockSize the block size to use @param recordSize the record size to use "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::matches(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::matches(byte[],int)",
+            "method_code": "```java\n    public static boolean matches(byte[] signature, int length) {\n        if (length < ZipArchiveOutputStream.LFH_SIG.length) {\n            return false;\n        }\n\n        return checksig(signature, ZipArchiveOutputStream.LFH_SIG) // normal file\n            || checksig(signature, ZipArchiveOutputStream.EOCD_SIG); // empty zip\n    }\n\n```",
+            "method_doc": " Checks if the signature matches what is expected for a zip file. Does not currently handle self-extracting zips which may have arbitrary leading content.  @param signature the bytes to check @param length the number of bytes to check @return true, if this stream is a zip archive stream, false otherwise "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.ArchiveStreamFactoryTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect MIME Type Detection\n**Description:** The `ArchiveStreamFactory` might be incorrectly identifying AIFF files as TAR files because it relies on MIME type detection, which is failing to distinguish between these two formats.\n\n**Location:** Likely within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for MIME type checking.\n\n**Observation Support:** The failure occurs when attempting to create an archive input stream from an AIFF file, indicating that the factory is mistakenly treating the AIFF file as a valid archive.",
+                "Incomplete or Missing Archive Format Handling\n**Description:** The `ArchiveStreamFactory` may lack proper handling for AIFF files, leading to incorrect processing or no archiver being found.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, particularly in the switch-case statement or similar mechanism used to identify archive formats.\n\n**Observation Support:** The error message indicates that no archiver was found, suggesting that the factory is not recognizing AIFF files as a supported format.",
+                "Buffering Issue\n**Description:** There might be an issue with how the buffer is being read or interpreted, causing the factory to misinterpret the contents of the AIFF file.\n\n**Location:** Within the `read()` method of the `ArchiveInputStream` class, or possibly within the `ArchiveStreamFactory`'s internal buffering mechanisms.\n\n**Observation Support:** The test setup involves buffering the input stream, so any issues related to buffer management could lead to incorrect identification of the file type.",
+                "File Signature Check Failure\n**Description:** The `ArchiveStreamFactory` might be failing to correctly check the file signature for AIFF files, leading to incorrect identification.\n\n**Location:** Within the `detect()` method of the `ArchiveStreamFactory` class, specifically in the section responsible for checking file signatures.\n\n**Observation Support:** The error message suggests that no archiver was found, which could indicate a failure in the file signature verification process.",
+                "Race Condition or Thread Safety Issue\n**Description:** There might be a race condition or thread safety issue within the `ArchiveStreamFactory` that causes it to incorrectly identify AIFF files under certain conditions.\n\n**Location:** Within the `ArchiveStreamFactory` class, particularly in any shared or mutable state that could be accessed concurrently.\n\n**Observation Support:** While less likely given the static nature of the test, the fact that the test consistently fails across multiple runs suggests there might be some underlying concurrency issue affecting the factory's behavior."
+            ],
+            "selected": 4,
+            "plausibility": {
+                "1": [
+                    8,
+                    7.666666666666667
+                ],
+                "2": [
+                    8,
+                    7.333333333333333
+                ],
+                "3": [
+                    8,
+                    7.666666666666667
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    7.666666666666667
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+                    "org.apache.commons.compress.utils.ArchiveUtils",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+                    "org.apache.commons.compress.utils.ArchiveUtils",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+                    "org.apache.commons.compress.utils.ArchiveUtils",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.ArchiveInputStream"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+                    "org.apache.commons.compress.utils.ArchiveUtils",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory",
+                    "org.apache.commons.compress.utils.ArchiveUtils",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory": [
+                        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.ArchiveUtils": [
+                        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+                        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil": [
+                        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory": [
+                        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.ArchiveUtils": [
+                        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+                        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil": [
+                        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory": [
+                        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.ArchiveUtils": [
+                        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+                        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::matches(byte[],int)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream,int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::matches(byte[],int)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory": [
+                        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.ArchiveUtils": [
+                        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+                        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::verifyCheckSum(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil": [
+                        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.ArchiveStreamFactory": [
+                        "org.apache.commons.compress.archivers.ArchiveStreamFactory::createArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.ArchiveUtils": [
+                        "org.apache.commons.compress.utils.ArchiveUtils::matchAsciiBuffer(String,byte[],int,int)",
+                        "org.apache.commons.compress.utils.ArchiveUtils::isEqual(byte[],int,int,byte[],int,int,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseName(byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.dump.DumpArchiveUtil": [
+                        "org.apache.commons.compress.archivers.dump.DumpArchiveUtil::convert32(byte[],int)"
+                    ]
+                }
+            }
+        }
+    ]
+}

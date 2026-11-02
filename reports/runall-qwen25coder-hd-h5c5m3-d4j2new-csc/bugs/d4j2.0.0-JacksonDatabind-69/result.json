@@ -1,0 +1,991 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+        "com.fasterxml.jackson.databind.deser.CreatorProperty",
+        "com.fasterxml.jackson.databind.deser.ValueInstantiator",
+        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+        "com.fasterxml.jackson.databind.ObjectMapper",
+        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector",
+        "com.fasterxml.jackson.databind.deser.DeserializerCache"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+            "method_code": "```java\n    protected void addBeanProps(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanDeserializerBuilder builder)\n        throws JsonMappingException\n    {\n        final SettableBeanProperty[] creatorProps =\n                builder.getValueInstantiator().getFromObjectArguments(ctxt.getConfig());\n        final boolean isConcrete = !beanDesc.getType().isAbstract();\n        \n        // Things specified as \"ok to ignore\"?\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        if (intr != null) {\n            Boolean B = intr.findIgnoreUnknownProperties(beanDesc.getClassInfo());\n            if (B != null) {\n                builder.setIgnoreUnknownProperties(B.booleanValue());\n            }\n        }\n        // Or explicit/implicit definitions?\n        Set<String> ignored = ArrayBuilders.arrayToSet(intr.findPropertiesToIgnore(beanDesc.getClassInfo(), false));        \n        for (String propName : ignored) {\n            builder.addIgnorable(propName);\n        }\n        // Also, do we have a fallback \"any\" setter?\n        AnnotatedMethod anySetter = beanDesc.findAnySetter();\n        if (anySetter != null) {\n            builder.setAnySetter(constructAnySetter(ctxt, beanDesc, anySetter));\n        }\n        // NOTE: we do NOT add @JsonIgnore'd properties into blocked ones if there's any-setter\n        // Implicit ones via @JsonIgnore and equivalent?\n        if (anySetter == null) {\n            Collection<String> ignored2 = beanDesc.getIgnoredPropertyNames();\n            if (ignored2 != null) {\n                for (String propName : ignored2) {\n                    // allow ignoral of similarly named JSON property, but do not force;\n                    // latter means NOT adding this to 'ignored':\n                    builder.addIgnorable(propName);\n                }\n            }\n        }\n        final boolean useGettersAsSetters = (ctxt.isEnabled(MapperFeature.USE_GETTERS_AS_SETTERS)\n                && ctxt.isEnabled(MapperFeature.AUTO_DETECT_GETTERS));\n\n        // Ok: let's then filter out property definitions\n        List<BeanPropertyDefinition> propDefs = filterBeanProps(ctxt,\n                beanDesc, builder, beanDesc.findProperties(), ignored);\n\n        // After which we can let custom code change the set\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                propDefs = mod.updateProperties(ctxt.getConfig(), beanDesc, propDefs);\n            }\n        }\n        \n        // At which point we still have all kinds of properties; not all with mutators:\n        for (BeanPropertyDefinition propDef : propDefs) {\n            SettableBeanProperty prop = null;\n            /* 18-Oct-2013, tatu: Although constructor parameters have highest precedence,\n             *   we need to do linkage (as per [databind#318]), and so need to start with\n             *   other types, and only then create constructor parameter, if any.\n             */\n            if (propDef.hasSetter()) {\n                JavaType propertyType = propDef.getSetter().getParameterType(0);\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (propDef.hasField()) {\n                JavaType propertyType = propDef.getField().getType();\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (useGettersAsSetters && propDef.hasGetter()) {\n                /* May also need to consider getters\n                 * for Map/Collection properties; but with lowest precedence\n                 */\n                AnnotatedMethod getter = propDef.getGetter();\n                // should only consider Collections and Maps, for now?\n                Class<?> rawPropertyType = getter.getRawType();\n                if (Collection.class.isAssignableFrom(rawPropertyType)\n                        || Map.class.isAssignableFrom(rawPropertyType)) {\n                    prop = constructSetterlessProperty(ctxt, beanDesc, propDef);\n                }\n            }\n            // 25-Sep-2014, tatu: No point in finding constructor parameters for abstract types\n            //   (since they are never used anyway)\n            if (isConcrete && propDef.hasConstructorParameter()) {\n                /* If property is passed via constructor parameter, we must\n                 * handle things in special way. Not sure what is the most optimal way...\n                 * for now, let's just call a (new) method in builder, which does nothing.\n                 */\n                // but let's call a method just to allow custom builders to be aware...\n                final String name = propDef.getName();\n                CreatorProperty cprop = null;\n                if (creatorProps != null) {\n                    for (SettableBeanProperty cp : creatorProps) {\n                        if (name.equals(cp.getName()) && (cp instanceof CreatorProperty)) {\n                            cprop = (CreatorProperty) cp;\n                            break;\n                        }\n                    }\n                }\n                if (cprop == null) {\n                    throw ctxt.mappingException(\"Could not find creator property with name '%s' (in class %s)\",\n                            name, beanDesc.getBeanClass().getName());\n                }\n                if (prop != null) {\n                    cprop.setFallbackSetter(prop);\n                }\n                prop = cprop;\n                builder.addCreatorProperty(cprop);\n                continue;\n            }\n\n            if (prop != null) {\n                Class<?>[] views = propDef.findViews();\n                if (views == null) {\n                    // one more twist: if default inclusion disabled, need to force empty set of views\n                    if (!ctxt.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION)) {\n                        views = NO_VIEWS;\n                    }\n                }\n                // one more thing before adding to builder: copy any metadata\n                prop.setViews(views);\n                builder.addProperty(prop);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to figure out settable properties for the bean deserializer to use. <p> Note: designed to be overridable, and effort is made to keep interface similar between versions. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the addition of bean properties and checks for creator properties, which could be causing the issue in the failing test.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonDeserializer<Object> buildBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // First: check what creators we can use, if any\n        ValueInstantiator valueInstantiator;\n        /* 04-Jun-2015, tatu: To work around [databind#636], need to catch the\n         *    issue, defer; this seems like a reasonable good place for now.\n         *   Note, however, that for non-Bean types (Collections, Maps) this\n         *   probably won't work and needs to be added elsewhere.\n         */\n        try {\n            valueInstantiator = findValueInstantiator(ctxt, beanDesc);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        BeanDeserializerBuilder builder = constructBeanDeserializerBuilder(ctxt, beanDesc);\n        builder.setValueInstantiator(valueInstantiator);\n         // And then setters for deserializing from JSON Object\n        addBeanProps(ctxt, beanDesc, builder);\n        addObjectIdReader(ctxt, beanDesc, builder);\n\n        // managed/back reference fields/setters need special handling... first part\n        addReferenceProperties(ctxt, beanDesc, builder);\n        addInjectables(ctxt, beanDesc, builder);\n        \n        final DeserializationConfig config = ctxt.getConfig();\n        // [JACKSON-440]: update builder now that all information is in?\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                builder = mod.updateBuilder(config, beanDesc, builder);\n            }\n        }\n        JsonDeserializer<?> deserializer;\n\n        /* 19-Mar-2012, tatu: This check used to be done earlier; but we have to defer\n         *   it a bit to collect information on ObjectIdReader, for example.\n         */\n        if (type.isAbstract() && !valueInstantiator.canInstantiate()) {\n            deserializer = builder.buildAbstract();\n        } else {\n            deserializer = builder.build();\n        }\n\n        // [JACKSON-440]: may have modifier(s) that wants to modify or replace serializer we just built:\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                deserializer = mod.modifyDeserializer(config, beanDesc, deserializer);\n            }\n        }\n        return (JsonDeserializer<Object>) deserializer;\n    }\n\n```",
+            "method_doc": " Method that is to actually build a bean deserializer instance. All basic sanity checks have been done to know that what we have may be a valid bean type, and that there are no default simple deserializers. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for building bean deserializers, which involves adding properties to the deserializer. The error message indicates that the `stringField` property was not found, suggesting that the `SimplePojo` class might be missing this field. By fixing the `SimplePojo` class to include the `stringField`, the issue can be resolved.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        // 29-Nov-2015, tatu: Also, filter out calls to primitive types, they are\n        //    not something we could materialize anything for\n        if (type.isAbstract() && !type.isPrimitive()) {\n            // Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // Otherwise: could the class be a Bean class? If not, bail out\n        if (!isPotentialBeanType(type.getRawClass())) {\n            return null;\n        }\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }\n\n```",
+            "method_doc": " Method that {@link DeserializerCache}s call to create a new deserializer for types other than Collections, Maps, arrays and enums. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating bean deserializers, which involves mapping JSON properties to Java object fields. The error message indicates that the `stringField` property was not found, suggesting that there might be an issue with how the `BeanDeserializerFactory` handles property mapping.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()",
+            "method_code": "```java\n    protected void collectAll()\n    {\n        LinkedHashMap<String, POJOPropertyBuilder> props = new LinkedHashMap<String, POJOPropertyBuilder>();\n\n        // First: gather basic data\n        _addFields(props);\n        _addMethods(props);\n        _addCreators(props);\n        _addInjectables(props);\n\n        // Remove ignored properties, first; this MUST precede annotation merging\n        // since logic relies on knowing exactly which accessor has which annotation\n        _removeUnwantedProperties(props);\n\n        // then merge annotations, to simplify further processing\n        for (POJOPropertyBuilder property : props.values()) {\n            property.mergeAnnotations(_forSerialization);\n        }\n        \n        // and then remove unneeded accessors (wrt read-only, read-write)\n        _removeUnwantedAccessor(props);\n\n        // Rename remaining properties\n        _renameProperties(props);\n\n        // And use custom naming strategy, if applicable...\n        PropertyNamingStrategy naming = _findNamingStrategy();\n        if (naming != null) {\n            _renameUsing(props, naming);\n        }\n\n        /* Sort by visibility (explicit over implicit); drop all but first\n         * of member type (getter, setter etc) if there is visibility\n         * difference\n         */\n        for (POJOPropertyBuilder property : props.values()) {\n            property.trimByVisibility();\n        }\n\n        /* and, if required, apply wrapper name: note, MUST be done after\n         * annotations are merged.\n         */\n        if (_config.isEnabled(MapperFeature.USE_WRAPPER_NAME_AS_PROPERTY_NAME)) {\n            _renameWithWrappers(props);\n        }\n        \n        // well, almost last: there's still ordering...\n        _sortProperties(props);\n        _properties = props;\n\n        _collected = true;\n    }\n\n```",
+            "method_doc": " Internal method that will collect actual property information.  @since 2.6 ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+            "class_doc": " Helper class used for aggregating information about all possible properties of a POJO. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for collecting all properties of a POJO, including those defined through constructors. The failure in the test suggests that the `stringField` property is not being recognized, which could be due to an issue in how properties are collected or processed within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addFields(Map)",
+            "method_code": "```java\n    protected void _addFields(Map<String, POJOPropertyBuilder> props)\n    {\n        final AnnotationIntrospector ai = _annotationIntrospector;\n        /* 28-Mar-2013, tatu: For deserialization we may also want to remove\n         *   final fields, as often they won't make very good mutators...\n         *   (although, maybe surprisingly, JVM _can_ force setting of such fields!)\n         */\n        final boolean pruneFinalFields = !_forSerialization && !_config.isEnabled(MapperFeature.ALLOW_FINAL_FIELDS_AS_MUTATORS);\n        final boolean transientAsIgnoral = _config.isEnabled(MapperFeature.PROPAGATE_TRANSIENT_MARKER);\n        \n        for (AnnotatedField f : _classDef.fields()) {\n            String implName = (ai == null) ? null : ai.findImplicitPropertyName(f);\n            if (implName == null) {\n                implName = f.getName();\n            }\n\n            PropertyName pn;\n\n            if (ai == null) {\n                pn = null;\n            } else if (_forSerialization) {\n                /* 18-Aug-2011, tatu: As per existing unit tests, we should only\n                 *   use serialization annotation (@JsonSerialize) when serializing\n                 *   fields, and similarly for deserialize-only annotations... so\n                 *   no fallbacks in this particular case.\n                 */\n                pn = ai.findNameForSerialization(f);\n            } else {\n                pn = ai.findNameForDeserialization(f);\n            }\n            boolean nameExplicit = (pn != null);\n\n            if (nameExplicit && pn.isEmpty()) { // empty String meaning \"use default name\", here just means \"same as field name\"\n                pn = _propNameFromSimple(implName);\n                nameExplicit = false;\n            }\n            // having explicit name means that field is visible; otherwise need to check the rules\n            boolean visible = (pn != null);\n            if (!visible) {\n                visible = _visibilityChecker.isFieldVisible(f);\n            }\n            // and finally, may also have explicit ignoral\n            boolean ignored = (ai != null) && ai.hasIgnoreMarker(f);\n\n            // 13-May-2015, tatu: Moved from earlier place (AnnotatedClass) in 2.6\n            if (f.isTransient()) {\n                visible = false;\n                if (transientAsIgnoral) {\n                    ignored = true;\n                }\n            }\n            /* [databind#190]: this is the place to prune final fields, if they are not\n             *  to be used as mutators. Must verify they are not explicitly included.\n             *  Also: if 'ignored' is set, need to included until a later point, to\n             *  avoid losing ignoral information.\n             */\n            if (pruneFinalFields && (pn == null) && !ignored && Modifier.isFinal(f.getModifiers())) {\n                continue;\n            }\n            _property(props, implName).addField(f, pn, nameExplicit, visible, ignored);\n        }\n    }\n\n```",
+            "method_doc": " Method for collecting basic information on all fields found ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+            "class_doc": " Helper class used for aggregating information about all possible properties of a POJO. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for collecting information about all fields found in a POJO, including their names and visibility. The failure in the test suggests that the `stringField` property was not being recognized, which could be due to an issue with how fields are being collected or processed within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)",
+            "method_code": "```java\n    protected void _addCreators(Map<String, POJOPropertyBuilder> props)\n    {\n        // can be null if annotation processing is disabled...\n        if (_annotationIntrospector != null) {\n            for (AnnotatedConstructor ctor : _classDef.getConstructors()) {\n                if (_creatorProperties == null) {\n                    _creatorProperties = new LinkedList<POJOPropertyBuilder>();\n                }\n                for (int i = 0, len = ctor.getParameterCount(); i < len; ++i) {\n                    _addCreatorParam(props, ctor.getParameter(i));\n                }\n            }\n            for (AnnotatedMethod factory : _classDef.getStaticMethods()) {\n                if (_creatorProperties == null) {\n                    _creatorProperties = new LinkedList<POJOPropertyBuilder>();\n                }\n                for (int i = 0, len = factory.getParameterCount(); i < len; ++i) {\n                    _addCreatorParam(props, factory.getParameter(i));\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method for collecting basic information on constructor(s) found ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+            "class_doc": " Helper class used for aggregating information about all possible properties of a POJO. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for collecting information about constructors and methods, which could potentially include the creation parameters needed for deserialization. The error message indicates that the `stringField` property was not found, suggesting that there might be an issue with how the creators are being collected or mapped.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addProperty(SettableBeanProperty)",
+            "method_code": "```java\n    public void addProperty(SettableBeanProperty prop)\n    {\n        SettableBeanProperty old =  _properties.put(prop.getName(), prop);\n        if (old != null && old != prop) { // should never occur...\n            throw new IllegalArgumentException(\"Duplicate property '\"+prop.getName()+\"' for \"+_beanDesc.getType());\n        }\n    }\n\n```",
+            "method_doc": " Method to add a property setter. Will ensure that there is no unexpected override; if one is found will throw a {@link IllegalArgumentException}. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+            "class_doc": " Builder class used for aggregating deserialization information about a POJO, in order to build a {@link JsonDeserializer} for deserializing instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 1.0,
+            "reason": "#1# This method is not the best location that need to be fixed. The issue described in the test failure is related to the absence of a field in the `SimplePojo` class, rather than an issue within the `addProperty` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 1
+            },
+            "rank_key": [
+                1,
+                1.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)",
+            "method_code": "```java\n    public void addCreatorProperty(SettableBeanProperty prop)\n    {\n        addProperty(prop);\n    }\n\n```",
+            "method_doc": " Method called by deserializer factory, when a \"creator property\" (something that is passed via constructor- or factory method argument; instead of setter or field). <p> Default implementation does not do anything; we may need to revisit this decision if these properties need to be available through accessors. For now, however, we just have to ensure that we don't try to resolve types that masked setter/field has (see [JACKSON-700] for details). ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+            "class_doc": " Builder class used for aggregating deserialization information about a POJO, in order to build a {@link JsonDeserializer} for deserializing instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the absence of a `stringField` in the `SimplePojo` class, which is causing the deserialization process to fail. The `addCreatorProperty` method is simply adding a property to the builder, and there is no indication that it is directly responsible for resolving the missing field issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+            "method_code": "```java\n    public void setFallbackSetter(SettableBeanProperty fallbackSetter) {\n        _fallbackSetter = fallbackSetter;\n    }\n\n```",
+            "method_doc": " NOTE: one exception to immutability, due to problems with CreatorProperty instances being shared between Bean, separate PropertyBasedCreator  @since 2.6.0 ",
+            "class_name": "com.fasterxml.jackson.databind.deser.CreatorProperty",
+            "class_doc": " This concrete sub-class implements property that is passed via Creator (constructor or static factory method). It is not a full-featured implementation in that its set method should never be called -- instead, value must separately passed. <p> Note on injectable values: unlike with other mutators, where deserializer and injecting are separate, here we treat the two as related things. This is necessary to add proper priority, as well as to simplify coordination. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the absence of a `stringField` in the `SimplePojo` class, which is causing the deserialization process to fail. The `setFallbackSetter` method in `CreatorProperty` is not directly involved in the creation or mapping of properties during deserialization. Therefore, fixing this method would not resolve the root cause of the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)",
+            "method_code": "```java\n    public CreatorProperty(PropertyName name, JavaType type, PropertyName wrapperName,\n            TypeDeserializer typeDeser,\n            Annotations contextAnnotations, AnnotatedParameter param,\n            int index, Object injectableValueId,\n            PropertyMetadata metadata)\n    {\n        super(name, type, wrapperName, typeDeser, contextAnnotations, metadata);\n        _annotated = param;\n        _creatorIndex = index;\n        _injectableValueId = injectableValueId;\n        _fallbackSetter = null;\n    }\n\n```",
+            "method_doc": " @param name Name of the logical property @param type Type of the property, used to find deserializer @param typeDeser Type deserializer to use for handling polymorphic type information, if one is needed @param contextAnnotations Contextual annotations (usually by class that declares creator [constructor, factory method] that includes this property) @param param Representation of property, constructor or factory method parameter; used for accessing annotations of the property @param index Index of this property within creator invocation  @since 2.3 ",
+            "class_name": "com.fasterxml.jackson.databind.deser.CreatorProperty",
+            "class_doc": " This concrete sub-class implements property that is passed via Creator (constructor or static factory method). It is not a full-featured implementation in that its set method should never be called -- instead, value must separately passed. <p> Note on injectable values: unlike with other mutators, where deserializer and injecting are separate, here we treat the two as related things. This is necessary to add proper priority, as well as to simplify coordination. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the absence of a `stringField` in the `SimplePojo` class, which is causing the deserialization process to fail. The `CreatorProperty` class is responsible for representing properties that are passed via creators, but it does not directly handle the creation or validation of the fields in the target object. Therefore, fixing issues related to the presence or absence of fields in the target class would be more appropriate.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::constructSettableProperty(DeserializationContext,BeanDescription,BeanPropertyDefinition,JavaType)",
+            "method_code": "```java\n    protected SettableBeanProperty constructSettableProperty(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanPropertyDefinition propDef,\n            JavaType propType0)\n        throws JsonMappingException\n    {\n        // need to ensure method is callable (for non-public)\n        AnnotatedMember mutator = propDef.getNonConstructorMutator();\n\n        if (ctxt.canOverrideAccessModifiers()) {\n            // [databind#877]: explicitly prevent forced access to `cause` of `Throwable`;\n            // never needed and attempts may cause problems on some platforms.\n            // !!! NOTE: should be handled better for 2.8 and later\n            if ((mutator instanceof AnnotatedField)\n                    && \"cause\".equals(mutator.getName())\n                    && Throwable.class.isAssignableFrom(propType0.getRawClass())) {\n                ;\n            } else {\n                mutator.fixAccess(ctxt.isEnabled(MapperFeature.OVERRIDE_PUBLIC_ACCESS_MODIFIERS));\n            }\n        }\n        // note: this works since we know there's exactly one argument for methods\n        BeanProperty.Std property = new BeanProperty.Std(propDef.getFullName(),\n                propType0, propDef.getWrapperName(),\n                beanDesc.getClassAnnotations(), mutator, propDef.getMetadata());\n        JavaType type = resolveType(ctxt, beanDesc, propType0, mutator);\n        // did type change?\n        if (type != propType0) {\n            property = property.withType(type);\n        }\n\n        // First: does the Method specify the deserializer to use? If so, let's use it.\n        JsonDeserializer<Object> propDeser = findDeserializerFromAnnotation(ctxt, mutator);\n        type = modifyTypeByAnnotation(ctxt, mutator, type);\n        TypeDeserializer typeDeser = type.getTypeHandler();\n        SettableBeanProperty prop;\n        if (mutator instanceof AnnotatedMethod) {\n            prop = new MethodProperty(propDef, type, typeDeser,\n                    beanDesc.getClassAnnotations(), (AnnotatedMethod) mutator);\n        } else {\n            prop = new FieldProperty(propDef, type, typeDeser,\n                    beanDesc.getClassAnnotations(), (AnnotatedField) mutator);\n        }\n        if (propDeser != null) {\n            prop = prop.withValueDeserializer(propDeser);\n        }\n        // need to retain name of managed forward references:\n        AnnotationIntrospector.ReferenceProperty ref = propDef.findReferenceType();\n        if (ref != null && ref.isManagedReference()) {\n            prop.setManagedReferenceName(ref.getName());\n        }\n        ObjectIdInfo objectIdInfo = propDef.findObjectIdInfo();\n        if(objectIdInfo != null){\n            prop.setObjectIdInfo(objectIdInfo);\n        }\n        return prop;\n    }\n\n```",
+            "method_doc": " Method that will construct a regular bean property setter using the given setter method.  @return Property constructed, if any; or null to indicate that there should be no property based on given definitions. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Custom Deserializer Not Registered\n**Description:** There might be a custom deserializer registered for the `SimplePojo` class, but it is not properly configured to handle the `stringField` property, leading to a failure during deserialization.\n\n**Location:** In the configuration or registration of custom deserializers.\n\n**Observation Support:** The stack trace points to issues with finding the creator property, suggesting that there might be a misconfiguration in how the `SimplePojo` class is being handled by the `ObjectMapper`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for constructing settable properties, which includes handling the mapping of JSON fields to Java object properties. The error message indicates that the creator property with the name 'stringField' could not be found, suggesting an issue with how properties are being identified and processed within this method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreatorParam(Map,AnnotatedParameter)",
+            "method_code": "```java\n    protected void _addCreatorParam(Map<String, POJOPropertyBuilder> props,\n            AnnotatedParameter param)\n    {\n        // JDK 8, paranamer, Scala can give implicit name\n        String impl = _annotationIntrospector.findImplicitPropertyName(param);\n        if (impl == null) {\n            impl = \"\";\n        }\n        PropertyName pn = _annotationIntrospector.findNameForDeserialization(param);\n        boolean expl = (pn != null && !pn.isEmpty());\n        if (!expl) {\n            if (impl.isEmpty()) {\n                /* Important: if neither implicit nor explicit name, can not make use\n                 * of this creator parameter -- may or may not be a problem, verified\n                 * at a later point.\n                 */\n                return;\n            }\n            // Also: if this occurs, there MUST be explicit annotation on creator itself\n            if (!_annotationIntrospector.hasCreatorAnnotation(param.getOwner())) {\n                return;\n            }\n            pn = PropertyName.construct(impl);\n        }\n\n        // shouldn't need to worry about @JsonIgnore, since creators only added\n        // if so annotated\n\n        /* 13-May-2015, tatu: We should try to start with implicit name, similar to how\n         *   fields and methods work; but unlike those, we don't necessarily have\n         *   implicit name to use (pre-Java8 at least). So:\n         */\n        POJOPropertyBuilder prop = (expl && impl.isEmpty())\n                ? _property(props, pn) : _property(props, impl);\n        prop.addCtor(param, pn, expl, true, false);\n        _creatorProperties.add(prop);\n    }\n\n```",
+            "method_doc": " @since 2.4 ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+            "class_doc": " Helper class used for aggregating information about all possible properties of a POJO. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Custom Deserializer Not Registered\n**Description:** There might be a custom deserializer registered for the `SimplePojo` class, but it is not properly configured to handle the `stringField` property, leading to a failure during deserialization.\n\n**Location:** In the configuration or registration of custom deserializers.\n\n**Observation Support:** The stack trace points to issues with finding the creator property, suggesting that there might be a misconfiguration in how the `SimplePojo` class is being handled by the `ObjectMapper`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the creation of parameters for constructors, which seems to be the root cause of the issue in the failing test. The method checks for the presence of properties and annotations, which could explain why the 'stringField' property is not being recognized.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Incorrect Property Name in JSON Data\n**Description:** The JSON data being passed to the `readValue` method might contain a typo or incorrect property name, leading to a mismatch between the JSON keys and the properties in the `SimplePojo` class.\n\n**Location:** In the JSON data string passed to the `readValue` method.\n\n**Observation Support:** The stack trace mentions that the error occurred while looking for a property named `stringField`. It\u2019s possible that the actual JSON data contains a different property name, such as `strngField` instead of `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the deserialization process from a JSON string to a Java object. The error message indicates that the property name 'stringField' was not found, suggesting an issue with how the JSON content is being processed during deserialization. By fixing the logic within this method, we can ensure that the correct property names are matched during the deserialization process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw JsonMappingException.from(ctxt,\n                    \"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Incorrect Property Name in JSON Data\n**Description:** The JSON data being passed to the `readValue` method might contain a typo or incorrect property name, leading to a mismatch between the JSON keys and the properties in the `SimplePojo` class.\n\n**Location:** In the JSON data string passed to the `readValue` method.\n\n**Observation Support:** The stack trace mentions that the error occurred while looking for a property named `stringField`. It\u2019s possible that the actual JSON data contains a different property name, such as `strngField` instead of `stringField`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding the root-level deserializer for the passed value type. The error message indicates that the deserializer could not be found, suggesting that there might be an issue with how the method handles the mapping between JSON properties and Java object fields.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::constructValueInstantiator(DeserializationConfig)",
+            "method_code": "```java\n    public ValueInstantiator constructValueInstantiator(DeserializationConfig config)\n    {\n        final JavaType delegateType = _computeDelegateType(_creators[C_DELEGATE], _delegateArgs);\n        final JavaType arrayDelegateType = _computeDelegateType(_creators[C_ARRAY_DELEGATE], _arrayDelegateArgs);\n        final JavaType type = _beanDesc.getType();\n\n        // Any non-standard creator will prevent; with one exception: int-valued constructor\n        // that standard containers have can be ignored\n        if (!_hasNonDefaultCreator) {\n            /* 10-May-2014, tatu: If we have nothing special, and we are dealing with one\n             *   of \"well-known\" types, can create a non-reflection-based instantiator.\n             */\n            final Class<?> rawType = type.getRawClass();\n            if (rawType == Collection.class || rawType == List.class || rawType == ArrayList.class) {\n                return new Vanilla(Vanilla.TYPE_COLLECTION);\n            }\n            if (rawType == Map.class || rawType == LinkedHashMap.class) {\n                return new Vanilla(Vanilla.TYPE_MAP);\n            }\n            if (rawType == HashMap.class) {\n                return new Vanilla(Vanilla.TYPE_HASH_MAP);\n            }\n        }\n        \n        StdValueInstantiator inst = new StdValueInstantiator(config, type);\n        inst.configureFromObjectSettings(_creators[C_DEFAULT],\n                _creators[C_DELEGATE], delegateType, _delegateArgs,\n                _creators[C_PROPS], _propertyBasedArgs);\n        inst.configureFromArraySettings(_creators[C_ARRAY_DELEGATE], arrayDelegateType, _arrayDelegateArgs);\n        inst.configureFromStringCreator(_creators[C_STRING]);\n        inst.configureFromIntCreator(_creators[C_INT]);\n        inst.configureFromLongCreator(_creators[C_LONG]);\n        inst.configureFromDoubleCreator(_creators[C_DOUBLE]);\n        inst.configureFromBooleanCreator(_creators[C_BOOLEAN]);\n        inst.configureIncompleteParameter(_incompleteParameter);\n        return inst;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector",
+            "class_doc": " Container class for storing information on creators (based on annotations, visibility), to be able to build actual instantiator later on. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Version Mismatch Between Jackson Library Versions\n**Description:** There might be a version mismatch between the Jackson library versions used in the test environment and the production environment, causing compatibility issues during deserialization.\n\n**Location:** In the Jackson library versions used in the project.\n\n**Observation Support:** The stack trace originates from the `ObjectMapper` class, which is part of the Jackson library. A version mismatch could lead to unexpected behavior during deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for constructing value instantiators, which involves handling different types of constructors and properties. The error message indicates that the creator property with the name 'stringField' was not found, suggesting an issue with how properties are being mapped or recognized during deserialization. By fixing this method, we can ensure that the correct properties are identified and handled during the deserialization process.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::addPropertyCreator(AnnotatedWithParams,boolean,SettableBeanProperty[])",
+            "method_code": "```java\n    public void addPropertyCreator(AnnotatedWithParams creator, boolean explicit,\n            SettableBeanProperty[] properties)\n    {\n        verifyNonDup(creator, C_PROPS, explicit);\n            // Better ensure we have no duplicate names either...\n            if (properties.length > 1) {\n                HashMap<String,Integer> names = new HashMap<String,Integer>();\n                for (int i = 0, len = properties.length; i < len; ++i) {\n                    String name = properties[i].getName();\n                    /* [Issue-13]: Need to consider Injectables, which may not have\n                     *   a name at all, and need to be skipped\n                     */\n                    if (name.length() == 0 && properties[i].getInjectableValueId() != null) {\n                        continue;\n                    }\n                    Integer old = names.put(name, Integer.valueOf(i));\n                    if (old != null) {\n                        throw new IllegalArgumentException(\"Duplicate creator property \\\"\"+name+\"\\\" (index \"+old+\" vs \"+i+\")\");\n                    }\n                }\n            }\n            _propertyBasedArgs = properties;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector",
+            "class_doc": " Container class for storing information on creators (based on annotations, visibility), to be able to build actual instantiator later on. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Version Mismatch Between Jackson Library Versions\n**Description:** There might be a version mismatch between the Jackson library versions used in the test environment and the production environment, causing compatibility issues during deserialization.\n\n**Location:** In the Jackson library versions used in the project.\n\n**Observation Support:** The stack trace originates from the `ObjectMapper` class, which is part of the Jackson library. A version mismatch could lead to unexpected behavior during deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the creation and management of property creators, which seems to be related to the issue described in the test failure. The method checks for duplicate property names and ensures proper handling of properties, making it a prime candidate for fixing the bug.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::verifyNonDup(AnnotatedWithParams,int,boolean)",
+            "method_code": "```java\n    protected void verifyNonDup(AnnotatedWithParams newOne, int typeIndex, boolean explicit)\n    {\n        final int mask = (1 << typeIndex);\n        _hasNonDefaultCreator = true;\n        AnnotatedWithParams oldOne = _creators[typeIndex];\n        // already had an explicitly marked one?\n        if (oldOne != null) {\n            boolean verify;\n            if ((_explicitCreators & mask) != 0) { // already had explicitly annotated, leave as-is\n                // but skip, if new one not annotated\n                if (!explicit) {\n                    return;\n                }\n                // both explicit: verify\n                verify = true;\n            } else {\n                // otherwise only verify if neither explicitly annotated.\n                verify = !explicit;\n            }\n\n            // one more thing: ok to override in sub-class\n            if (verify && (oldOne.getClass() == newOne.getClass())) {\n                // [databind#667]: avoid one particular class of bogus problems\n                Class<?> oldType = oldOne.getRawParameterType(0);\n                Class<?> newType = newOne.getRawParameterType(0);\n\n                if (oldType == newType) {\n                    throw new IllegalArgumentException(\"Conflicting \"+TYPE_DESCS[typeIndex]\n                            +\" creators: already had explicitly marked \"+oldOne+\", encountered \"+newOne);\n                }\n                // otherwise, which one to choose?\n                if (newType.isAssignableFrom(oldType)) {\n                    // new type more generic, use old\n                    return;\n                }\n                // new type more specific, use it\n            }\n        }\n        if (explicit) {\n            _explicitCreators |= mask;\n        }\n        _creators[typeIndex] = _fixAccess(newOne);\n    }\n\n```",
+            "method_doc": " @return True if specified Creator is to be used ",
+            "class_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector",
+            "class_doc": " Container class for storing information on creators (based on annotations, visibility), to be able to build actual instantiator later on. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Version Mismatch Between Jackson Library Versions\n**Description:** There might be a version mismatch between the Jackson library versions used in the test environment and the production environment, causing compatibility issues during deserialization.\n\n**Location:** In the Jackson library versions used in the project.\n\n**Observation Support:** The stack trace originates from the `ObjectMapper` class, which is part of the Jackson library. A version mismatch could lead to unexpected behavior during deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the verification of creators during deserialization, which seems to be related to the issue described in the test failure.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(ctxt, propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Issue with `ObjectMapper` Configuration\n**Description:** The `ObjectMapper` might be configured incorrectly, preventing it from correctly mapping the JSON data to the `SimplePojo` class.\n\n**Location:** In the configuration of the `ObjectMapper` instance.\n\n**Observation Support:** The stack trace indicates problems with finding the creator property, suggesting that there might be an issue with how the `ObjectMapper` is set up, such as missing annotations or configurations required for proper deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding and creating deserializers, which directly impacts the deserialization process. The failure in finding the creator property suggests that there might be an issue with how deserializers are being created or cached, making this method a prime candidate for fixing the problem.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Issue with `ObjectMapper` Configuration\n**Description:** The `ObjectMapper` might be configured incorrectly, preventing it from correctly mapping the JSON data to the `SimplePojo` class.\n\n**Location:** In the configuration of the `ObjectMapper` instance.\n\n**Observation Support:** The stack trace indicates problems with finding the creator property, suggesting that there might be an issue with how the `ObjectMapper` is set up, such as missing annotations or configurations required for proper deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating and caching value deserializers. The failure in the test suggests that there might be an issue with how deserializers are created or cached, which could be addressed by fixing the logic in this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw JsonMappingException.from(ctxt, iae.getMessage(), iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Issue with `ObjectMapper` Configuration\n**Description:** The `ObjectMapper` might be configured incorrectly, preventing it from correctly mapping the JSON data to the `SimplePojo` class.\n\n**Location:** In the configuration of the `ObjectMapper` instance.\n\n**Observation Support:** The stack trace indicates problems with finding the creator property, suggesting that there might be an issue with how the `ObjectMapper` is set up, such as missing annotations or configurations required for proper deserialization.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating and caching deserializers, which could be causing issues when trying to deserialize the JSON data into the `SimplePojo` class.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::setValueInstantiator(ValueInstantiator)",
+            "method_code": "```java\n    public void setValueInstantiator(ValueInstantiator inst) {\n        _valueInstantiator = inst;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+            "class_doc": " Builder class used for aggregating deserialization information about a POJO, in order to build a {@link JsonDeserializer} for deserializing instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Custom Deserializer Not Registered\n**Description:** There might be a custom deserializer registered for the `SimplePojo` class, but it is not properly configured to handle the `stringField` property, leading to a failure during deserialization.\n\n**Location:** In the configuration or registration of custom deserializers.\n\n**Observation Support:** The stack trace points to issues with finding the creator property, suggesting that there might be a misconfiguration in how the `SimplePojo` class is being handled by the `ObjectMapper`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it sets the value instantiator for the bean deserializer builder, which could potentially affect how properties are instantiated during deserialization. However, the issue described seems to be related to property mapping rather than instantiation itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::getValueInstantiator()",
+            "method_code": "```java\n    public ValueInstantiator getValueInstantiator() {\n        return _valueInstantiator;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+            "class_doc": " Builder class used for aggregating deserialization information about a POJO, in order to build a {@link JsonDeserializer} for deserializing instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Custom Deserializer Not Registered\n**Description:** There might be a custom deserializer registered for the `SimplePojo` class, but it is not properly configured to handle the `stringField` property, leading to a failure during deserialization.\n\n**Location:** In the configuration or registration of custom deserializers.\n\n**Observation Support:** The stack trace points to issues with finding the creator property, suggesting that there might be a misconfiguration in how the `SimplePojo` class is being handled by the `ObjectMapper`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the handling of properties during deserialization, which is more likely to be addressed in methods responsible for property binding rather than value instantiators.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::BeanDeserializerBuilder(BeanDescription,DeserializationConfig)",
+            "method_code": "```java\n    public BeanDeserializerBuilder(BeanDescription beanDesc,\n            DeserializationConfig config)\n    { \n        _beanDesc = beanDesc;\n        _defaultViewInclusion = config.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION);\n        _caseInsensitivePropertyComparison = config.isEnabled(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES);\n    }\n\n```",
+            "method_doc": "  Life-cycle: construction  ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+            "class_doc": " Builder class used for aggregating deserialization information about a POJO, in order to build a {@link JsonDeserializer} for deserializing instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Issue with `ObjectMapper` Configuration\n**Description:** The `ObjectMapper` might be configured incorrectly, preventing it from correctly mapping the JSON data to the `SimplePojo` class.\n\n**Location:** In the configuration of the `ObjectMapper` instance.\n\n**Observation Support:** The stack trace indicates problems with finding the creator property, suggesting that there might be an issue with how the `ObjectMapper` is set up, such as missing annotations or configurations required for proper deserialization.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message suggests an issue with the `ObjectMapper` configuration rather than the constructor of `BeanDeserializerBuilder`. The problem seems to be related to the inability to find the creator property, which could be due to missing annotations or configurations in the `ObjectMapper` setup.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n        @Override\n        public DefaultDeserializationContext createInstance(DeserializationConfig config,\n                JsonParser jp, InjectableValues values) {\n            return new Impl(this, config, jp, values);\n        }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+            "class_doc": " Complete {@link DeserializationContext} implementation that adds extended API for {@link ObjectMapper} (and {@link ObjectReader}) to call, as well as implements certain parts that base class has left abstract. The remaining abstract methods ({@link #createInstance}, {@link #with}) are left so that custom implementations will properly implement them to return intended subtype. ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Incorrect Property Name in JSON Data\n**Description:** The JSON data being passed to the `readValue` method might contain a typo or incorrect property name, leading to a mismatch between the JSON keys and the properties in the `SimplePojo` class.\n\n**Location:** In the JSON data string passed to the `readValue` method.\n\n**Observation Support:** The stack trace mentions that the error occurred while looking for a property named `stringField`. It\u2019s possible that the actual JSON data contains a different property name, such as `strngField` instead of `stringField`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the property name mismatch between the JSON data and the `SimplePojo` class, which is handled during deserialization. The `createInstance` method does not directly interact with the JSON data or the properties of the target object, making it unlikely to be the source of the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "test_failure_causes": "Incorrect Property Name in JSON Data\n**Description:** The JSON data being passed to the `readValue` method might contain a typo or incorrect property name, leading to a mismatch between the JSON keys and the properties in the `SimplePojo` class.\n\n**Location:** In the JSON data string passed to the `readValue` method.\n\n**Observation Support:** The stack trace mentions that the error occurred while looking for a property named `stringField`. It\u2019s possible that the actual JSON data contains a different property name, such as `strngField` instead of `stringField`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the JSON data being passed to the `readValue` method, specifically the property name mismatch between the JSON keys and the properties in the `SimplePojo` class. The `ObjectMapper` constructor itself does not directly interact with the JSON data being deserialized, so fixing the constructor would not resolve the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+            "method_code": "```java\n    protected void addBeanProps(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanDeserializerBuilder builder)\n        throws JsonMappingException\n    {\n        final SettableBeanProperty[] creatorProps =\n                builder.getValueInstantiator().getFromObjectArguments(ctxt.getConfig());\n        final boolean isConcrete = !beanDesc.getType().isAbstract();\n        \n        // Things specified as \"ok to ignore\"?\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        if (intr != null) {\n            Boolean B = intr.findIgnoreUnknownProperties(beanDesc.getClassInfo());\n            if (B != null) {\n                builder.setIgnoreUnknownProperties(B.booleanValue());\n            }\n        }\n        // Or explicit/implicit definitions?\n        Set<String> ignored = ArrayBuilders.arrayToSet(intr.findPropertiesToIgnore(beanDesc.getClassInfo(), false));        \n        for (String propName : ignored) {\n            builder.addIgnorable(propName);\n        }\n        // Also, do we have a fallback \"any\" setter?\n        AnnotatedMethod anySetter = beanDesc.findAnySetter();\n        if (anySetter != null) {\n            builder.setAnySetter(constructAnySetter(ctxt, beanDesc, anySetter));\n        }\n        // NOTE: we do NOT add @JsonIgnore'd properties into blocked ones if there's any-setter\n        // Implicit ones via @JsonIgnore and equivalent?\n        if (anySetter == null) {\n            Collection<String> ignored2 = beanDesc.getIgnoredPropertyNames();\n            if (ignored2 != null) {\n                for (String propName : ignored2) {\n                    // allow ignoral of similarly named JSON property, but do not force;\n                    // latter means NOT adding this to 'ignored':\n                    builder.addIgnorable(propName);\n                }\n            }\n        }\n        final boolean useGettersAsSetters = (ctxt.isEnabled(MapperFeature.USE_GETTERS_AS_SETTERS)\n                && ctxt.isEnabled(MapperFeature.AUTO_DETECT_GETTERS));\n\n        // Ok: let's then filter out property definitions\n        List<BeanPropertyDefinition> propDefs = filterBeanProps(ctxt,\n                beanDesc, builder, beanDesc.findProperties(), ignored);\n\n        // After which we can let custom code change the set\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                propDefs = mod.updateProperties(ctxt.getConfig(), beanDesc, propDefs);\n            }\n        }\n        \n        // At which point we still have all kinds of properties; not all with mutators:\n        for (BeanPropertyDefinition propDef : propDefs) {\n            SettableBeanProperty prop = null;\n            /* 18-Oct-2013, tatu: Although constructor parameters have highest precedence,\n             *   we need to do linkage (as per [databind#318]), and so need to start with\n             *   other types, and only then create constructor parameter, if any.\n             */\n            if (propDef.hasSetter()) {\n                JavaType propertyType = propDef.getSetter().getParameterType(0);\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (propDef.hasField()) {\n                JavaType propertyType = propDef.getField().getType();\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (useGettersAsSetters && propDef.hasGetter()) {\n                /* May also need to consider getters\n                 * for Map/Collection properties; but with lowest precedence\n                 */\n                AnnotatedMethod getter = propDef.getGetter();\n                // should only consider Collections and Maps, for now?\n                Class<?> rawPropertyType = getter.getRawType();\n                if (Collection.class.isAssignableFrom(rawPropertyType)\n                        || Map.class.isAssignableFrom(rawPropertyType)) {\n                    prop = constructSetterlessProperty(ctxt, beanDesc, propDef);\n                }\n            }\n            // 25-Sep-2014, tatu: No point in finding constructor parameters for abstract types\n            //   (since they are never used anyway)\n            if (isConcrete && propDef.hasConstructorParameter()) {\n                /* If property is passed via constructor parameter, we must\n                 * handle things in special way. Not sure what is the most optimal way...\n                 * for now, let's just call a (new) method in builder, which does nothing.\n                 */\n                // but let's call a method just to allow custom builders to be aware...\n                final String name = propDef.getName();\n                CreatorProperty cprop = null;\n                if (creatorProps != null) {\n                    for (SettableBeanProperty cp : creatorProps) {\n                        if (name.equals(cp.getName()) && (cp instanceof CreatorProperty)) {\n                            cprop = (CreatorProperty) cp;\n                            break;\n                        }\n                    }\n                }\n                if (cprop == null) {\n                    throw ctxt.mappingException(\"Could not find creator property with name '%s' (in class %s)\",\n                            name, beanDesc.getBeanClass().getName());\n                }\n                if (prop != null) {\n                    cprop.setFallbackSetter(prop);\n                }\n                prop = cprop;\n                builder.addCreatorProperty(cprop);\n                continue;\n            }\n\n            if (prop != null) {\n                Class<?>[] views = propDef.findViews();\n                if (views == null) {\n                    // one more twist: if default inclusion disabled, need to force empty set of views\n                    if (!ctxt.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION)) {\n                        views = NO_VIEWS;\n                    }\n                }\n                // one more thing before adding to builder: copy any metadata\n                prop.setViews(views);\n                builder.addProperty(prop);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to figure out settable properties for the bean deserializer to use. <p> Note: designed to be overridable, and effort is made to keep interface similar between versions. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonDeserializer<Object> buildBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // First: check what creators we can use, if any\n        ValueInstantiator valueInstantiator;\n        /* 04-Jun-2015, tatu: To work around [databind#636], need to catch the\n         *    issue, defer; this seems like a reasonable good place for now.\n         *   Note, however, that for non-Bean types (Collections, Maps) this\n         *   probably won't work and needs to be added elsewhere.\n         */\n        try {\n            valueInstantiator = findValueInstantiator(ctxt, beanDesc);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        BeanDeserializerBuilder builder = constructBeanDeserializerBuilder(ctxt, beanDesc);\n        builder.setValueInstantiator(valueInstantiator);\n         // And then setters for deserializing from JSON Object\n        addBeanProps(ctxt, beanDesc, builder);\n        addObjectIdReader(ctxt, beanDesc, builder);\n\n        // managed/back reference fields/setters need special handling... first part\n        addReferenceProperties(ctxt, beanDesc, builder);\n        addInjectables(ctxt, beanDesc, builder);\n        \n        final DeserializationConfig config = ctxt.getConfig();\n        // [JACKSON-440]: update builder now that all information is in?\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                builder = mod.updateBuilder(config, beanDesc, builder);\n            }\n        }\n        JsonDeserializer<?> deserializer;\n\n        /* 19-Mar-2012, tatu: This check used to be done earlier; but we have to defer\n         *   it a bit to collect information on ObjectIdReader, for example.\n         */\n        if (type.isAbstract() && !valueInstantiator.canInstantiate()) {\n            deserializer = builder.buildAbstract();\n        } else {\n            deserializer = builder.build();\n        }\n\n        // [JACKSON-440]: may have modifier(s) that wants to modify or replace serializer we just built:\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                deserializer = mod.modifyDeserializer(config, beanDesc, deserializer);\n            }\n        }\n        return (JsonDeserializer<Object>) deserializer;\n    }\n\n```",
+            "method_doc": " Method that is to actually build a bean deserializer instance. All basic sanity checks have been done to know that what we have may be a valid bean type, and that there are no default simple deserializers. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        // 29-Nov-2015, tatu: Also, filter out calls to primitive types, they are\n        //    not something we could materialize anything for\n        if (type.isAbstract() && !type.isPrimitive()) {\n            // Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // Otherwise: could the class be a Bean class? If not, bail out\n        if (!isPotentialBeanType(type.getRawClass())) {\n            return null;\n        }\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }\n\n```",
+            "method_doc": " Method that {@link DeserializerCache}s call to create a new deserializer for types other than Collections, Maps, arrays and enums. "
+        },
+        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()",
+            "method_code": "```java\n    protected void collectAll()\n    {\n        LinkedHashMap<String, POJOPropertyBuilder> props = new LinkedHashMap<String, POJOPropertyBuilder>();\n\n        // First: gather basic data\n        _addFields(props);\n        _addMethods(props);\n        _addCreators(props);\n        _addInjectables(props);\n\n        // Remove ignored properties, first; this MUST precede annotation merging\n        // since logic relies on knowing exactly which accessor has which annotation\n        _removeUnwantedProperties(props);\n\n        // then merge annotations, to simplify further processing\n        for (POJOPropertyBuilder property : props.values()) {\n            property.mergeAnnotations(_forSerialization);\n        }\n        \n        // and then remove unneeded accessors (wrt read-only, read-write)\n        _removeUnwantedAccessor(props);\n\n        // Rename remaining properties\n        _renameProperties(props);\n\n        // And use custom naming strategy, if applicable...\n        PropertyNamingStrategy naming = _findNamingStrategy();\n        if (naming != null) {\n            _renameUsing(props, naming);\n        }\n\n        /* Sort by visibility (explicit over implicit); drop all but first\n         * of member type (getter, setter etc) if there is visibility\n         * difference\n         */\n        for (POJOPropertyBuilder property : props.values()) {\n            property.trimByVisibility();\n        }\n\n        /* and, if required, apply wrapper name: note, MUST be done after\n         * annotations are merged.\n         */\n        if (_config.isEnabled(MapperFeature.USE_WRAPPER_NAME_AS_PROPERTY_NAME)) {\n            _renameWithWrappers(props);\n        }\n        \n        // well, almost last: there's still ordering...\n        _sortProperties(props);\n        _properties = props;\n\n        _collected = true;\n    }\n\n```",
+            "method_doc": " Internal method that will collect actual property information.  @since 2.6 "
+        },
+        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addFields(Map)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addFields(Map)",
+            "method_code": "```java\n    protected void _addFields(Map<String, POJOPropertyBuilder> props)\n    {\n        final AnnotationIntrospector ai = _annotationIntrospector;\n        /* 28-Mar-2013, tatu: For deserialization we may also want to remove\n         *   final fields, as often they won't make very good mutators...\n         *   (although, maybe surprisingly, JVM _can_ force setting of such fields!)\n         */\n        final boolean pruneFinalFields = !_forSerialization && !_config.isEnabled(MapperFeature.ALLOW_FINAL_FIELDS_AS_MUTATORS);\n        final boolean transientAsIgnoral = _config.isEnabled(MapperFeature.PROPAGATE_TRANSIENT_MARKER);\n        \n        for (AnnotatedField f : _classDef.fields()) {\n            String implName = (ai == null) ? null : ai.findImplicitPropertyName(f);\n            if (implName == null) {\n                implName = f.getName();\n            }\n\n            PropertyName pn;\n\n            if (ai == null) {\n                pn = null;\n            } else if (_forSerialization) {\n                /* 18-Aug-2011, tatu: As per existing unit tests, we should only\n                 *   use serialization annotation (@JsonSerialize) when serializing\n                 *   fields, and similarly for deserialize-only annotations... so\n                 *   no fallbacks in this particular case.\n                 */\n                pn = ai.findNameForSerialization(f);\n            } else {\n                pn = ai.findNameForDeserialization(f);\n            }\n            boolean nameExplicit = (pn != null);\n\n            if (nameExplicit && pn.isEmpty()) { // empty String meaning \"use default name\", here just means \"same as field name\"\n                pn = _propNameFromSimple(implName);\n                nameExplicit = false;\n            }\n            // having explicit name means that field is visible; otherwise need to check the rules\n            boolean visible = (pn != null);\n            if (!visible) {\n                visible = _visibilityChecker.isFieldVisible(f);\n            }\n            // and finally, may also have explicit ignoral\n            boolean ignored = (ai != null) && ai.hasIgnoreMarker(f);\n\n            // 13-May-2015, tatu: Moved from earlier place (AnnotatedClass) in 2.6\n            if (f.isTransient()) {\n                visible = false;\n                if (transientAsIgnoral) {\n                    ignored = true;\n                }\n            }\n            /* [databind#190]: this is the place to prune final fields, if they are not\n             *  to be used as mutators. Must verify they are not explicitly included.\n             *  Also: if 'ignored' is set, need to included until a later point, to\n             *  avoid losing ignoral information.\n             */\n            if (pruneFinalFields && (pn == null) && !ignored && Modifier.isFinal(f.getModifiers())) {\n                continue;\n            }\n            _property(props, implName).addField(f, pn, nameExplicit, visible, ignored);\n        }\n    }\n\n```",
+            "method_doc": " Method for collecting basic information on all fields found "
+        },
+        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)",
+            "method_code": "```java\n    protected void _addCreators(Map<String, POJOPropertyBuilder> props)\n    {\n        // can be null if annotation processing is disabled...\n        if (_annotationIntrospector != null) {\n            for (AnnotatedConstructor ctor : _classDef.getConstructors()) {\n                if (_creatorProperties == null) {\n                    _creatorProperties = new LinkedList<POJOPropertyBuilder>();\n                }\n                for (int i = 0, len = ctor.getParameterCount(); i < len; ++i) {\n                    _addCreatorParam(props, ctor.getParameter(i));\n                }\n            }\n            for (AnnotatedMethod factory : _classDef.getStaticMethods()) {\n                if (_creatorProperties == null) {\n                    _creatorProperties = new LinkedList<POJOPropertyBuilder>();\n                }\n                for (int i = 0, len = factory.getParameterCount(); i < len; ++i) {\n                    _addCreatorParam(props, factory.getParameter(i));\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method for collecting basic information on constructor(s) found "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addProperty(SettableBeanProperty)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addProperty(SettableBeanProperty)",
+            "method_code": "```java\n    public void addProperty(SettableBeanProperty prop)\n    {\n        SettableBeanProperty old =  _properties.put(prop.getName(), prop);\n        if (old != null && old != prop) { // should never occur...\n            throw new IllegalArgumentException(\"Duplicate property '\"+prop.getName()+\"' for \"+_beanDesc.getType());\n        }\n    }\n\n```",
+            "method_doc": " Method to add a property setter. Will ensure that there is no unexpected override; if one is found will throw a {@link IllegalArgumentException}. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)",
+            "method_code": "```java\n    public void addCreatorProperty(SettableBeanProperty prop)\n    {\n        addProperty(prop);\n    }\n\n```",
+            "method_doc": " Method called by deserializer factory, when a \"creator property\" (something that is passed via constructor- or factory method argument; instead of setter or field). <p> Default implementation does not do anything; we may need to revisit this decision if these properties need to be available through accessors. For now, however, we just have to ensure that we don't try to resolve types that masked setter/field has (see [JACKSON-700] for details). "
+        },
+        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+            "method_code": "```java\n    public void setFallbackSetter(SettableBeanProperty fallbackSetter) {\n        _fallbackSetter = fallbackSetter;\n    }\n\n```",
+            "method_doc": " NOTE: one exception to immutability, due to problems with CreatorProperty instances being shared between Bean, separate PropertyBasedCreator  @since 2.6.0 "
+        },
+        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)",
+            "method_code": "```java\n    public CreatorProperty(PropertyName name, JavaType type, PropertyName wrapperName,\n            TypeDeserializer typeDeser,\n            Annotations contextAnnotations, AnnotatedParameter param,\n            int index, Object injectableValueId,\n            PropertyMetadata metadata)\n    {\n        super(name, type, wrapperName, typeDeser, contextAnnotations, metadata);\n        _annotated = param;\n        _creatorIndex = index;\n        _injectableValueId = injectableValueId;\n        _fallbackSetter = null;\n    }\n\n```",
+            "method_doc": " @param name Name of the logical property @param type Type of the property, used to find deserializer @param typeDeser Type deserializer to use for handling polymorphic type information, if one is needed @param contextAnnotations Contextual annotations (usually by class that declares creator [constructor, factory method] that includes this property) @param param Representation of property, constructor or factory method parameter; used for accessing annotations of the property @param index Index of this property within creator invocation  @since 2.3 "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::constructSettableProperty(DeserializationContext,BeanDescription,BeanPropertyDefinition,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::constructSettableProperty(DeserializationContext,BeanDescription,BeanPropertyDefinition,JavaType)",
+            "method_code": "```java\n    protected SettableBeanProperty constructSettableProperty(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanPropertyDefinition propDef,\n            JavaType propType0)\n        throws JsonMappingException\n    {\n        // need to ensure method is callable (for non-public)\n        AnnotatedMember mutator = propDef.getNonConstructorMutator();\n\n        if (ctxt.canOverrideAccessModifiers()) {\n            // [databind#877]: explicitly prevent forced access to `cause` of `Throwable`;\n            // never needed and attempts may cause problems on some platforms.\n            // !!! NOTE: should be handled better for 2.8 and later\n            if ((mutator instanceof AnnotatedField)\n                    && \"cause\".equals(mutator.getName())\n                    && Throwable.class.isAssignableFrom(propType0.getRawClass())) {\n                ;\n            } else {\n                mutator.fixAccess(ctxt.isEnabled(MapperFeature.OVERRIDE_PUBLIC_ACCESS_MODIFIERS));\n            }\n        }\n        // note: this works since we know there's exactly one argument for methods\n        BeanProperty.Std property = new BeanProperty.Std(propDef.getFullName(),\n                propType0, propDef.getWrapperName(),\n                beanDesc.getClassAnnotations(), mutator, propDef.getMetadata());\n        JavaType type = resolveType(ctxt, beanDesc, propType0, mutator);\n        // did type change?\n        if (type != propType0) {\n            property = property.withType(type);\n        }\n\n        // First: does the Method specify the deserializer to use? If so, let's use it.\n        JsonDeserializer<Object> propDeser = findDeserializerFromAnnotation(ctxt, mutator);\n        type = modifyTypeByAnnotation(ctxt, mutator, type);\n        TypeDeserializer typeDeser = type.getTypeHandler();\n        SettableBeanProperty prop;\n        if (mutator instanceof AnnotatedMethod) {\n            prop = new MethodProperty(propDef, type, typeDeser,\n                    beanDesc.getClassAnnotations(), (AnnotatedMethod) mutator);\n        } else {\n            prop = new FieldProperty(propDef, type, typeDeser,\n                    beanDesc.getClassAnnotations(), (AnnotatedField) mutator);\n        }\n        if (propDeser != null) {\n            prop = prop.withValueDeserializer(propDeser);\n        }\n        // need to retain name of managed forward references:\n        AnnotationIntrospector.ReferenceProperty ref = propDef.findReferenceType();\n        if (ref != null && ref.isManagedReference()) {\n            prop.setManagedReferenceName(ref.getName());\n        }\n        ObjectIdInfo objectIdInfo = propDef.findObjectIdInfo();\n        if(objectIdInfo != null){\n            prop.setObjectIdInfo(objectIdInfo);\n        }\n        return prop;\n    }\n\n```",
+            "method_doc": " Method that will construct a regular bean property setter using the given setter method.  @return Property constructed, if any; or null to indicate that there should be no property based on given definitions. "
+        },
+        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreatorParam(Map,AnnotatedParameter)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreatorParam(Map,AnnotatedParameter)",
+            "method_code": "```java\n    protected void _addCreatorParam(Map<String, POJOPropertyBuilder> props,\n            AnnotatedParameter param)\n    {\n        // JDK 8, paranamer, Scala can give implicit name\n        String impl = _annotationIntrospector.findImplicitPropertyName(param);\n        if (impl == null) {\n            impl = \"\";\n        }\n        PropertyName pn = _annotationIntrospector.findNameForDeserialization(param);\n        boolean expl = (pn != null && !pn.isEmpty());\n        if (!expl) {\n            if (impl.isEmpty()) {\n                /* Important: if neither implicit nor explicit name, can not make use\n                 * of this creator parameter -- may or may not be a problem, verified\n                 * at a later point.\n                 */\n                return;\n            }\n            // Also: if this occurs, there MUST be explicit annotation on creator itself\n            if (!_annotationIntrospector.hasCreatorAnnotation(param.getOwner())) {\n                return;\n            }\n            pn = PropertyName.construct(impl);\n        }\n\n        // shouldn't need to worry about @JsonIgnore, since creators only added\n        // if so annotated\n\n        /* 13-May-2015, tatu: We should try to start with implicit name, similar to how\n         *   fields and methods work; but unlike those, we don't necessarily have\n         *   implicit name to use (pre-Java8 at least). So:\n         */\n        POJOPropertyBuilder prop = (expl && impl.isEmpty())\n                ? _property(props, pn) : _property(props, impl);\n        prop.addCtor(param, pn, expl, true, false);\n        _creatorProperties.add(prop);\n    }\n\n```",
+            "method_doc": " @since 2.4 "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw JsonMappingException.from(ctxt,\n                    \"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. "
+        },
+        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::constructValueInstantiator(DeserializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::constructValueInstantiator(DeserializationConfig)",
+            "method_code": "```java\n    public ValueInstantiator constructValueInstantiator(DeserializationConfig config)\n    {\n        final JavaType delegateType = _computeDelegateType(_creators[C_DELEGATE], _delegateArgs);\n        final JavaType arrayDelegateType = _computeDelegateType(_creators[C_ARRAY_DELEGATE], _arrayDelegateArgs);\n        final JavaType type = _beanDesc.getType();\n\n        // Any non-standard creator will prevent; with one exception: int-valued constructor\n        // that standard containers have can be ignored\n        if (!_hasNonDefaultCreator) {\n            /* 10-May-2014, tatu: If we have nothing special, and we are dealing with one\n             *   of \"well-known\" types, can create a non-reflection-based instantiator.\n             */\n            final Class<?> rawType = type.getRawClass();\n            if (rawType == Collection.class || rawType == List.class || rawType == ArrayList.class) {\n                return new Vanilla(Vanilla.TYPE_COLLECTION);\n            }\n            if (rawType == Map.class || rawType == LinkedHashMap.class) {\n                return new Vanilla(Vanilla.TYPE_MAP);\n            }\n            if (rawType == HashMap.class) {\n                return new Vanilla(Vanilla.TYPE_HASH_MAP);\n            }\n        }\n        \n        StdValueInstantiator inst = new StdValueInstantiator(config, type);\n        inst.configureFromObjectSettings(_creators[C_DEFAULT],\n                _creators[C_DELEGATE], delegateType, _delegateArgs,\n                _creators[C_PROPS], _propertyBasedArgs);\n        inst.configureFromArraySettings(_creators[C_ARRAY_DELEGATE], arrayDelegateType, _arrayDelegateArgs);\n        inst.configureFromStringCreator(_creators[C_STRING]);\n        inst.configureFromIntCreator(_creators[C_INT]);\n        inst.configureFromLongCreator(_creators[C_LONG]);\n        inst.configureFromDoubleCreator(_creators[C_DOUBLE]);\n        inst.configureFromBooleanCreator(_creators[C_BOOLEAN]);\n        inst.configureIncompleteParameter(_incompleteParameter);\n        return inst;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::addPropertyCreator(AnnotatedWithParams,boolean,SettableBeanProperty[])": {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::addPropertyCreator(AnnotatedWithParams,boolean,SettableBeanProperty[])",
+            "method_code": "```java\n    public void addPropertyCreator(AnnotatedWithParams creator, boolean explicit,\n            SettableBeanProperty[] properties)\n    {\n        verifyNonDup(creator, C_PROPS, explicit);\n            // Better ensure we have no duplicate names either...\n            if (properties.length > 1) {\n                HashMap<String,Integer> names = new HashMap<String,Integer>();\n                for (int i = 0, len = properties.length; i < len; ++i) {\n                    String name = properties[i].getName();\n                    /* [Issue-13]: Need to consider Injectables, which may not have\n                     *   a name at all, and need to be skipped\n                     */\n                    if (name.length() == 0 && properties[i].getInjectableValueId() != null) {\n                        continue;\n                    }\n                    Integer old = names.put(name, Integer.valueOf(i));\n                    if (old != null) {\n                        throw new IllegalArgumentException(\"Duplicate creator property \\\"\"+name+\"\\\" (index \"+old+\" vs \"+i+\")\");\n                    }\n                }\n            }\n            _propertyBasedArgs = properties;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::verifyNonDup(AnnotatedWithParams,int,boolean)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::verifyNonDup(AnnotatedWithParams,int,boolean)",
+            "method_code": "```java\n    protected void verifyNonDup(AnnotatedWithParams newOne, int typeIndex, boolean explicit)\n    {\n        final int mask = (1 << typeIndex);\n        _hasNonDefaultCreator = true;\n        AnnotatedWithParams oldOne = _creators[typeIndex];\n        // already had an explicitly marked one?\n        if (oldOne != null) {\n            boolean verify;\n            if ((_explicitCreators & mask) != 0) { // already had explicitly annotated, leave as-is\n                // but skip, if new one not annotated\n                if (!explicit) {\n                    return;\n                }\n                // both explicit: verify\n                verify = true;\n            } else {\n                // otherwise only verify if neither explicitly annotated.\n                verify = !explicit;\n            }\n\n            // one more thing: ok to override in sub-class\n            if (verify && (oldOne.getClass() == newOne.getClass())) {\n                // [databind#667]: avoid one particular class of bogus problems\n                Class<?> oldType = oldOne.getRawParameterType(0);\n                Class<?> newType = newOne.getRawParameterType(0);\n\n                if (oldType == newType) {\n                    throw new IllegalArgumentException(\"Conflicting \"+TYPE_DESCS[typeIndex]\n                            +\" creators: already had explicitly marked \"+oldOne+\", encountered \"+newOne);\n                }\n                // otherwise, which one to choose?\n                if (newType.isAssignableFrom(oldType)) {\n                    // new type more generic, use old\n                    return;\n                }\n                // new type more specific, use it\n            }\n        }\n        if (explicit) {\n            _explicitCreators |= mask;\n        }\n        _creators[typeIndex] = _fixAccess(newOne);\n    }\n\n```",
+            "method_doc": " @return True if specified Creator is to be used "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(ctxt, propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw JsonMappingException.from(ctxt, iae.getMessage(), iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::setValueInstantiator(ValueInstantiator)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::setValueInstantiator(ValueInstantiator)",
+            "method_code": "```java\n    public void setValueInstantiator(ValueInstantiator inst) {\n        _valueInstantiator = inst;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::getValueInstantiator()": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::getValueInstantiator()",
+            "method_code": "```java\n    public ValueInstantiator getValueInstantiator() {\n        return _valueInstantiator;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::BeanDeserializerBuilder(BeanDescription,DeserializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::BeanDeserializerBuilder(BeanDescription,DeserializationConfig)",
+            "method_code": "```java\n    public BeanDeserializerBuilder(BeanDescription beanDesc,\n            DeserializationConfig config)\n    { \n        _beanDesc = beanDesc;\n        _defaultViewInclusion = config.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION);\n        _caseInsensitivePropertyComparison = config.isEnabled(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES);\n    }\n\n```",
+            "method_doc": "  Life-cycle: construction  "
+        },
+        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n        @Override\n        public DefaultDeserializationContext createInstance(DeserializationConfig config,\n                JsonParser jp, InjectableValues values) {\n            return new Impl(this, config, jp, values);\n        }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.databind.creators.Creator1476Test",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Missing Field in `SimplePojo` Class\n**Description:** The `SimplePojo` class might be missing the `stringField` field, causing the deserialization process to fail because it cannot find the corresponding property in the JSON data.\n\n**Location:** In the `SimplePojo` class.\n\n**Observation Support:** The stack trace indicates that the error occurred during the deserialization process, specifically when trying to map the `stringField` property. This suggests that the `SimplePojo` class does not have a field named `stringField`.",
+                "Incorrect Property Name in JSON Data\n**Description:** The JSON data being passed to the `readValue` method might contain a typo or incorrect property name, leading to a mismatch between the JSON keys and the properties in the `SimplePojo` class.\n\n**Location:** In the JSON data string passed to the `readValue` method.\n\n**Observation Support:** The stack trace mentions that the error occurred while looking for a property named `stringField`. It\u2019s possible that the actual JSON data contains a different property name, such as `strngField` instead of `stringField`.",
+                "Custom Deserializer Not Registered\n**Description:** There might be a custom deserializer registered for the `SimplePojo` class, but it is not properly configured to handle the `stringField` property, leading to a failure during deserialization.\n\n**Location:** In the configuration or registration of custom deserializers.\n\n**Observation Support:** The stack trace points to issues with finding the creator property, suggesting that there might be a misconfiguration in how the `SimplePojo` class is being handled by the `ObjectMapper`.",
+                "Version Mismatch Between Jackson Library Versions\n**Description:** There might be a version mismatch between the Jackson library versions used in the test environment and the production environment, causing compatibility issues during deserialization.\n\n**Location:** In the Jackson library versions used in the project.\n\n**Observation Support:** The stack trace originates from the `ObjectMapper` class, which is part of the Jackson library. A version mismatch could lead to unexpected behavior during deserialization.",
+                "Issue with `ObjectMapper` Configuration\n**Description:** The `ObjectMapper` might be configured incorrectly, preventing it from correctly mapping the JSON data to the `SimplePojo` class.\n\n**Location:** In the configuration of the `ObjectMapper` instance.\n\n**Observation Support:** The stack trace indicates problems with finding the creator property, suggesting that there might be an issue with how the `ObjectMapper` is set up, such as missing annotations or configurations required for proper deserialization."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty",
+                    "com.fasterxml.jackson.databind.deser.ValueInstantiator",
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+                    "com.fasterxml.jackson.databind.ObjectMapper"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector",
+                    "com.fasterxml.jackson.databind.deser.impl.CreatorCollector"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder",
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addProperty(SettableBeanProperty)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty": [
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)"
+                    ],
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector": [
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addFields(Map)",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty": [
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext": [
+                        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::constructSettableProperty(DeserializationContext,BeanDescription,BeanPropertyDefinition,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty": [
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::setValueInstantiator(ValueInstantiator)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::getValueInstantiator()"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector": [
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreatorParam(Map,AnnotatedParameter)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty": [
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector": [
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::collectAll()",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addFields(Map)",
+                        "com.fasterxml.jackson.databind.introspect.POJOPropertiesCollector::_addCreators(Map)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.impl.CreatorCollector": [
+                        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::constructValueInstantiator(DeserializationConfig)",
+                        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::addPropertyCreator(AnnotatedWithParams,boolean,SettableBeanProperty[])",
+                        "com.fasterxml.jackson.databind.deser.impl.CreatorCollector::verifyNonDup(AnnotatedWithParams,int,boolean)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::addCreatorProperty(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::getValueInstantiator()",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBuilder::BeanDeserializerBuilder(BeanDescription,DeserializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.CreatorProperty": [
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::setFallbackSetter(SettableBeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.CreatorProperty::CreatorProperty(PropertyName,JavaType,PropertyName,TypeDeserializer,Annotations,AnnotatedParameter,int,Object,PropertyMetadata)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)"
+                    ]
+                }
+            }
+        }
+    ]
+}

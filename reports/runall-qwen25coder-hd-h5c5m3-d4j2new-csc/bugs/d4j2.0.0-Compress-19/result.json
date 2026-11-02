@@ -1,0 +1,946 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+        "org.apache.commons.compress.archivers.zip.ZipFile",
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+        "org.apache.commons.compress.archivers.zip.ZipLong"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+            "method_code": "```java\n    public void parseFromCentralDirectoryData(byte[] buffer, int offset,\n                                              int length)\n        throws ZipException {\n        // store for processing in reparseCentralDirectoryData\n        rawCentralDirectoryData = new byte[length];\n        System.arraycopy(buffer, offset, rawCentralDirectoryData, 0, length);\n\n        // if there is no size information in here, we are screwed and\n        // can only hope things will get resolved by LFH data later\n        // But there are some cases that can be detected\n        // * all data is there\n        // * length == 24 -> both sizes and offset\n        // * length % 8 == 4 -> at least we can identify the diskStart field\n        if (length >= 3 * DWORD + WORD) {\n            parseFromLocalFileData(buffer, offset, length);\n        } else if (length == 3 * DWORD) {\n            size = new ZipEightByteInteger(buffer, offset);\n            offset += DWORD;\n            compressedSize = new ZipEightByteInteger(buffer, offset);\n            offset += DWORD;\n            relativeHeaderOffset = new ZipEightByteInteger(buffer, offset);\n        } else if (length % DWORD == WORD) {\n            diskStart = new ZipLong(buffer, offset + length - WORD);\n        }\n    }\n\n```",
+            "method_doc": "{@inheritDoc} */",
+            "class_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+            "class_doc": " Holds size and other extended information for entries that use Zip64 features.  <p>From {@link \"http://www.pkware.com/documents/casestudies/APPNOTE.TXT PKWARE's APPNOTE.TXT\"} <pre> Zip64 Extended Information Extra Field (0x0001):  The following is the layout of the zip64 extended  information \"extra\" block. If one of the size or offset fields in the Local or Central directory record is too small to hold the required data, a Zip64 extended information record is created. The order of the fields in the zip64 extended  information record is fixed, but the fields will only appear if the corresponding Local or Central directory record field is set to 0xFFFF or 0xFFFFFFFF.  Note: all fields stored in Intel low-byte/high-byte order.  Value      Size       Description -----      ----       ----------- (ZIP64) 0x0001     2 bytes    Tag for this \"extra\" block type Size       2 bytes    Size of this \"extra\" block Original  Size       8 bytes    Original uncompressed file size Compressed Size       8 bytes    Size of compressed data Relative Header Offset     8 bytes    Offset of local header record Disk Start Number     4 bytes    Number of the disk on which this file starts   This entry in the Local header must include BOTH original and compressed file size fields. If encrypting the  central directory and bit 13 of the general purpose bit flag is set indicating masking, the value stored in the Local Header for the original file size will be zero. </pre></p>  <p>Currently Commons Compress doesn't support encrypting the central directory so the note about masking doesn't apply.</p>  <p>The implementation relies on data being read from the local file header and assumes that both size values are always present.</p>  @since 1.2 @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly parses the data from the central directory, which is causing the length mismatch error. The method handles different scenarios based on the length of the data, but it seems to miss handling the case when the length is 28 bytes, which is causing the failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)",
+            "method_code": "```java\n    public void reparseCentralDirectoryData(boolean hasUncompressedSize,\n                                            boolean hasCompressedSize,\n                                            boolean hasRelativeHeaderOffset,\n                                            boolean hasDiskStart)\n        throws ZipException {\n        if (rawCentralDirectoryData != null) {\n            int expectedLength = (hasUncompressedSize ? DWORD : 0)\n                + (hasCompressedSize ? DWORD : 0)\n                + (hasRelativeHeaderOffset ? DWORD : 0)\n                + (hasDiskStart ? WORD : 0);\n            if (rawCentralDirectoryData.length != expectedLength) {\n                throw new ZipException(\"central directory zip64 extended\"\n                                       + \" information extra field's length\"\n                                       + \" doesn't match central directory\"\n                                       + \" data.  Expected length \"\n                                       + expectedLength + \" but is \"\n                                       + rawCentralDirectoryData.length);\n            }\n            int offset = 0;\n            if (hasUncompressedSize) {\n                size = new ZipEightByteInteger(rawCentralDirectoryData, offset);\n                offset += DWORD;\n            }\n            if (hasCompressedSize) {\n                compressedSize = new ZipEightByteInteger(rawCentralDirectoryData,\n                                                         offset);\n                offset += DWORD;\n            }\n            if (hasRelativeHeaderOffset) {\n                relativeHeaderOffset =\n                    new ZipEightByteInteger(rawCentralDirectoryData, offset);\n                offset += DWORD;\n            }\n            if (hasDiskStart) {\n                diskStart = new ZipLong(rawCentralDirectoryData, offset);\n                offset += WORD;\n            }\n        }\n    }\n\n```",
+            "method_doc": " Parses the raw bytes read from the central directory extra field with knowledge which fields are expected to be there.  <p>All four fields inside the zip64 extended information extra field are optional and must only be present if their corresponding entry inside the central directory contains the correct magic value.</p> ",
+            "class_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+            "class_doc": " Holds size and other extended information for entries that use Zip64 features.  <p>From {@link \"http://www.pkware.com/documents/casestudies/APPNOTE.TXT PKWARE's APPNOTE.TXT\"} <pre> Zip64 Extended Information Extra Field (0x0001):  The following is the layout of the zip64 extended  information \"extra\" block. If one of the size or offset fields in the Local or Central directory record is too small to hold the required data, a Zip64 extended information record is created. The order of the fields in the zip64 extended  information record is fixed, but the fields will only appear if the corresponding Local or Central directory record field is set to 0xFFFF or 0xFFFFFFFF.  Note: all fields stored in Intel low-byte/high-byte order.  Value      Size       Description -----      ----       ----------- (ZIP64) 0x0001     2 bytes    Tag for this \"extra\" block type Size       2 bytes    Size of this \"extra\" block Original  Size       8 bytes    Original uncompressed file size Compressed Size       8 bytes    Size of compressed data Relative Header Offset     8 bytes    Offset of local header record Disk Start Number     4 bytes    Number of the disk on which this file starts   This entry in the Local header must include BOTH original and compressed file size fields. If encrypting the  central directory and bit 13 of the general purpose bit flag is set indicating masking, the value stored in the Local Header for the original file size will be zero. </pre></p>  <p>Currently Commons Compress doesn't support encrypting the central directory so the note about masking doesn't apply.</p>  <p>The implementation relies on data being read from the local file header and assumes that both size values are always present.</p>  @since 1.2 @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly parses the raw bytes from the central directory extra field and checks the length against the expected length. The error message indicates a mismatch between the expected and actual lengths, suggesting that the issue lies within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::addSizes(byte[])",
+            "method_code": "```java\n    private int addSizes(byte[] data) {\n        int off = 0;\n        if (size != null) {\n            System.arraycopy(size.getBytes(), 0, data, 0, DWORD);\n            off += DWORD;\n        }\n        if (compressedSize != null) {\n            System.arraycopy(compressedSize.getBytes(), 0, data, off, DWORD);\n            off += DWORD;\n        }\n        return off;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+            "class_doc": " Holds size and other extended information for entries that use Zip64 features.  <p>From {@link \"http://www.pkware.com/documents/casestudies/APPNOTE.TXT PKWARE's APPNOTE.TXT\"} <pre> Zip64 Extended Information Extra Field (0x0001):  The following is the layout of the zip64 extended  information \"extra\" block. If one of the size or offset fields in the Local or Central directory record is too small to hold the required data, a Zip64 extended information record is created. The order of the fields in the zip64 extended  information record is fixed, but the fields will only appear if the corresponding Local or Central directory record field is set to 0xFFFF or 0xFFFFFFFF.  Note: all fields stored in Intel low-byte/high-byte order.  Value      Size       Description -----      ----       ----------- (ZIP64) 0x0001     2 bytes    Tag for this \"extra\" block type Size       2 bytes    Size of this \"extra\" block Original  Size       8 bytes    Original uncompressed file size Compressed Size       8 bytes    Size of compressed data Relative Header Offset     8 bytes    Offset of local header record Disk Start Number     4 bytes    Number of the disk on which this file starts   This entry in the Local header must include BOTH original and compressed file size fields. If encrypting the  central directory and bit 13 of the general purpose bit flag is set indicating masking, the value stored in the Local Header for the original file size will be zero. </pre></p>  <p>Currently Commons Compress doesn't support encrypting the central directory so the note about masking doesn't apply.</p>  <p>The implementation relies on data being read from the local file header and assumes that both size values are always present.</p>  @since 1.2 @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly manipulates the byte array used to store sizes and compressed sizes, which could lead to incorrect parsing if the data is not handled properly.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)",
+            "method_code": "```java\n    private void setSizesAndOffsetFromZip64Extra(ZipArchiveEntry ze,\n                                                 OffsetEntry offset,\n                                                 int diskStart)\n        throws IOException {\n        Zip64ExtendedInformationExtraField z64 =\n            (Zip64ExtendedInformationExtraField)\n            ze.getExtraField(Zip64ExtendedInformationExtraField.HEADER_ID);\n        if (z64 != null) {\n            boolean hasUncompressedSize = ze.getSize() == ZIP64_MAGIC;\n            boolean hasCompressedSize = ze.getCompressedSize() == ZIP64_MAGIC;\n            boolean hasRelativeHeaderOffset =\n                offset.headerOffset == ZIP64_MAGIC;\n            z64.reparseCentralDirectoryData(hasUncompressedSize,\n                                            hasCompressedSize,\n                                            hasRelativeHeaderOffset,\n                                            diskStart == ZIP64_MAGIC_SHORT);\n\n            if (hasUncompressedSize) {\n                ze.setSize(z64.getSize().getLongValue());\n            } else if (hasCompressedSize) {\n                z64.setSize(new ZipEightByteInteger(ze.getSize()));\n            }\n\n            if (hasCompressedSize) {\n                ze.setCompressedSize(z64.getCompressedSize().getLongValue());\n            } else if (hasUncompressedSize) {\n                z64.setCompressedSize(new ZipEightByteInteger(ze.getCompressedSize()));\n            }\n\n            if (hasRelativeHeaderOffset) {\n                offset.headerOffset =\n                    z64.getRelativeHeaderOffset().getLongValue();\n            }\n        }\n    }\n\n```",
+            "method_doc": " If the entry holds a Zip64 extended information extra field, read sizes from there if the entry's sizes are set to 0xFFFFFFFFF, do the same for the offset of the local file header.  <p>Ensures the Zip64 extra either knows both compressed and uncompressed size or neither of both as the internal logic in ExtraFieldUtils forces the field to create local header data even if they are never used - and here a field with only one size would be invalid.</p> ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipFile",
+            "class_doc": " Replacement for <code>java.util.ZipFile</code>.  <p>This class adds support for file name encodings other than UTF-8 (which is required to work on ZIP files created by native zip tools and is able to skip a preamble like the one found in self extracting archives.  Furthermore it returns instances of <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instead of <code>java.util.zip.ZipEntry</code>.</p>  <p>It doesn't extend <code>java.util.zip.ZipFile</code> as it would have to reimplement all methods anyway.  Like <code>java.util.ZipFile</code>, it uses RandomAccessFile under the covers and supports compressed and uncompressed entries.  As of Apache Commons Compress 1.3 it also transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The method signatures mimic the ones of <code>java.util.zip.ZipFile</code>, with a couple of exceptions:  <ul> <li>There is no getName method.</li> <li>entries has been renamed to getEntries.</li> <li>getEntries and getEntry return <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instances.</li> <li>close is allowed to throw IOException.</li> </ul>  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly interacts with the Zip64 extended information extra field, which is causing the length mismatch error. The method attempts to parse and update the sizes and offsets from the Zip64 extra field, making it a prime candidate for fixing the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File)",
+            "method_code": "```java\n    public ZipFile(File f) throws IOException {\n        this(f, ZipEncodingHelper.UTF8);\n    }\n\n```",
+            "method_doc": " Opens the given file for reading, assuming \"UTF8\" for file names.  @param f the archive.  @throws IOException if an error occurs while reading the file. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipFile",
+            "class_doc": " Replacement for <code>java.util.ZipFile</code>.  <p>This class adds support for file name encodings other than UTF-8 (which is required to work on ZIP files created by native zip tools and is able to skip a preamble like the one found in self extracting archives.  Furthermore it returns instances of <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instead of <code>java.util.zip.ZipEntry</code>.</p>  <p>It doesn't extend <code>java.util.zip.ZipFile</code> as it would have to reimplement all methods anyway.  Like <code>java.util.ZipFile</code>, it uses RandomAccessFile under the covers and supports compressed and uncompressed entries.  As of Apache Commons Compress 1.3 it also transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The method signatures mimic the ones of <code>java.util.zip.ZipFile</code>, with a couple of exceptions:  <ul> <li>There is no getName method.</li> <li>entries has been renamed to getEntries.</li> <li>getEntries and getEntry return <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instances.</li> <li>close is allowed to throw IOException.</li> </ul>  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the ZipFile object and calls the constructor of the superclass, which could potentially trigger the issue when handling the ZIP64 Extended Information Extra Field.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File,String)",
+            "method_code": "```java\n    public ZipFile(File f, String encoding) throws IOException {\n        this(f, encoding, true);\n    }\n\n```",
+            "method_doc": " Opens the given file for reading, assuming the specified encoding for file names and scanning for unicode extra fields.  @param f the archive. @param encoding the encoding to use for file names, use null for the platform's default encoding  @throws IOException if an error occurs while reading the file. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipFile",
+            "class_doc": " Replacement for <code>java.util.ZipFile</code>.  <p>This class adds support for file name encodings other than UTF-8 (which is required to work on ZIP files created by native zip tools and is able to skip a preamble like the one found in self extracting archives.  Furthermore it returns instances of <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instead of <code>java.util.zip.ZipEntry</code>.</p>  <p>It doesn't extend <code>java.util.zip.ZipFile</code> as it would have to reimplement all methods anyway.  Like <code>java.util.ZipFile</code>, it uses RandomAccessFile under the covers and supports compressed and uncompressed entries.  As of Apache Commons Compress 1.3 it also transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The method signatures mimic the ones of <code>java.util.zip.ZipFile</code>, with a couple of exceptions:  <ul> <li>There is no getName method.</li> <li>entries has been renamed to getEntries.</li> <li>getEntries and getEntry return <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instances.</li> <li>close is allowed to throw IOException.</li> </ul>  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the ZipFile object and calls the populateFromCentralDirectory method, which in turn calls setSizesAndOffsetFromZip64Extra. The error occurs during the initialization of the ZipFile object, suggesting that the issue might be related to how the ZipFile is being initialized or populated.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+            "method_code": "```java\n    public static ZipExtraField[] parse(byte[] data, boolean local,\n                                        UnparseableExtraField onUnparseableData)\n        throws ZipException {\n        List<ZipExtraField> v = new ArrayList<ZipExtraField>();\n        int start = 0;\n        LOOP:\n        while (start <= data.length - WORD) {\n            ZipShort headerId = new ZipShort(data, start);\n            int length = (new ZipShort(data, start + 2)).getValue();\n            if (start + WORD + length > data.length) {\n                switch(onUnparseableData.getKey()) {\n                case UnparseableExtraField.THROW_KEY:\n                    throw new ZipException(\"bad extra field starting at \"\n                                           + start + \".  Block length of \"\n                                           + length + \" bytes exceeds remaining\"\n                                           + \" data of \"\n                                           + (data.length - start - WORD)\n                                           + \" bytes.\");\n                case UnparseableExtraField.READ_KEY:\n                    UnparseableExtraFieldData field =\n                        new UnparseableExtraFieldData();\n                    if (local) {\n                        field.parseFromLocalFileData(data, start,\n                                                     data.length - start);\n                    } else {\n                        field.parseFromCentralDirectoryData(data, start,\n                                                            data.length - start);\n                    }\n                    v.add(field);\n                    //$FALL-THROUGH$\n                case UnparseableExtraField.SKIP_KEY:\n                    // since we cannot parse the data we must assume\n                    // the extra field consumes the whole rest of the\n                    // available data\n                    break LOOP;\n                default:\n                    throw new ZipException(\"unknown UnparseableExtraField key: \"\n                                           + onUnparseableData.getKey());\n                }\n            }\n            try {\n                ZipExtraField ze = createExtraField(headerId);\n                if (local) {\n                    ze.parseFromLocalFileData(data, start + WORD, length);\n                } else {\n                    ze.parseFromCentralDirectoryData(data, start + WORD,\n                                                     length);\n                }\n                v.add(ze);\n            } catch (InstantiationException ie) {\n                throw new ZipException(ie.getMessage());\n            } catch (IllegalAccessException iae) {\n                throw new ZipException(iae.getMessage());\n            }\n            start += (length + WORD);\n        }\n\n        ZipExtraField[] result = new ZipExtraField[v.size()];\n        return v.toArray(result);\n    }\n\n```",
+            "method_doc": " Split the array into ExtraFields and populate them with the given data. @param data an array of bytes @param local whether data originates from the local file data or the central directory @param onUnparseableData what to do if the extra field data cannot be parsed. @return an array of ExtraFields @throws ZipException on error  @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for parsing the extra fields in the ZIP file, including the ZIP64 Extended Information Extra Field. The error message indicates that there is a mismatch between the expected and actual lengths of the extra field, which suggests that the parsing logic in this method needs to be reviewed and potentially updated.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])",
+            "method_code": "```java\n    public static byte[] mergeLocalFileDataData(ZipExtraField[] data) {\n        final boolean lastIsUnparseableHolder = data.length > 0\n            && data[data.length - 1] instanceof UnparseableExtraFieldData;\n        int regularExtraFieldCount =\n            lastIsUnparseableHolder ? data.length - 1 : data.length;\n\n        int sum = WORD * regularExtraFieldCount;\n        for (ZipExtraField element : data) {\n            sum += element.getLocalFileDataLength().getValue();\n        }\n\n        byte[] result = new byte[sum];\n        int start = 0;\n        for (int i = 0; i < regularExtraFieldCount; i++) {\n            System.arraycopy(data[i].getHeaderId().getBytes(),\n                             0, result, start, 2);\n            System.arraycopy(data[i].getLocalFileDataLength().getBytes(),\n                             0, result, start + 2, 2);\n            byte[] local = data[i].getLocalFileDataData();\n            System.arraycopy(local, 0, result, start + WORD, local.length);\n            start += (local.length + WORD);\n        }\n        if (lastIsUnparseableHolder) {\n            byte[] local = data[data.length - 1].getLocalFileDataData();\n            System.arraycopy(local, 0, result, start, local.length);\n        }\n        return result;\n    }\n\n```",
+            "method_doc": " Merges the local file data fields of the given ZipExtraFields. @param data an array of ExtraFiles @return an array of bytes ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for merging the local file data fields of the given ZipExtraFields, which could potentially lead to issues when dealing with ZIP64 Extended Information Extra Fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+            "method_code": "```java\n    public static long getValue(byte[] bytes, int offset) {\n        long value = (bytes[offset + BYTE_3] << BYTE_3_SHIFT) & BYTE_3_MASK;\n        value += (bytes[offset + BYTE_2] << BYTE_2_SHIFT) & BYTE_2_MASK;\n        value += (bytes[offset + BYTE_1] << BYTE_1_SHIFT) & BYTE_1_MASK;\n        value += (bytes[offset] & BYTE_MASK);\n        return value;\n    }\n\n```",
+            "method_doc": " Helper method to get the value as a Java long from four bytes starting at given array offset @param bytes the array of bytes @param offset the offset to start @return the corresponding Java long value ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for converting four bytes into a Java long value, which could be causing the issue when dealing with the ZIP64 Extended Information Extra Field.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+            "method_code": "```java\n    public byte[] getBytes() {\n        return ZipLong.getBytes(value);\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @return value as four bytes in big endian order ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the bytes representation of a long value using a utility method from the same class. However, the root cause of the issue seems to be related to the parsing logic within the `Zip64ExtendedInformationExtraField` class rather than the conversion of a single long value.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setMethod(int)",
+            "method_code": "```java\n    @Override\n    public void setMethod(int method) {\n        if (method < 0) {\n            throw new IllegalArgumentException(\n                    \"ZIP compression method can not be negative: \" + method);\n        }\n        this.method = method;\n    }\n\n```",
+            "method_doc": " Sets the compression method of this entry.  @param method compression method  @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure is related to the parsing of the ZIP64 Extended Information Extra Field, which is handled in the `Zip64ExtendedInformationExtraField` class, not in the `setMethod` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setInternalAttributes(int)",
+            "method_code": "```java\n    public void setInternalAttributes(int value) {\n        internalAttributes = value;\n    }\n\n```",
+            "method_doc": " Sets the internal file attributes. @param value an <code>int</code> value ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the parsing of the ZIP64 Extended Information Extra Field, which is handled in the `Zip64ExtendedInformationExtraField` class. The `setInternalAttributes` method does not directly involve the parsing of extra fields and is therefore unlikely to be the source of the bug.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExternalAttributes(long)",
+            "method_code": "```java\n    public void setExternalAttributes(long value) {\n        externalAttributes = value;\n    }\n\n```",
+            "method_doc": " Sets the external file attributes. @param value an <code>long</code> value ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the parsing of the ZIP64 Extended Information Extra Field, which is handled in the `Zip64ExtendedInformationExtraField` class, not in the `setExternalAttributes` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the parsing of the ZIP64 Extended Information Extra Field, which involves handling specific fields within the ZIP file format. The `ZipLong` class is used for representing four-byte integers, but it does not directly handle the parsing of variable-length fields like the ZIP64 Extended Information Extra Field. Therefore, fixing the `ZipLong` constructor alone would not address the root cause of the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()",
+            "method_code": "```java\n    private Map<ZipArchiveEntry, NameAndComment> populateFromCentralDirectory()\n        throws IOException {\n        HashMap<ZipArchiveEntry, NameAndComment> noUTF8Flag =\n            new HashMap<ZipArchiveEntry, NameAndComment>();\n\n        positionAtCentralDirectory();\n\n        archive.readFully(WORD_BUF);\n        long sig = ZipLong.getValue(WORD_BUF);\n\n        if (sig != CFH_SIG && startsWithLocalFileHeader()) {\n            throw new IOException(\"central directory is empty, can't expand\"\n                                  + \" corrupt archive.\");\n        }\n\n        while (sig == CFH_SIG) {\n            readCentralDirectoryEntry(noUTF8Flag);\n            archive.readFully(WORD_BUF);\n            sig = ZipLong.getValue(WORD_BUF);\n        }\n        return noUTF8Flag;\n    }\n\n```",
+            "method_doc": " Reads the central directory of the given archive and populates the internal tables with ZipArchiveEntry instances.  <p>The ZipArchiveEntrys will know all data that can be obtained from the central directory alone, but not the data that requires the local file header or additional data to be read.</p>  @return a map of zipentries that didn't have the language encoding flag set when read. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipFile",
+            "class_doc": " Replacement for <code>java.util.ZipFile</code>.  <p>This class adds support for file name encodings other than UTF-8 (which is required to work on ZIP files created by native zip tools and is able to skip a preamble like the one found in self extracting archives.  Furthermore it returns instances of <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instead of <code>java.util.zip.ZipEntry</code>.</p>  <p>It doesn't extend <code>java.util.zip.ZipFile</code> as it would have to reimplement all methods anyway.  Like <code>java.util.ZipFile</code>, it uses RandomAccessFile under the covers and supports compressed and uncompressed entries.  As of Apache Commons Compress 1.3 it also transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The method signatures mimic the ones of <code>java.util.zip.ZipFile</code>, with a couple of exceptions:  <ul> <li>There is no getName method.</li> <li>entries has been renamed to getEntries.</li> <li>getEntries and getEntry return <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instances.</li> <li>close is allowed to throw IOException.</li> </ul>  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Corrupted ZIP Archive\n**Description:** The ZIP archive itself might be corrupted, containing invalid data in the ZIP64 Extra Field. This corruption could lead to the failure when attempting to parse the extra field.\n\n**Location:** The problem could be in the ZIP archive file itself, which is being read by the `ZipFile` constructor.\n\n**Supporting Observation:** Although the test code does not directly indicate corruption, the fact that the test fails consistently suggests that there might be an inherent issue with the ZIP archive rather than a defect in the code.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for reading and parsing the central directory of the ZIP archive. The error message indicates that there is a mismatch in the length of the ZIP64 Extended Information Extra Field, which is parsed within this method. Fixing issues related to the central directory parsing logic in this method is essential to resolve the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)",
+            "method_code": "```java\n    private void\n        readCentralDirectoryEntry(Map<ZipArchiveEntry, NameAndComment> noUTF8Flag)\n        throws IOException {\n        archive.readFully(CFH_BUF);\n        int off = 0;\n        OffsetEntry offset = new OffsetEntry();\n        Entry ze = new Entry(offset);\n\n        int versionMadeBy = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n        ze.setPlatform((versionMadeBy >> BYTE_SHIFT) & NIBLET_MASK);\n\n        off += SHORT; // skip version info\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(CFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding =\n            hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        ze.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        ze.setMethod(ZipShort.getValue(CFH_BUF, off));\n        off += SHORT;\n\n        long time = ZipUtil.dosToJavaTime(ZipLong.getValue(CFH_BUF, off));\n        ze.setTime(time);\n        off += WORD;\n\n        ze.setCrc(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        ze.setCompressedSize(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        ze.setSize(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        int fileNameLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int extraLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int commentLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int diskStart = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        ze.setInternalAttributes(ZipShort.getValue(CFH_BUF, off));\n        off += SHORT;\n\n        ze.setExternalAttributes(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        byte[] fileName = new byte[fileNameLen];\n        archive.readFully(fileName);\n        ze.setName(entryEncoding.decode(fileName), fileName);\n\n        // LFH offset,\n        offset.headerOffset = ZipLong.getValue(CFH_BUF, off);\n        // data offset will be filled later\n        entries.add(ze);\n\n        byte[] cdExtraData = new byte[extraLen];\n        archive.readFully(cdExtraData);\n        ze.setCentralDirectoryExtra(cdExtraData);\n\n        setSizesAndOffsetFromZip64Extra(ze, offset, diskStart);\n\n        byte[] comment = new byte[commentLen];\n        archive.readFully(comment);\n        ze.setComment(entryEncoding.decode(comment));\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            noUTF8Flag.put(ze, new NameAndComment(fileName, comment));\n        }\n    }\n\n```",
+            "method_doc": " Reads an individual entry of the central directory, creats an ZipArchiveEntry from it and adds it to the global maps.  @param noUTF8Flag map used to collect entries that don't have their UTF-8 flag set and whose name will be set by data read from the local file header later.  The current entry may be added to this map. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipFile",
+            "class_doc": " Replacement for <code>java.util.ZipFile</code>.  <p>This class adds support for file name encodings other than UTF-8 (which is required to work on ZIP files created by native zip tools and is able to skip a preamble like the one found in self extracting archives.  Furthermore it returns instances of <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instead of <code>java.util.zip.ZipEntry</code>.</p>  <p>It doesn't extend <code>java.util.zip.ZipFile</code> as it would have to reimplement all methods anyway.  Like <code>java.util.ZipFile</code>, it uses RandomAccessFile under the covers and supports compressed and uncompressed entries.  As of Apache Commons Compress 1.3 it also transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The method signatures mimic the ones of <code>java.util.zip.ZipFile</code>, with a couple of exceptions:  <ul> <li>There is no getName method.</li> <li>entries has been renamed to getEntries.</li> <li>getEntries and getEntry return <code>org.apache.commons.compress.archivers.zip.ZipArchiveEntry</code> instances.</li> <li>close is allowed to throw IOException.</li> </ul>  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Corrupted ZIP Archive\n**Description:** The ZIP archive itself might be corrupted, containing invalid data in the ZIP64 Extra Field. This corruption could lead to the failure when attempting to parse the extra field.\n\n**Location:** The problem could be in the ZIP archive file itself, which is being read by the `ZipFile` constructor.\n\n**Supporting Observation:** Although the test code does not directly indicate corruption, the fact that the test fails consistently suggests that there might be an inherent issue with the ZIP archive rather than a defect in the code.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly reads and processes the central directory entries, including the ZIP64 Extra Field. The error message indicates that the length of the ZIP64 Extended Information Extra Field's data does not match the expected value, suggesting a potential issue with how this field is being parsed or handled within this method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+            "method_code": "```java\n    public void setExtraFields(ZipExtraField[] fields) {\n        extraFields = new LinkedHashMap<ZipShort, ZipExtraField>();\n        for (ZipExtraField field : fields) {\n            if (field instanceof UnparseableExtraFieldData) {\n                unparseableExtra = (UnparseableExtraFieldData) field;\n            } else {\n                extraFields.put(field.getHeaderId(), field);\n            }\n        }\n        setExtra();\n    }\n\n```",
+            "method_doc": " Replaces all currently attached extra fields with the new array. @param fields an array of extra fields ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Inconsistent Handling of ZIP64 Extra Fields\n**Description:** There may be inconsistent handling of ZIP64 Extra Fields across different parts of the `ZipFile` class, causing the `ZipFile` constructor to fail when encountering a ZIP64 Extra Field with unexpected data.\n\n**Location:** The inconsistency could be in how the `setSizesAndOffsetFromZip64Extra` method processes the ZIP64 Extra Field.\n\n**Supporting Observation:** The stack trace points to `ZipFile.setSizesAndOffsetFromZip64Extra(ZipFile.java:619)` and `ZipFile.readCentralDirectoryEntry(ZipFile.java:584)`, suggesting that the issue arises during the reading and processing of the central directory entries.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the replacement of extra fields, which could potentially lead to inconsistencies if not handled correctly. The error stack trace indicates that the issue arises during the processing of ZIP64 Extra Fields, and since this method is responsible for setting these fields, it is a strong candidate for fixing the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])",
+            "method_code": "```java\n    public void setCentralDirectoryExtra(byte[] b) {\n        try {\n            ZipExtraField[] central =\n                ExtraFieldUtils.parse(b, false,\n                                      ExtraFieldUtils.UnparseableExtraField.READ);\n            mergeExtraFields(central, false);\n        } catch (ZipException e) {\n            throw new RuntimeException(e.getMessage(), e);\n        }\n    }\n\n```",
+            "method_doc": " Sets the central directory part of extra fields. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Inconsistent Handling of ZIP64 Extra Fields\n**Description:** There may be inconsistent handling of ZIP64 Extra Fields across different parts of the `ZipFile` class, causing the `ZipFile` constructor to fail when encountering a ZIP64 Extra Field with unexpected data.\n\n**Location:** The inconsistency could be in how the `setSizesAndOffsetFromZip64Extra` method processes the ZIP64 Extra Field.\n\n**Supporting Observation:** The stack trace points to `ZipFile.setSizesAndOffsetFromZip64Extra(ZipFile.java:619)` and `ZipFile.readCentralDirectoryEntry(ZipFile.java:584)`, suggesting that the issue arises during the reading and processing of the central directory entries.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of extra fields from the central directory, which is where the issue seems to arise.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraFields(boolean)",
+            "method_code": "```java\n    public ZipExtraField[] getExtraFields(boolean includeUnparseable) {\n        if (extraFields == null) {\n            return !includeUnparseable || unparseableExtra == null\n                ? new ZipExtraField[0]\n                : new ZipExtraField[] { unparseableExtra };\n        }\n        List<ZipExtraField> result =\n            new ArrayList<ZipExtraField>(extraFields.values());\n        if (includeUnparseable && unparseableExtra != null) {\n            result.add(unparseableExtra);\n        }\n        return result.toArray(new ZipExtraField[0]);\n    }\n\n```",
+            "method_doc": " Retrieves extra fields. @param includeUnparseable whether to also return unparseable extra fields as {@link UnparseableExtraFieldData} if such data exists. @return an array of the extra fields  @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Corrupted ZIP Archive\n**Description:** The ZIP archive itself might be corrupted, containing invalid data in the ZIP64 Extra Field. This corruption could lead to the failure when attempting to parse the extra field.\n\n**Location:** The problem could be in the ZIP archive file itself, which is being read by the `ZipFile` constructor.\n\n**Supporting Observation:** Although the test code does not directly indicate corruption, the fact that the test fails consistently suggests that there might be an inherent issue with the ZIP archive rather than a defect in the code.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it handles the retrieval of extra fields, including unparseable ones. The issue described in the test failure involves parsing the ZIP64 Extended Information Extra Field, which is part of the extra fields mechanism. Given that the method deals with extra fields, it is plausible that the logic within this method could be responsible for correctly interpreting and handling the ZIP64 Extra Field, especially since the error message indicates a mismatch in the expected and actual lengths of the extra field data.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 7,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        result[0] = (byte) ((value & BYTE_MASK));\n        result[BYTE_1] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        result[BYTE_2] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        result[BYTE_3] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Version Mismatch Between Library and Test Data\n**Description:** There might be a version mismatch between the Apache Commons Compress library and the ZIP archive being tested. The library might have been updated to handle ZIP64 Extra Fields differently, while the test data remains unchanged.\n\n**Location:** The problem could be in the interaction between the `ZipFile` class and the ZIP archive, particularly in how the library interprets the ZIP64 Extra Field.\n\n**Supporting Observation:** The test code references a specific ZIP archive (\"COMPRESS-228.zip\"), and the error message mentions the ZIP64 Extended Information Extra Field. This suggests that the issue might be related to the specific version of the ZIP archive being used in the test environment.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the solution, as it handles the conversion of long values to bytes, which could be involved in interpreting the ZIP64 Extra Field. However, the root cause might lie elsewhere in the handling of ZIP64 fields.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraField(ZipShort)",
+            "method_code": "```java\n    public ZipExtraField getExtraField(ZipShort type) {\n        if (extraFields != null) {\n            return extraFields.get(type);\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " Looks up an extra field by its header id.  @return null if no such field exists. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Corrupted ZIP Archive\n**Description:** The ZIP archive itself might be corrupted, containing invalid data in the ZIP64 Extra Field. This corruption could lead to the failure when attempting to parse the extra field.\n\n**Location:** The problem could be in the ZIP archive file itself, which is being read by the `ZipFile` constructor.\n\n**Supporting Observation:** Although the test code does not directly indicate corruption, the fact that the test fails consistently suggests that there might be an inherent issue with the ZIP archive rather than a defect in the code.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply looks up an extra field by its header ID without validating the length of the extra field data. Given the error message indicating a mismatch between the expected and actual lengths of the ZIP64 Extended Information Extra Field, it is plausible that the issue lies in how this method handles or validates the extra field data.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getSize()",
+            "method_code": "```java\n    @Override\n    public long getSize() {\n        return size;\n    }\n\n```",
+            "method_doc": " Gets the uncompressed size of the entry data. @return the entry size ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Race Condition During Resource Initialization\n**Description:** A race condition might occur during the initialization of the `ZipFile` object, leading to inconsistent states or premature termination of the process before the `ZipFile` can be fully initialized.\n\n**Location:** The issue could be related to the way resources are managed and initialized in the `ZipFile` constructor and its dependencies.\n\n**Supporting Observation:** The stack trace includes multiple levels of method calls, including `ZipFile.<init>` and `ZipFile.readCentralDirectoryEntry`, which suggest that the issue might be related to the sequence of operations during the initialization of the `ZipFile` object.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the value of the 'size' field without any validation or additional processing. Given the stack trace and the nature of the error (central directory zip64 extended information extra field's length doesn't match), it's plausible that the issue lies elsewhere in the code, possibly within the `ZipFile` or `Zip64ExtendedInformationExtraField` classes, rather than directly in this getter method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+            "method_code": "```java\n    public ZipArchiveEntry(String name) {\n        super(name);\n        setName(name);\n    }\n\n```",
+            "method_doc": " Creates a new zip entry with the specified name.  <p>Assumes the entry represents a directory if and only if the name ends with a forward slash \"/\".</p>  @param name the name of the entry ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of {@link <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\"> APPNOTE.txt</a>}:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "test_failure_causes": "Inconsistent Handling of ZIP64 Extra Fields\n**Description:** There may be inconsistent handling of ZIP64 Extra Fields across different parts of the `ZipFile` class, causing the `ZipFile` constructor to fail when encountering a ZIP64 Extra Field with unexpected data.\n\n**Location:** The inconsistency could be in how the `setSizesAndOffsetFromZip64Extra` method processes the ZIP64 Extra Field.\n\n**Supporting Observation:** The stack trace points to `ZipFile.setSizesAndOffsetFromZip64Extra(ZipFile.java:619)` and `ZipFile.readCentralDirectoryEntry(ZipFile.java:584)`, suggesting that the issue arises during the reading and processing of the central directory entries.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the handling of ZIP64 Extra Fields within the `ZipFile` class, specifically in the `setSizesAndOffsetFromZip64Extra` method. The `ZipArchiveEntry` constructor does not directly interact with the ZIP64 Extra Fields, so it is unlikely to be the primary source of the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+            "method_code": "```java\n    public void parseFromCentralDirectoryData(byte[] buffer, int offset,\n                                              int length)\n        throws ZipException {\n        // store for processing in reparseCentralDirectoryData\n        rawCentralDirectoryData = new byte[length];\n        System.arraycopy(buffer, offset, rawCentralDirectoryData, 0, length);\n\n        // if there is no size information in here, we are screwed and\n        // can only hope things will get resolved by LFH data later\n        // But there are some cases that can be detected\n        // * all data is there\n        // * length == 24 -> both sizes and offset\n        // * length % 8 == 4 -> at least we can identify the diskStart field\n        if (length >= 3 * DWORD + WORD) {\n            parseFromLocalFileData(buffer, offset, length);\n        } else if (length == 3 * DWORD) {\n            size = new ZipEightByteInteger(buffer, offset);\n            offset += DWORD;\n            compressedSize = new ZipEightByteInteger(buffer, offset);\n            offset += DWORD;\n            relativeHeaderOffset = new ZipEightByteInteger(buffer, offset);\n        } else if (length % DWORD == WORD) {\n            diskStart = new ZipLong(buffer, offset + length - WORD);\n        }\n    }\n\n```",
+            "method_doc": "{@inheritDoc} */"
+        },
+        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)",
+            "method_code": "```java\n    public void reparseCentralDirectoryData(boolean hasUncompressedSize,\n                                            boolean hasCompressedSize,\n                                            boolean hasRelativeHeaderOffset,\n                                            boolean hasDiskStart)\n        throws ZipException {\n        if (rawCentralDirectoryData != null) {\n            int expectedLength = (hasUncompressedSize ? DWORD : 0)\n                + (hasCompressedSize ? DWORD : 0)\n                + (hasRelativeHeaderOffset ? DWORD : 0)\n                + (hasDiskStart ? WORD : 0);\n            if (rawCentralDirectoryData.length != expectedLength) {\n                throw new ZipException(\"central directory zip64 extended\"\n                                       + \" information extra field's length\"\n                                       + \" doesn't match central directory\"\n                                       + \" data.  Expected length \"\n                                       + expectedLength + \" but is \"\n                                       + rawCentralDirectoryData.length);\n            }\n            int offset = 0;\n            if (hasUncompressedSize) {\n                size = new ZipEightByteInteger(rawCentralDirectoryData, offset);\n                offset += DWORD;\n            }\n            if (hasCompressedSize) {\n                compressedSize = new ZipEightByteInteger(rawCentralDirectoryData,\n                                                         offset);\n                offset += DWORD;\n            }\n            if (hasRelativeHeaderOffset) {\n                relativeHeaderOffset =\n                    new ZipEightByteInteger(rawCentralDirectoryData, offset);\n                offset += DWORD;\n            }\n            if (hasDiskStart) {\n                diskStart = new ZipLong(rawCentralDirectoryData, offset);\n                offset += WORD;\n            }\n        }\n    }\n\n```",
+            "method_doc": " Parses the raw bytes read from the central directory extra field with knowledge which fields are expected to be there.  <p>All four fields inside the zip64 extended information extra field are optional and must only be present if their corresponding entry inside the central directory contains the correct magic value.</p> "
+        },
+        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::addSizes(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::addSizes(byte[])",
+            "method_code": "```java\n    private int addSizes(byte[] data) {\n        int off = 0;\n        if (size != null) {\n            System.arraycopy(size.getBytes(), 0, data, 0, DWORD);\n            off += DWORD;\n        }\n        if (compressedSize != null) {\n            System.arraycopy(compressedSize.getBytes(), 0, data, off, DWORD);\n            off += DWORD;\n        }\n        return off;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)",
+            "method_code": "```java\n    private void setSizesAndOffsetFromZip64Extra(ZipArchiveEntry ze,\n                                                 OffsetEntry offset,\n                                                 int diskStart)\n        throws IOException {\n        Zip64ExtendedInformationExtraField z64 =\n            (Zip64ExtendedInformationExtraField)\n            ze.getExtraField(Zip64ExtendedInformationExtraField.HEADER_ID);\n        if (z64 != null) {\n            boolean hasUncompressedSize = ze.getSize() == ZIP64_MAGIC;\n            boolean hasCompressedSize = ze.getCompressedSize() == ZIP64_MAGIC;\n            boolean hasRelativeHeaderOffset =\n                offset.headerOffset == ZIP64_MAGIC;\n            z64.reparseCentralDirectoryData(hasUncompressedSize,\n                                            hasCompressedSize,\n                                            hasRelativeHeaderOffset,\n                                            diskStart == ZIP64_MAGIC_SHORT);\n\n            if (hasUncompressedSize) {\n                ze.setSize(z64.getSize().getLongValue());\n            } else if (hasCompressedSize) {\n                z64.setSize(new ZipEightByteInteger(ze.getSize()));\n            }\n\n            if (hasCompressedSize) {\n                ze.setCompressedSize(z64.getCompressedSize().getLongValue());\n            } else if (hasUncompressedSize) {\n                z64.setCompressedSize(new ZipEightByteInteger(ze.getCompressedSize()));\n            }\n\n            if (hasRelativeHeaderOffset) {\n                offset.headerOffset =\n                    z64.getRelativeHeaderOffset().getLongValue();\n            }\n        }\n    }\n\n```",
+            "method_doc": " If the entry holds a Zip64 extended information extra field, read sizes from there if the entry's sizes are set to 0xFFFFFFFFF, do the same for the offset of the local file header.  <p>Ensures the Zip64 extra either knows both compressed and uncompressed size or neither of both as the internal logic in ExtraFieldUtils forces the field to create local header data even if they are never used - and here a field with only one size would be invalid.</p> "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File)",
+            "method_code": "```java\n    public ZipFile(File f) throws IOException {\n        this(f, ZipEncodingHelper.UTF8);\n    }\n\n```",
+            "method_doc": " Opens the given file for reading, assuming \"UTF8\" for file names.  @param f the archive.  @throws IOException if an error occurs while reading the file. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File,String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File,String)",
+            "method_code": "```java\n    public ZipFile(File f, String encoding) throws IOException {\n        this(f, encoding, true);\n    }\n\n```",
+            "method_doc": " Opens the given file for reading, assuming the specified encoding for file names and scanning for unicode extra fields.  @param f the archive. @param encoding the encoding to use for file names, use null for the platform's default encoding  @throws IOException if an error occurs while reading the file. "
+        },
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+            "method_code": "```java\n    public static ZipExtraField[] parse(byte[] data, boolean local,\n                                        UnparseableExtraField onUnparseableData)\n        throws ZipException {\n        List<ZipExtraField> v = new ArrayList<ZipExtraField>();\n        int start = 0;\n        LOOP:\n        while (start <= data.length - WORD) {\n            ZipShort headerId = new ZipShort(data, start);\n            int length = (new ZipShort(data, start + 2)).getValue();\n            if (start + WORD + length > data.length) {\n                switch(onUnparseableData.getKey()) {\n                case UnparseableExtraField.THROW_KEY:\n                    throw new ZipException(\"bad extra field starting at \"\n                                           + start + \".  Block length of \"\n                                           + length + \" bytes exceeds remaining\"\n                                           + \" data of \"\n                                           + (data.length - start - WORD)\n                                           + \" bytes.\");\n                case UnparseableExtraField.READ_KEY:\n                    UnparseableExtraFieldData field =\n                        new UnparseableExtraFieldData();\n                    if (local) {\n                        field.parseFromLocalFileData(data, start,\n                                                     data.length - start);\n                    } else {\n                        field.parseFromCentralDirectoryData(data, start,\n                                                            data.length - start);\n                    }\n                    v.add(field);\n                    //$FALL-THROUGH$\n                case UnparseableExtraField.SKIP_KEY:\n                    // since we cannot parse the data we must assume\n                    // the extra field consumes the whole rest of the\n                    // available data\n                    break LOOP;\n                default:\n                    throw new ZipException(\"unknown UnparseableExtraField key: \"\n                                           + onUnparseableData.getKey());\n                }\n            }\n            try {\n                ZipExtraField ze = createExtraField(headerId);\n                if (local) {\n                    ze.parseFromLocalFileData(data, start + WORD, length);\n                } else {\n                    ze.parseFromCentralDirectoryData(data, start + WORD,\n                                                     length);\n                }\n                v.add(ze);\n            } catch (InstantiationException ie) {\n                throw new ZipException(ie.getMessage());\n            } catch (IllegalAccessException iae) {\n                throw new ZipException(iae.getMessage());\n            }\n            start += (length + WORD);\n        }\n\n        ZipExtraField[] result = new ZipExtraField[v.size()];\n        return v.toArray(result);\n    }\n\n```",
+            "method_doc": " Split the array into ExtraFields and populate them with the given data. @param data an array of bytes @param local whether data originates from the local file data or the central directory @param onUnparseableData what to do if the extra field data cannot be parsed. @return an array of ExtraFields @throws ZipException on error  @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])",
+            "method_code": "```java\n    public static byte[] mergeLocalFileDataData(ZipExtraField[] data) {\n        final boolean lastIsUnparseableHolder = data.length > 0\n            && data[data.length - 1] instanceof UnparseableExtraFieldData;\n        int regularExtraFieldCount =\n            lastIsUnparseableHolder ? data.length - 1 : data.length;\n\n        int sum = WORD * regularExtraFieldCount;\n        for (ZipExtraField element : data) {\n            sum += element.getLocalFileDataLength().getValue();\n        }\n\n        byte[] result = new byte[sum];\n        int start = 0;\n        for (int i = 0; i < regularExtraFieldCount; i++) {\n            System.arraycopy(data[i].getHeaderId().getBytes(),\n                             0, result, start, 2);\n            System.arraycopy(data[i].getLocalFileDataLength().getBytes(),\n                             0, result, start + 2, 2);\n            byte[] local = data[i].getLocalFileDataData();\n            System.arraycopy(local, 0, result, start + WORD, local.length);\n            start += (local.length + WORD);\n        }\n        if (lastIsUnparseableHolder) {\n            byte[] local = data[data.length - 1].getLocalFileDataData();\n            System.arraycopy(local, 0, result, start, local.length);\n        }\n        return result;\n    }\n\n```",
+            "method_doc": " Merges the local file data fields of the given ZipExtraFields. @param data an array of ExtraFiles @return an array of bytes "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+            "method_code": "```java\n    public static long getValue(byte[] bytes, int offset) {\n        long value = (bytes[offset + BYTE_3] << BYTE_3_SHIFT) & BYTE_3_MASK;\n        value += (bytes[offset + BYTE_2] << BYTE_2_SHIFT) & BYTE_2_MASK;\n        value += (bytes[offset + BYTE_1] << BYTE_1_SHIFT) & BYTE_1_MASK;\n        value += (bytes[offset] & BYTE_MASK);\n        return value;\n    }\n\n```",
+            "method_doc": " Helper method to get the value as a Java long from four bytes starting at given array offset @param bytes the array of bytes @param offset the offset to start @return the corresponding Java long value "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+            "method_code": "```java\n    public byte[] getBytes() {\n        return ZipLong.getBytes(value);\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @return value as four bytes in big endian order "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setMethod(int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setMethod(int)",
+            "method_code": "```java\n    @Override\n    public void setMethod(int method) {\n        if (method < 0) {\n            throw new IllegalArgumentException(\n                    \"ZIP compression method can not be negative: \" + method);\n        }\n        this.method = method;\n    }\n\n```",
+            "method_doc": " Sets the compression method of this entry.  @param method compression method  @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setInternalAttributes(int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setInternalAttributes(int)",
+            "method_code": "```java\n    public void setInternalAttributes(int value) {\n        internalAttributes = value;\n    }\n\n```",
+            "method_doc": " Sets the internal file attributes. @param value an <code>int</code> value "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExternalAttributes(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExternalAttributes(long)",
+            "method_code": "```java\n    public void setExternalAttributes(long value) {\n        externalAttributes = value;\n    }\n\n```",
+            "method_doc": " Sets the external file attributes. @param value an <code>long</code> value "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)",
+            "method_code": "```java\n    public ZipLong(long value) {\n        this.value = value;\n    }\n\n```",
+            "method_doc": " Create instance from a number. @param value the long to store as a ZipLong "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()",
+            "method_code": "```java\n    private Map<ZipArchiveEntry, NameAndComment> populateFromCentralDirectory()\n        throws IOException {\n        HashMap<ZipArchiveEntry, NameAndComment> noUTF8Flag =\n            new HashMap<ZipArchiveEntry, NameAndComment>();\n\n        positionAtCentralDirectory();\n\n        archive.readFully(WORD_BUF);\n        long sig = ZipLong.getValue(WORD_BUF);\n\n        if (sig != CFH_SIG && startsWithLocalFileHeader()) {\n            throw new IOException(\"central directory is empty, can't expand\"\n                                  + \" corrupt archive.\");\n        }\n\n        while (sig == CFH_SIG) {\n            readCentralDirectoryEntry(noUTF8Flag);\n            archive.readFully(WORD_BUF);\n            sig = ZipLong.getValue(WORD_BUF);\n        }\n        return noUTF8Flag;\n    }\n\n```",
+            "method_doc": " Reads the central directory of the given archive and populates the internal tables with ZipArchiveEntry instances.  <p>The ZipArchiveEntrys will know all data that can be obtained from the central directory alone, but not the data that requires the local file header or additional data to be read.</p>  @return a map of zipentries that didn't have the language encoding flag set when read. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)",
+            "method_code": "```java\n    private void\n        readCentralDirectoryEntry(Map<ZipArchiveEntry, NameAndComment> noUTF8Flag)\n        throws IOException {\n        archive.readFully(CFH_BUF);\n        int off = 0;\n        OffsetEntry offset = new OffsetEntry();\n        Entry ze = new Entry(offset);\n\n        int versionMadeBy = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n        ze.setPlatform((versionMadeBy >> BYTE_SHIFT) & NIBLET_MASK);\n\n        off += SHORT; // skip version info\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(CFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding =\n            hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        ze.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        ze.setMethod(ZipShort.getValue(CFH_BUF, off));\n        off += SHORT;\n\n        long time = ZipUtil.dosToJavaTime(ZipLong.getValue(CFH_BUF, off));\n        ze.setTime(time);\n        off += WORD;\n\n        ze.setCrc(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        ze.setCompressedSize(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        ze.setSize(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        int fileNameLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int extraLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int commentLen = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        int diskStart = ZipShort.getValue(CFH_BUF, off);\n        off += SHORT;\n\n        ze.setInternalAttributes(ZipShort.getValue(CFH_BUF, off));\n        off += SHORT;\n\n        ze.setExternalAttributes(ZipLong.getValue(CFH_BUF, off));\n        off += WORD;\n\n        byte[] fileName = new byte[fileNameLen];\n        archive.readFully(fileName);\n        ze.setName(entryEncoding.decode(fileName), fileName);\n\n        // LFH offset,\n        offset.headerOffset = ZipLong.getValue(CFH_BUF, off);\n        // data offset will be filled later\n        entries.add(ze);\n\n        byte[] cdExtraData = new byte[extraLen];\n        archive.readFully(cdExtraData);\n        ze.setCentralDirectoryExtra(cdExtraData);\n\n        setSizesAndOffsetFromZip64Extra(ze, offset, diskStart);\n\n        byte[] comment = new byte[commentLen];\n        archive.readFully(comment);\n        ze.setComment(entryEncoding.decode(comment));\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            noUTF8Flag.put(ze, new NameAndComment(fileName, comment));\n        }\n    }\n\n```",
+            "method_doc": " Reads an individual entry of the central directory, creats an ZipArchiveEntry from it and adds it to the global maps.  @param noUTF8Flag map used to collect entries that don't have their UTF-8 flag set and whose name will be set by data read from the local file header later.  The current entry may be added to this map. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+            "method_code": "```java\n    public void setExtraFields(ZipExtraField[] fields) {\n        extraFields = new LinkedHashMap<ZipShort, ZipExtraField>();\n        for (ZipExtraField field : fields) {\n            if (field instanceof UnparseableExtraFieldData) {\n                unparseableExtra = (UnparseableExtraFieldData) field;\n            } else {\n                extraFields.put(field.getHeaderId(), field);\n            }\n        }\n        setExtra();\n    }\n\n```",
+            "method_doc": " Replaces all currently attached extra fields with the new array. @param fields an array of extra fields "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])",
+            "method_code": "```java\n    public void setCentralDirectoryExtra(byte[] b) {\n        try {\n            ZipExtraField[] central =\n                ExtraFieldUtils.parse(b, false,\n                                      ExtraFieldUtils.UnparseableExtraField.READ);\n            mergeExtraFields(central, false);\n        } catch (ZipException e) {\n            throw new RuntimeException(e.getMessage(), e);\n        }\n    }\n\n```",
+            "method_doc": " Sets the central directory part of extra fields. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraFields(boolean)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraFields(boolean)",
+            "method_code": "```java\n    public ZipExtraField[] getExtraFields(boolean includeUnparseable) {\n        if (extraFields == null) {\n            return !includeUnparseable || unparseableExtra == null\n                ? new ZipExtraField[0]\n                : new ZipExtraField[] { unparseableExtra };\n        }\n        List<ZipExtraField> result =\n            new ArrayList<ZipExtraField>(extraFields.values());\n        if (includeUnparseable && unparseableExtra != null) {\n            result.add(unparseableExtra);\n        }\n        return result.toArray(new ZipExtraField[0]);\n    }\n\n```",
+            "method_doc": " Retrieves extra fields. @param includeUnparseable whether to also return unparseable extra fields as {@link UnparseableExtraFieldData} if such data exists. @return an array of the extra fields  @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+            "method_code": "```java\n    public static byte[] getBytes(long value) {\n        byte[] result = new byte[WORD];\n        result[0] = (byte) ((value & BYTE_MASK));\n        result[BYTE_1] = (byte) ((value & BYTE_1_MASK) >> BYTE_1_SHIFT);\n        result[BYTE_2] = (byte) ((value & BYTE_2_MASK) >> BYTE_2_SHIFT);\n        result[BYTE_3] = (byte) ((value & BYTE_3_MASK) >> BYTE_3_SHIFT);\n        return result;\n    }\n\n```",
+            "method_doc": " Get value as four bytes in big endian byte order. @param value the value to convert @return value as four bytes in big endian byte order "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraField(ZipShort)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraField(ZipShort)",
+            "method_code": "```java\n    public ZipExtraField getExtraField(ZipShort type) {\n        if (extraFields != null) {\n            return extraFields.get(type);\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " Looks up an extra field by its header id.  @return null if no such field exists. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getSize()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getSize()",
+            "method_code": "```java\n    @Override\n    public long getSize() {\n        return size;\n    }\n\n```",
+            "method_doc": " Gets the uncompressed size of the entry data. @return the entry size "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+            "method_code": "```java\n    public ZipArchiveEntry(String name) {\n        super(name);\n        setName(name);\n    }\n\n```",
+            "method_doc": " Creates a new zip entry with the specified name.  <p>Assumes the entry represents a directory if and only if the name ends with a forward slash \"/\".</p>  @param name the name of the entry "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipFileTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Parsing of ZIP64 Extended Information Extra Field Length\n**Description:** The issue might stem from an incorrect parsing of the length of the ZIP64 Extended Information Extra Field. The expected length is 16 bytes, but the actual length is 28 bytes, leading to a mismatch.\n\n**Location:** The problem is likely in the `reparseCentralDirectoryData` method of the `Zip64ExtendedInformationExtraField` class.\n\n**Supporting Observation:** The stack trace shows that the error occurs in `Zip64ExtendedInformationExtraField.reparseCentralDirectoryData(Zip64ExtendedInformationExtraField.java:260)`, indicating that there is a discrepancy between the expected and actual lengths of the extra field.",
+                "Inconsistent Handling of ZIP64 Extra Fields\n**Description:** There may be inconsistent handling of ZIP64 Extra Fields across different parts of the `ZipFile` class, causing the `ZipFile` constructor to fail when encountering a ZIP64 Extra Field with unexpected data.\n\n**Location:** The inconsistency could be in how the `setSizesAndOffsetFromZip64Extra` method processes the ZIP64 Extra Field.\n\n**Supporting Observation:** The stack trace points to `ZipFile.setSizesAndOffsetFromZip64Extra(ZipFile.java:619)` and `ZipFile.readCentralDirectoryEntry(ZipFile.java:584)`, suggesting that the issue arises during the reading and processing of the central directory entries.",
+                "Corrupted ZIP Archive\n**Description:** The ZIP archive itself might be corrupted, containing invalid data in the ZIP64 Extra Field. This corruption could lead to the failure when attempting to parse the extra field.\n\n**Location:** The problem could be in the ZIP archive file itself, which is being read by the `ZipFile` constructor.\n\n**Supporting Observation:** Although the test code does not directly indicate corruption, the fact that the test fails consistently suggests that there might be an inherent issue with the ZIP archive rather than a defect in the code.",
+                "Race Condition During Resource Initialization\n**Description:** A race condition might occur during the initialization of the `ZipFile` object, leading to inconsistent states or premature termination of the process before the `ZipFile` can be fully initialized.\n\n**Location:** The issue could be related to the way resources are managed and initialized in the `ZipFile` constructor and its dependencies.\n\n**Supporting Observation:** The stack trace includes multiple levels of method calls, including `ZipFile.<init>` and `ZipFile.readCentralDirectoryEntry`, which suggest that the issue might be related to the sequence of operations during the initialization of the `ZipFile` object.",
+                "Version Mismatch Between Library and Test Data\n**Description:** There might be a version mismatch between the Apache Commons Compress library and the ZIP archive being tested. The library might have been updated to handle ZIP64 Extra Fields differently, while the test data remains unchanged.\n\n**Location:** The problem could be in the interaction between the `ZipFile` class and the ZIP archive, particularly in how the library interprets the ZIP64 Extra Field.\n\n**Supporting Observation:** The test code references a specific ZIP archive (\"COMPRESS-228.zip\"), and the error message mentions the ZIP64 Extended Information Extra Field. This suggests that the issue might be related to the specific version of the ZIP archive being used in the test environment."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+                    "org.apache.commons.compress.archivers.zip.ZipFile",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+                    "org.apache.commons.compress.archivers.zip.ZipFile",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+                    "org.apache.commons.compress.archivers.zip.ZipFile",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.zip.ZipFile",
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField",
+                    "org.apache.commons.compress.archivers.zip.ZipFile",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField": [
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::addSizes(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipFile": [
+                        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File,String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setMethod(int)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setInternalAttributes(int)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExternalAttributes(long)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(long)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField": [
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipFile": [
+                        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::ZipFile(File,String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField": [
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipFile": [
+                        "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraFields(boolean)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraField(ZipShort)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.zip.ZipFile": [
+                        "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField": [
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getSize()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::mergeLocalFileDataData(ZipExtraField[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField": [
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::parseFromCentralDirectoryData(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::reparseCentralDirectoryData(boolean,boolean,boolean,boolean)",
+                        "org.apache.commons.compress.archivers.zip.Zip64ExtendedInformationExtraField::addSizes(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipFile": [
+                        "org.apache.commons.compress.archivers.zip.ZipFile::setSizesAndOffsetFromZip64Extra(ZipArchiveEntry,OffsetEntry,int)",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::populateFromCentralDirectory()",
+                        "org.apache.commons.compress.archivers.zip.ZipFile::readCentralDirectoryEntry(Map)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtraFields(ZipExtraField[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getExtraFields(boolean)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setCentralDirectoryExtra(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes()",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getBytes(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)"
+                    ]
+                }
+            }
+        }
+    ]
+}

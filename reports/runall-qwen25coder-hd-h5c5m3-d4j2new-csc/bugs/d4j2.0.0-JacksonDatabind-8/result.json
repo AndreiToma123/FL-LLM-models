@@ -1,0 +1,720 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+        "com.fasterxml.jackson.databind.deser.DeserializerCache",
+        "com.fasterxml.jackson.databind.ObjectMapper",
+        "com.fasterxml.jackson.databind.deser.std.JdkDeserializers",
+        "com.fasterxml.jackson.databind.deser.std.StdKeyDeserializers",
+        "com.fasterxml.jackson.databind.JsonMappingException"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public ValueInstantiator findValueInstantiator(DeserializationContext ctxt,\n            BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        ValueInstantiator instantiator = null;\n        // [JACKSON-633] Check @JsonValueInstantiator before anything else\n        AnnotatedClass ac = beanDesc.getClassInfo();\n        Object instDef = ctxt.getAnnotationIntrospector().findValueInstantiator(ac);\n        if (instDef != null) {\n            instantiator = _valueInstantiatorInstance(config, ac, instDef);\n        }\n        if (instantiator == null) {\n            /* Second: see if some of standard Jackson/JDK types might provide value\n             * instantiators.\n             */\n            instantiator = _findStdValueInstantiator(config, beanDesc);\n            if (instantiator == null) {\n                instantiator = _constructDefaultValueInstantiator(ctxt, beanDesc);\n            }\n        }\n        \n        // finally: anyone want to modify ValueInstantiator?\n        if (_factoryConfig.hasValueInstantiators()) {\n            for (ValueInstantiators insts : _factoryConfig.valueInstantiators()) {\n                instantiator = insts.findValueInstantiator(config, beanDesc, instantiator);\n                // let's do sanity check; easier to spot buggy handlers\n                if (instantiator == null) {\n                    throw new JsonMappingException(\"Broken registered ValueInstantiators (of type \"\n                            +insts.getClass().getName()+\"): returned null ValueInstantiator\");\n                }\n            }\n        }\n\n        // Sanity check: does the chosen instantatior have incomplete creators?\n        if (instantiator.getIncompleteParameter() != null) {\n            final AnnotatedParameter nonAnnotatedParam = instantiator.getIncompleteParameter();\n            final AnnotatedWithParams ctor = nonAnnotatedParam.getOwner();\n            throw new IllegalArgumentException(\"Argument #\"+nonAnnotatedParam.getIndex()+\" of constructor \"+ctor+\" has no property name annotation; must have name when multiple-parameter constructor annotated as Creator\");\n        }\n\n        return instantiator;\n    }\n\n```",
+            "method_doc": " Value instantiator is created both based on creator annotations, and on optional externally provided instantiators (registered through module interface). ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding and creating value instantiators for deserializers. The conflict observed in the test failure suggests that there are multiple ways to create a `StringBuilder` object, leading to ambiguity. By fixing this method, we can ensure that the correct deserializer is selected for `StringBuilder`, resolving the conflict.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    protected ValueInstantiator _constructDefaultValueInstantiator(DeserializationContext ctxt,\n            BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        boolean fixAccess = ctxt.canOverrideAccessModifiers();\n        CreatorCollector creators =  new CreatorCollector(beanDesc, fixAccess);\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        \n        // need to construct suitable visibility checker:\n        final DeserializationConfig config = ctxt.getConfig();\n        VisibilityChecker<?> vchecker = config.getDefaultVisibilityChecker();\n        vchecker = intr.findAutoDetectVisibility(beanDesc.getClassInfo(), vchecker);\n\n        /* 24-Sep-2014, tatu: Tricky part first; need to merge resolved property information\n         *  (which has creator parameters sprinkled around) with actual creator\n         *  declarations (which are needed to access creator annotation, amongst other things).\n         *  Easiest to combine that info first, then pass it to remaining processing.\n         */\n        Map<AnnotatedWithParams,BeanPropertyDefinition[]> creatorDefs = _findCreatorsFromProperties(ctxt,\n                beanDesc);\n        \n        /* Important: first add factory methods; then constructors, so\n         * latter can override former!\n         */\n        _addDeserializerFactoryMethods(ctxt, beanDesc, vchecker, intr, creators, creatorDefs);\n        // constructors only usable on concrete types:\n        if (beanDesc.getType().isConcrete()) {\n            _addDeserializerConstructors(ctxt, beanDesc, vchecker, intr, creators, creatorDefs);\n        }\n        return creators.constructValueInstantiator(config);\n    }\n\n```",
+            "method_doc": " Method that will construct standard default {@link ValueInstantiator} using annotations (like @JsonCreator) and visibility rules ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for constructing value instantiators, which could lead to conflicts when dealing with types like `StringBuilder` that have multiple potential constructors.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCreatorsFromProperties(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    protected Map<AnnotatedWithParams,BeanPropertyDefinition[]> _findCreatorsFromProperties(DeserializationContext ctxt,\n            BeanDescription beanDesc) throws JsonMappingException\n    {\n        Map<AnnotatedWithParams,BeanPropertyDefinition[]> result = Collections.emptyMap();\n        for (BeanPropertyDefinition propDef : beanDesc.findProperties()) {\n            Iterator<AnnotatedParameter> it = propDef.getConstructorParameters();\n            while (it.hasNext()) {\n                AnnotatedParameter param = it.next();\n                AnnotatedWithParams owner = param.getOwner();\n                BeanPropertyDefinition[] defs = result.get(owner);\n                final int index = param.getIndex();\n                \n                if (defs == null) {\n                    if (result.isEmpty()) {\n                        result = new LinkedHashMap<AnnotatedWithParams,BeanPropertyDefinition[]>();\n                    }\n                    defs = new BeanPropertyDefinition[owner.getParameterCount()];\n                    result.put(owner, defs);\n                } else {\n                    if (defs[index] != null) {\n                        throw new IllegalStateException(\"Conflict: parameter #\"+index+\" of \"+owner\n                                +\" bound to more than one property; \"+defs[index]+\" vs \"+propDef);\n                    }\n                }\n                defs[index] = propDef;\n            }\n        }\n        return result;\n    }\n\n```",
+            "method_doc": "This method maps annotated parameters to bean property definitions, ensuring each parameter is associated with exactly one property definition.",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the creation and mapping of bean properties, which could lead to conflicts when dealing with types like `StringBuilder` that have multiple potential constructors.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object>_createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating and caching value deserializers. The conflict between multiple deserializers for `StringBuilder` suggests that the issue lies in how deserializers are managed and cached within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc;\n        try {\n            beanDesc = config.introspect(type);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [Issue#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the creation and caching of deserializers, which could be causing conflicts when dealing with types like `StringBuilder`. The method checks for explicit deserializers, modifies types by annotations, and considers builders and converters, making it a central point for handling deserialization logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> findDeserializerFromAnnotation(DeserializationContext ctxt,\n            Annotated ann)\n        throws JsonMappingException\n    {\n        Object deserDef = ctxt.getAnnotationIntrospector().findDeserializer(ann);\n        if (deserDef == null) {\n            return null;\n        }\n        JsonDeserializer<Object> deser = ctxt.deserializerInstance(ann, deserDef);\n        // One more thing however: may need to also apply a converter:\n        return findConvertingDeserializer(ctxt, ann, deser);\n    }\n\n```",
+            "method_doc": " Helper method called to check if a class or method has annotation that tells which class to use for deserialization. Returns null if no such annotation found. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding deserializers from annotations, and the error message indicates a conflict between multiple deserializers for `StringBuilder`. By ensuring that only one deserializer is registered for `StringBuilder`, this method can help resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " This mapper (or, data binder, or codec) provides functionality for converting between Java objects (instances of JDK provided core classes, beans), and matching JSON constructs. It will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for deserializing JSON content into Java objects. The error message indicates a conflict between multiple deserializers for `StringBuilder`, which suggests that the issue lies in how the `ObjectMapper` handles deserialization. By fixing the logic within this method, we can ensure that the correct deserializer is used for `StringBuilder` and resolve the conflict.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw new JsonMappingException(\"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " This mapper (or, data binder, or codec) provides functionality for converting between Java objects (instances of JDK provided core classes, beans), and matching JSON constructs. It will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding and caching root-level deserializers. The conflict observed in the test suggests that there are multiple deserializers registered for `StringBuilder`, and this method would be the appropriate place to handle such conflicts by ensuring that only one deserializer is used for a given type.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " This mapper (or, data binder, or codec) provides functionality for converting between Java objects (instances of JDK provided core classes, beans), and matching JSON constructs. It will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the default settings for the ObjectMapper, but it doesn't directly relate to the issue of conflicting String creators. The problem seems to stem from the way Jackson handles deserialization of StringBuilder, which might be influenced by other configurations or custom serializers.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 0,
+                "3": 0,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findDefaultDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    public JsonDeserializer<?> findDefaultDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        Class<?> rawType = type.getRawClass();\n        // Object (\"untyped\"), String equivalents:\n        if (rawType == CLASS_OBJECT) {\n            return new UntypedObjectDeserializer();\n        }\n        if (rawType == CLASS_STRING || rawType == CLASS_CHAR_BUFFER) {\n            return StringDeserializer.instance;\n        }\n        if (rawType == CLASS_ITERABLE) {\n            // [Issue#199]: Can and should 'upgrade' to a Collection type:\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] tps = tf.findTypeParameters(type, CLASS_ITERABLE);\n            JavaType elemType = (tps == null || tps.length != 1) ? TypeFactory.unknownType() : tps[0];\n            CollectionType ct = tf.constructCollectionType(Collection.class, elemType);\n            // Should we re-introspect beanDesc? For now let's not...\n            return createCollectionDeserializer(ctxt, ct, beanDesc);\n        }\n        if (rawType == CLASS_MAP_ENTRY) {\n            final DeserializationConfig config = ctxt.getConfig();\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] tps = tf.findTypeParameters(type, CLASS_MAP_ENTRY);\n            JavaType kt, vt;\n            if (tps == null || tps.length != 2) {\n                kt = vt = TypeFactory.unknownType();\n            } else {\n                kt = tps[0];\n                vt = tps[1];\n            }\n            TypeDeserializer vts = (TypeDeserializer) vt.getTypeHandler();\n            if (vts == null) {\n                vts = findTypeDeserializer(config, vt);\n            }\n            JsonDeserializer<Object> valueDeser = vt.getValueHandler();\n            KeyDeserializer keyDes = (KeyDeserializer) kt.getValueHandler();\n            return new MapEntryDeserializer(type, keyDes, valueDeser, vts);\n        }\n        String clsName = rawType.getName();\n        if (rawType.isPrimitive() || clsName.startsWith(\"java.\")) {\n            // Primitives/wrappers, other Numbers:\n            JsonDeserializer<?> deser = NumberDeserializers.find(rawType, clsName);\n            if (deser == null) {\n                deser = DateDeserializers.find(rawType, clsName);\n            }\n            if (deser != null) {\n                return deser;\n            }\n        }\n        // and a few Jackson types as well:\n        if (rawType == TokenBuffer.class) {\n            return new TokenBufferDeserializer();\n        }\n        if (AtomicReference.class.isAssignableFrom(rawType)) {\n            // Must find parameterization\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] params = tf.findTypeParameters(type, AtomicReference.class);\n            JavaType referencedType;\n            if (params == null || params.length < 1) { // untyped (raw)\n                referencedType = TypeFactory.unknownType();\n            } else {\n                referencedType = params[0];\n            }\n            TypeDeserializer vts = findTypeDeserializer(ctxt.getConfig(), referencedType);\n            BeanDescription refdDesc = ctxt.getConfig().introspectClassAnnotations(referencedType);\n            JsonDeserializer<?> deser = findDeserializerFromAnnotation(ctxt, refdDesc.getClassInfo());\n            return new AtomicReferenceDeserializer(referencedType, vts, deser);\n        }\n        JsonDeserializer<?> deser = findOptionalStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n        return JdkDeserializers.find(rawType, clsName);\n    }\n\n```",
+            "method_doc": " Helper method called to find one of default serializers for \"well-known\" platform types: JDK-provided types, and small number of public Jackson API types.  @since 2.2 ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Custom Deserializer Conflict\n\n**Description:** A custom deserializer for `StringBuilder` might have been registered, but it conflicts with the default deserializer provided by Jackson.\n\n**Location:** In any custom deserializers registered with the `ObjectMapper`.\n\n**Observation Support:** The error message mentions conflicting string creators, implying that there is a custom deserializer interfering with the default one.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the default deserialization logic for various JDK types, including `StringBuilder`. The error message indicates a conflict in string creators, which suggests that the default deserializer for `StringBuilder` might be being overridden or incorrectly configured elsewhere in the system. By fixing the default deserialization logic in this method, we can ensure that the correct deserializer is used for `StringBuilder`, resolving the conflict and making the test pass.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCustomBeanDeserializer(JavaType,DeserializationConfig,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _findCustomBeanDeserializer(JavaType type,\n            DeserializationConfig config, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        for (Deserializers d  : _factoryConfig.deserializers()) {\n            JsonDeserializer<?> deser = d.findBeanDeserializer(type, config, beanDesc);\n            if (deser != null) {\n                return (JsonDeserializer<Object>) deser;\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "This method iterates over configured deserializers to find a custom bean deserializer for a given type.",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Custom Deserializer Conflict\n\n**Description:** A custom deserializer for `StringBuilder` might have been registered, but it conflicts with the default deserializer provided by Jackson.\n\n**Location:** In any custom deserializers registered with the `ObjectMapper`.\n\n**Observation Support:** The error message mentions conflicting string creators, implying that there is a custom deserializer interfering with the default one.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding custom bean deserializers. If a conflict arises between a custom deserializer and the default one, it would be handled here. The error message indicates a conflict involving `StringBuilder`, suggesting that a custom deserializer for `StringBuilder` might be causing the issue.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_handleSingleArgumentConstructor(DeserializationContext,BeanDescription,VisibilityChecker,AnnotationIntrospector,CreatorCollector,AnnotatedConstructor,boolean,boolean)",
+            "method_code": "```java\n    protected boolean _handleSingleArgumentConstructor(DeserializationContext ctxt,\n            BeanDescription beanDesc, VisibilityChecker<?> vchecker,\n            AnnotationIntrospector intr, CreatorCollector creators,\n            AnnotatedConstructor ctor, boolean isCreator, boolean isVisible)\n        throws JsonMappingException\n    {\n        // otherwise either 'simple' number, String, or general delegate:\n        Class<?> type = ctor.getRawParameterType(0);\n        if (type == String.class || type == CharSequence.class) {\n            if (isCreator || isVisible) {\n                creators.addStringCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == int.class || type == Integer.class) {\n            if (isCreator || isVisible) {\n                creators.addIntCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == long.class || type == Long.class) {\n            if (isCreator || isVisible) {\n                creators.addLongCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == double.class || type == Double.class) {\n            if (isCreator || isVisible) {\n                creators.addDoubleCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == boolean.class || type == Boolean.class) {\n            if (isCreator || isVisible) {\n                creators.addBooleanCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        // Delegating Creator ok iff it has @JsonCreator (etc)\n        if (isCreator) {\n            creators.addDelegatingCreator(ctor, isCreator, null);\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": "This method handles single-argument constructors, determining if they are string, numeric, or delegating creators.",
+            "class_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+            "class_doc": " Abstract factory base class that can provide deserializers for standard JDK classes, including collection classes and simple heuristics for \"upcasting\" common collection interface types (such as {@link java.util.Collection}). <p> Since all simple deserializers are eagerly instantiated, and there is no additional introspection or customizability of these types, this factory is stateless. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Classpath Issue\n\n**Description:** There might be multiple versions of the `StringBuilder` class on the classpath, causing conflicts.\n\n**Location:** On the classpath, specifically in libraries or modules that depend on different versions of the `StringBuilder` class.\n\n**Observation Support:** The error message about conflicting string creators suggests that there are multiple definitions of `StringBuilder` being loaded, which could happen if there are conflicting versions on the classpath.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly deals with handling constructors for various types, including `StringBuilder`. The error indicates a conflict in string creator handling, suggesting that the method's logic for identifying and managing string constructors might be flawed. By fixing this method, we can address the root cause of the issue.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw new JsonMappingException(iae.getMessage(), null, iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        boolean addToCache = deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Classpath Issue\n\n**Description:** There might be multiple versions of the `StringBuilder` class on the classpath, causing conflicts.\n\n**Location:** On the classpath, specifically in libraries or modules that depend on different versions of the `StringBuilder` class.\n\n**Observation Support:** The error message about conflicting string creators suggests that there are multiple definitions of `StringBuilder` being loaded, which could happen if there are conflicting versions on the classpath.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the creation and caching of deserializers, which is where the conflict arises. The error message indicates that there are conflicting string creators, suggesting that the issue lies in how deserializers are being handled or cached.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Classpath Issue\n\n**Description:** There might be multiple versions of the `StringBuilder` class on the classpath, causing conflicts.\n\n**Location:** On the classpath, specifically in libraries or modules that depend on different versions of the `StringBuilder` class.\n\n**Observation Support:** The error message about conflicting string creators suggests that there are multiple definitions of `StringBuilder` being loaded, which could happen if there are conflicting versions on the classpath.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for managing and caching deserializers, which could lead to conflicts if multiple versions of the same class are present on the classpath.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::_buildMessage()",
+            "method_code": "```java\n    protected String _buildMessage()\n    {\n        /* First: if we have no path info, let's just use parent's\n         * definition as is\n         */\n        String msg = super.getMessage();\n        if (_path == null) {\n            return msg;\n        }\n        StringBuilder sb = (msg == null) ? new StringBuilder() : new StringBuilder(msg);\n        /* 18-Feb-2009, tatu: initially there was a linefeed between\n         *    message and path reference; but unfortunately many systems\n         *   (loggers, junit) seem to assume linefeeds are only added to\n         *   separate stack trace.\n         */\n        sb.append(\" (through reference chain: \");\n        sb = getPathReference(sb);\n        sb.append(')');\n        return sb.toString();\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.JsonMappingException",
+            "class_doc": " Checked exception used to signal fatal problems with mapping of content. <p> One additional feature is the ability to denote relevant path of references (during serialization/deserialization) to help in troubleshooting. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Bug in Jackson Library\n\n**Description:** There might be a bug in the Jackson library itself, specifically related to handling `StringBuilder` deserialization.\n\n**Location:** Within the Jackson library, particularly in the deserialization logic for `StringBuilder`.\n\n**Observation Support:** The error message about conflicting string creators suggests that there is an internal inconsistency within the Jackson library, possibly due to a bug in the deserialization logic for `StringBuilder`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly constructs a `StringBuilder` object which could potentially conflict with the one being deserialized. The error message indicates a conflict in string creator handling, suggesting that modifying the way `StringBuilder` objects are constructed or referenced within this method could resolve the issue.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::getMessage()",
+            "method_code": "```java\n    @Override\n    public String getMessage() {\n        return _buildMessage();\n    }\n\n```",
+            "method_doc": " Method is overridden so that we can properly inject description of problem path, if such is defined. ",
+            "class_name": "com.fasterxml.jackson.databind.JsonMappingException",
+            "class_doc": " Checked exception used to signal fatal problems with mapping of content. <p> One additional feature is the ability to denote relevant path of references (during serialization/deserialization) to help in troubleshooting. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Bug in Jackson Library\n\n**Description:** There might be a bug in the Jackson library itself, specifically related to handling `StringBuilder` deserialization.\n\n**Location:** Within the Jackson library, particularly in the deserialization logic for `StringBuilder`.\n\n**Observation Support:** The error message about conflicting string creators suggests that there is an internal inconsistency within the Jackson library, possibly due to a bug in the deserialization logic for `StringBuilder`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message indicates a conflict in the deserialization logic for `StringBuilder`, which is likely within the Jackson library's deserialization framework rather than in the `JsonMappingException` class. The `getMessage()` method simply calls `_buildMessage()`, so fixing it would not address the root cause of the issue.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::toString()",
+            "method_code": "```java\n    @Override\n    public String toString()\n    {\n        return getClass().getName()+\": \"+getMessage();\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.JsonMappingException",
+            "class_doc": " Checked exception used to signal fatal problems with mapping of content. <p> One additional feature is the ability to denote relevant path of references (during serialization/deserialization) to help in troubleshooting. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "test_failure_causes": "Bug in Jackson Library\n\n**Description:** There might be a bug in the Jackson library itself, specifically related to handling `StringBuilder` deserialization.\n\n**Location:** Within the Jackson library, particularly in the deserialization logic for `StringBuilder`.\n\n**Observation Support:** The error message about conflicting string creators suggests that there is an internal inconsistency within the Jackson library, possibly due to a bug in the deserialization logic for `StringBuilder`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message indicates a problem with the deserialization logic for `StringBuilder`, which is likely within the Jackson library's implementation rather than in the `JsonMappingException` class. Fixing the `toString()` method would not address the root cause of the issue.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public ValueInstantiator findValueInstantiator(DeserializationContext ctxt,\n            BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        ValueInstantiator instantiator = null;\n        // [JACKSON-633] Check @JsonValueInstantiator before anything else\n        AnnotatedClass ac = beanDesc.getClassInfo();\n        Object instDef = ctxt.getAnnotationIntrospector().findValueInstantiator(ac);\n        if (instDef != null) {\n            instantiator = _valueInstantiatorInstance(config, ac, instDef);\n        }\n        if (instantiator == null) {\n            /* Second: see if some of standard Jackson/JDK types might provide value\n             * instantiators.\n             */\n            instantiator = _findStdValueInstantiator(config, beanDesc);\n            if (instantiator == null) {\n                instantiator = _constructDefaultValueInstantiator(ctxt, beanDesc);\n            }\n        }\n        \n        // finally: anyone want to modify ValueInstantiator?\n        if (_factoryConfig.hasValueInstantiators()) {\n            for (ValueInstantiators insts : _factoryConfig.valueInstantiators()) {\n                instantiator = insts.findValueInstantiator(config, beanDesc, instantiator);\n                // let's do sanity check; easier to spot buggy handlers\n                if (instantiator == null) {\n                    throw new JsonMappingException(\"Broken registered ValueInstantiators (of type \"\n                            +insts.getClass().getName()+\"): returned null ValueInstantiator\");\n                }\n            }\n        }\n\n        // Sanity check: does the chosen instantatior have incomplete creators?\n        if (instantiator.getIncompleteParameter() != null) {\n            final AnnotatedParameter nonAnnotatedParam = instantiator.getIncompleteParameter();\n            final AnnotatedWithParams ctor = nonAnnotatedParam.getOwner();\n            throw new IllegalArgumentException(\"Argument #\"+nonAnnotatedParam.getIndex()+\" of constructor \"+ctor+\" has no property name annotation; must have name when multiple-parameter constructor annotated as Creator\");\n        }\n\n        return instantiator;\n    }\n\n```",
+            "method_doc": " Value instantiator is created both based on creator annotations, and on optional externally provided instantiators (registered through module interface). "
+        },
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    protected ValueInstantiator _constructDefaultValueInstantiator(DeserializationContext ctxt,\n            BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        boolean fixAccess = ctxt.canOverrideAccessModifiers();\n        CreatorCollector creators =  new CreatorCollector(beanDesc, fixAccess);\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        \n        // need to construct suitable visibility checker:\n        final DeserializationConfig config = ctxt.getConfig();\n        VisibilityChecker<?> vchecker = config.getDefaultVisibilityChecker();\n        vchecker = intr.findAutoDetectVisibility(beanDesc.getClassInfo(), vchecker);\n\n        /* 24-Sep-2014, tatu: Tricky part first; need to merge resolved property information\n         *  (which has creator parameters sprinkled around) with actual creator\n         *  declarations (which are needed to access creator annotation, amongst other things).\n         *  Easiest to combine that info first, then pass it to remaining processing.\n         */\n        Map<AnnotatedWithParams,BeanPropertyDefinition[]> creatorDefs = _findCreatorsFromProperties(ctxt,\n                beanDesc);\n        \n        /* Important: first add factory methods; then constructors, so\n         * latter can override former!\n         */\n        _addDeserializerFactoryMethods(ctxt, beanDesc, vchecker, intr, creators, creatorDefs);\n        // constructors only usable on concrete types:\n        if (beanDesc.getType().isConcrete()) {\n            _addDeserializerConstructors(ctxt, beanDesc, vchecker, intr, creators, creatorDefs);\n        }\n        return creators.constructValueInstantiator(config);\n    }\n\n```",
+            "method_doc": " Method that will construct standard default {@link ValueInstantiator} using annotations (like @JsonCreator) and visibility rules "
+        },
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCreatorsFromProperties(DeserializationContext,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCreatorsFromProperties(DeserializationContext,BeanDescription)",
+            "method_code": "```java\n    protected Map<AnnotatedWithParams,BeanPropertyDefinition[]> _findCreatorsFromProperties(DeserializationContext ctxt,\n            BeanDescription beanDesc) throws JsonMappingException\n    {\n        Map<AnnotatedWithParams,BeanPropertyDefinition[]> result = Collections.emptyMap();\n        for (BeanPropertyDefinition propDef : beanDesc.findProperties()) {\n            Iterator<AnnotatedParameter> it = propDef.getConstructorParameters();\n            while (it.hasNext()) {\n                AnnotatedParameter param = it.next();\n                AnnotatedWithParams owner = param.getOwner();\n                BeanPropertyDefinition[] defs = result.get(owner);\n                final int index = param.getIndex();\n                \n                if (defs == null) {\n                    if (result.isEmpty()) {\n                        result = new LinkedHashMap<AnnotatedWithParams,BeanPropertyDefinition[]>();\n                    }\n                    defs = new BeanPropertyDefinition[owner.getParameterCount()];\n                    result.put(owner, defs);\n                } else {\n                    if (defs[index] != null) {\n                        throw new IllegalStateException(\"Conflict: parameter #\"+index+\" of \"+owner\n                                +\" bound to more than one property; \"+defs[index]+\" vs \"+propDef);\n                    }\n                }\n                defs[index] = propDef;\n            }\n        }\n        return result;\n    }\n\n```",
+            "method_doc": "This method maps annotated parameters to bean property definitions, ensuring each parameter is associated with exactly one property definition."
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object>_createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc;\n        try {\n            beanDesc = config.introspect(type);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [Issue#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> findDeserializerFromAnnotation(DeserializationContext ctxt,\n            Annotated ann)\n        throws JsonMappingException\n    {\n        Object deserDef = ctxt.getAnnotationIntrospector().findDeserializer(ann);\n        if (deserDef == null) {\n            return null;\n        }\n        JsonDeserializer<Object> deser = ctxt.deserializerInstance(ann, deserDef);\n        // One more thing however: may need to also apply a converter:\n        return findConvertingDeserializer(ctxt, ann, deser);\n    }\n\n```",
+            "method_doc": " Helper method called to check if a class or method has annotation that tells which class to use for deserialization. Returns null if no such annotation found. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw new JsonMappingException(\"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. "
+        },
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findDefaultDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findDefaultDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    public JsonDeserializer<?> findDefaultDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        Class<?> rawType = type.getRawClass();\n        // Object (\"untyped\"), String equivalents:\n        if (rawType == CLASS_OBJECT) {\n            return new UntypedObjectDeserializer();\n        }\n        if (rawType == CLASS_STRING || rawType == CLASS_CHAR_BUFFER) {\n            return StringDeserializer.instance;\n        }\n        if (rawType == CLASS_ITERABLE) {\n            // [Issue#199]: Can and should 'upgrade' to a Collection type:\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] tps = tf.findTypeParameters(type, CLASS_ITERABLE);\n            JavaType elemType = (tps == null || tps.length != 1) ? TypeFactory.unknownType() : tps[0];\n            CollectionType ct = tf.constructCollectionType(Collection.class, elemType);\n            // Should we re-introspect beanDesc? For now let's not...\n            return createCollectionDeserializer(ctxt, ct, beanDesc);\n        }\n        if (rawType == CLASS_MAP_ENTRY) {\n            final DeserializationConfig config = ctxt.getConfig();\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] tps = tf.findTypeParameters(type, CLASS_MAP_ENTRY);\n            JavaType kt, vt;\n            if (tps == null || tps.length != 2) {\n                kt = vt = TypeFactory.unknownType();\n            } else {\n                kt = tps[0];\n                vt = tps[1];\n            }\n            TypeDeserializer vts = (TypeDeserializer) vt.getTypeHandler();\n            if (vts == null) {\n                vts = findTypeDeserializer(config, vt);\n            }\n            JsonDeserializer<Object> valueDeser = vt.getValueHandler();\n            KeyDeserializer keyDes = (KeyDeserializer) kt.getValueHandler();\n            return new MapEntryDeserializer(type, keyDes, valueDeser, vts);\n        }\n        String clsName = rawType.getName();\n        if (rawType.isPrimitive() || clsName.startsWith(\"java.\")) {\n            // Primitives/wrappers, other Numbers:\n            JsonDeserializer<?> deser = NumberDeserializers.find(rawType, clsName);\n            if (deser == null) {\n                deser = DateDeserializers.find(rawType, clsName);\n            }\n            if (deser != null) {\n                return deser;\n            }\n        }\n        // and a few Jackson types as well:\n        if (rawType == TokenBuffer.class) {\n            return new TokenBufferDeserializer();\n        }\n        if (AtomicReference.class.isAssignableFrom(rawType)) {\n            // Must find parameterization\n            TypeFactory tf = ctxt.getTypeFactory();\n            JavaType[] params = tf.findTypeParameters(type, AtomicReference.class);\n            JavaType referencedType;\n            if (params == null || params.length < 1) { // untyped (raw)\n                referencedType = TypeFactory.unknownType();\n            } else {\n                referencedType = params[0];\n            }\n            TypeDeserializer vts = findTypeDeserializer(ctxt.getConfig(), referencedType);\n            BeanDescription refdDesc = ctxt.getConfig().introspectClassAnnotations(referencedType);\n            JsonDeserializer<?> deser = findDeserializerFromAnnotation(ctxt, refdDesc.getClassInfo());\n            return new AtomicReferenceDeserializer(referencedType, vts, deser);\n        }\n        JsonDeserializer<?> deser = findOptionalStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n        return JdkDeserializers.find(rawType, clsName);\n    }\n\n```",
+            "method_doc": " Helper method called to find one of default serializers for \"well-known\" platform types: JDK-provided types, and small number of public Jackson API types.  @since 2.2 "
+        },
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCustomBeanDeserializer(JavaType,DeserializationConfig,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCustomBeanDeserializer(JavaType,DeserializationConfig,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _findCustomBeanDeserializer(JavaType type,\n            DeserializationConfig config, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        for (Deserializers d  : _factoryConfig.deserializers()) {\n            JsonDeserializer<?> deser = d.findBeanDeserializer(type, config, beanDesc);\n            if (deser != null) {\n                return (JsonDeserializer<Object>) deser;\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "This method iterates over configured deserializers to find a custom bean deserializer for a given type."
+        },
+        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_handleSingleArgumentConstructor(DeserializationContext,BeanDescription,VisibilityChecker,AnnotationIntrospector,CreatorCollector,AnnotatedConstructor,boolean,boolean)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_handleSingleArgumentConstructor(DeserializationContext,BeanDescription,VisibilityChecker,AnnotationIntrospector,CreatorCollector,AnnotatedConstructor,boolean,boolean)",
+            "method_code": "```java\n    protected boolean _handleSingleArgumentConstructor(DeserializationContext ctxt,\n            BeanDescription beanDesc, VisibilityChecker<?> vchecker,\n            AnnotationIntrospector intr, CreatorCollector creators,\n            AnnotatedConstructor ctor, boolean isCreator, boolean isVisible)\n        throws JsonMappingException\n    {\n        // otherwise either 'simple' number, String, or general delegate:\n        Class<?> type = ctor.getRawParameterType(0);\n        if (type == String.class || type == CharSequence.class) {\n            if (isCreator || isVisible) {\n                creators.addStringCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == int.class || type == Integer.class) {\n            if (isCreator || isVisible) {\n                creators.addIntCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == long.class || type == Long.class) {\n            if (isCreator || isVisible) {\n                creators.addLongCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == double.class || type == Double.class) {\n            if (isCreator || isVisible) {\n                creators.addDoubleCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        if (type == boolean.class || type == Boolean.class) {\n            if (isCreator || isVisible) {\n                creators.addBooleanCreator(ctor, isCreator);\n            }\n            return true;\n        }\n        // Delegating Creator ok iff it has @JsonCreator (etc)\n        if (isCreator) {\n            creators.addDelegatingCreator(ctor, isCreator, null);\n            return true;\n        }\n        return false;\n    }\n\n```",
+            "method_doc": "This method handles single-argument constructors, determining if they are string, numeric, or delegating creators."
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw new JsonMappingException(iae.getMessage(), null, iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        boolean addToCache = deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer "
+        },
+        "com.fasterxml.jackson.databind.JsonMappingException::_buildMessage()": {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::_buildMessage()",
+            "method_code": "```java\n    protected String _buildMessage()\n    {\n        /* First: if we have no path info, let's just use parent's\n         * definition as is\n         */\n        String msg = super.getMessage();\n        if (_path == null) {\n            return msg;\n        }\n        StringBuilder sb = (msg == null) ? new StringBuilder() : new StringBuilder(msg);\n        /* 18-Feb-2009, tatu: initially there was a linefeed between\n         *    message and path reference; but unfortunately many systems\n         *   (loggers, junit) seem to assume linefeeds are only added to\n         *   separate stack trace.\n         */\n        sb.append(\" (through reference chain: \");\n        sb = getPathReference(sb);\n        sb.append(')');\n        return sb.toString();\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.JsonMappingException::getMessage()": {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::getMessage()",
+            "method_code": "```java\n    @Override\n    public String getMessage() {\n        return _buildMessage();\n    }\n\n```",
+            "method_doc": " Method is overridden so that we can properly inject description of problem path, if such is defined. "
+        },
+        "com.fasterxml.jackson.databind.JsonMappingException::toString()": {
+            "method_name": "com.fasterxml.jackson.databind.JsonMappingException::toString()",
+            "method_code": "```java\n    @Override\n    public String toString()\n    {\n        return getClass().getName()+\": \"+getMessage();\n    }\n\n```",
+            "method_doc": ""
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestJdkTypes",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Multiple Deserializers Registered for `StringBuilder`\n\n**Description:** There might be multiple deserializers registered for `StringBuilder` in the `ObjectMapper`. This conflict arises because Jackson cannot determine which deserializer to use when encountering a `StringBuilder` type.\n\n**Location:** Likely in the configuration or setup of the `ObjectMapper` instance being used in the test.\n\n**Observation Support:** The stack trace indicates a conflict between two constructors for `StringBuilder`, suggesting that there are multiple ways to create a `StringBuilder` object, leading to ambiguity.",
+                "Custom Deserializer Conflict\n\n**Description:** A custom deserializer for `StringBuilder` might have been registered, but it conflicts with the default deserializer provided by Jackson.\n\n**Location:** In any custom deserializers registered with the `ObjectMapper`.\n\n**Observation Support:** The error message mentions conflicting string creators, implying that there is a custom deserializer interfering with the default one.",
+                "Classpath Issue\n\n**Description:** There might be multiple versions of the `StringBuilder` class on the classpath, causing conflicts.\n\n**Location:** On the classpath, specifically in libraries or modules that depend on different versions of the `StringBuilder` class.\n\n**Observation Support:** The error message about conflicting string creators suggests that there are multiple definitions of `StringBuilder` being loaded, which could happen if there are conflicting versions on the classpath.",
+                "Configuration Error in ObjectMapper\n\n**Description:** There might be a misconfiguration in the `ObjectMapper` settings that leads to the registration of multiple deserializers for `StringBuilder`.\n\n**Location:** In the configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message about conflicting string creators points to a misconfiguration in the `ObjectMapper` that results in multiple deserializers being registered for `StringBuilder`.",
+                "Bug in Jackson Library\n\n**Description:** There might be a bug in the Jackson library itself, specifically related to handling `StringBuilder` deserialization.\n\n**Location:** Within the Jackson library, particularly in the deserialization logic for `StringBuilder`.\n\n**Observation Support:** The error message about conflicting string creators suggests that there is an internal inconsistency within the Jackson library, possibly due to a bug in the deserialization logic for `StringBuilder`."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers",
+                    "com.fasterxml.jackson.databind.deser.std.StdKeyDeserializers"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers",
+                    "com.fasterxml.jackson.databind.deser.std.StdKeyDeserializers"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.JsonMappingException"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCreatorsFromProperties(DeserializationContext,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers": []
+                },
+                "2": {
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findDefaultDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCustomBeanDeserializer(JavaType,DeserializationConfig,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers": []
+                },
+                "3": {
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_handleSingleArgumentConstructor(DeserializationContext,BeanDescription,VisibilityChecker,AnnotationIntrospector,CreatorCollector,AnnotatedConstructor,boolean,boolean)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers": []
+                },
+                "4": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findDefaultDeserializer(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findDeserializerFromAnnotation(DeserializationContext,Annotated)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.JdkDeserializers": []
+                },
+                "5": {
+                    "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::findValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_constructDefaultValueInstantiator(DeserializationContext,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BasicDeserializerFactory::_findCreatorsFromProperties(DeserializationContext,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.JsonMappingException": [
+                        "com.fasterxml.jackson.databind.JsonMappingException::getMessage()",
+                        "com.fasterxml.jackson.databind.JsonMappingException::_buildMessage()",
+                        "com.fasterxml.jackson.databind.JsonMappingException::toString()"
+                    ]
+                }
+            }
+        }
+    ]
+}

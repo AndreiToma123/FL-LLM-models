@@ -1,0 +1,831 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+        "org.apache.commons.compress.archivers.tar.TarBuffer",
+        "org.apache.commons.compress.archivers.tar.TarUtils",
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+            "method_code": "```java\n    public TarArchiveEntry getNextTarEntry() throws IOException {\n        if (hasHitEOF) {\n            return null;\n        }\n\n        if (currEntry != null) {\n            long numToSkip = entrySize - entryOffset;\n\n            while (numToSkip > 0) {\n                long skipped = skip(numToSkip);\n                if (skipped <= 0) {\n                    throw new RuntimeException(\"failed to skip current tar\"\n                                               + \" entry\");\n                }\n                numToSkip -= skipped;\n            }\n\n            readBuf = null;\n        }\n\n        byte[] headerBuf = getRecord();\n\n        if (hasHitEOF) {\n            currEntry = null;\n            return null;\n        }\n\n        try {\n            currEntry = new TarArchiveEntry(headerBuf, encoding);\n        } catch (IllegalArgumentException e) {\n            IOException ioe = new IOException(\"Error detected parsing the header\");\n            ioe.initCause(e);\n            throw ioe;\n        }\n        entryOffset = 0;\n        entrySize = currEntry.getSize();\n\n        if (currEntry.isGNULongNameEntry()) {\n            // read in the name\n            StringBuffer longName = new StringBuffer();\n            byte[] buf = new byte[SMALL_BUFFER_SIZE];\n            int length = 0;\n            while ((length = read(buf)) >= 0) {\n                longName.append(new String(buf, 0, length)); // TODO default charset?\n            }\n            getNextEntry();\n            if (currEntry == null) {\n                // Bugzilla: 40334\n                // Malformed tar file - long entry name not followed by entry\n                return null;\n            }\n            // remove trailing null terminator\n            if (longName.length() > 0\n                && longName.charAt(longName.length() - 1) == 0) {\n                longName.deleteCharAt(longName.length() - 1);\n            }\n            currEntry.setName(longName.toString());\n        }\n\n        if (currEntry.isPaxHeader()){ // Process Pax headers\n            paxHeaders();\n        }\n\n        if (currEntry.isGNUSparse()){ // Process sparse files\n            readGNUSparse();\n        }\n\n        // If the size of the next element in the archive has changed\n        // due to a new size being reported in the posix header\n        // information, we update entrySize here so that it contains\n        // the correct value.\n        entrySize = currEntry.getSize();\n        return currEntry;\n    }\n\n```",
+            "method_doc": " Get the next entry in this tar archive. This will skip over any remaining data in the current entry, if there is one, and place the input stream at the header of the next entry, and read the header and instantiate a new TarEntry from the header bytes and return that entry. If there are no more entries in the archive, null will be returned to indicate that the end of the archive has been reached.  @return The next TarEntry in the archive, or null. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the reading and parsing of tar archive headers, which is where the error occurs according to the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctal(final byte[] buffer, final int offset, final int length) {\n        long    result = 0;\n        int     end = offset + length;\n        int     start = offset;\n\n        if (length < 2){\n            throw new IllegalArgumentException(\"Length \"+length+\" must be at least 2\");\n        }\n\n        if (buffer[start] == 0) {\n            return 0L;\n        }\n\n        // Skip leading spaces\n        while (start < end){\n            if (buffer[start] == ' '){\n                start++;\n            } else {\n                break;\n            }\n        }\n\n        // Must have trailing NUL or space\n        byte trailer;\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        } else {\n            throw new IllegalArgumentException(\n                    exceptionMessage(buffer, offset, length, end-1, trailer));\n        }\n        // May have additional NULs or spaces\n        trailer = buffer[end - 1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        }\n\n        for ( ;start < end; start++) {\n            final byte currentByte = buffer[start];\n            // CheckStyle:MagicNumber OFF\n            if (currentByte < '0' || currentByte > '7'){\n                throw new IllegalArgumentException(\n                        exceptionMessage(buffer, offset, length, start, currentByte));\n            }\n            result = (result << 3) + (currentByte - '0'); // convert from ASCII\n            // CheckStyle:MagicNumber ON\n        }\n\n        return result;\n    }\n\n```",
+            "method_doc": " Parse an octal string from a buffer.  <p>Leading spaces are ignored. The buffer must contain a trailing space or NUL, and may contain an additional trailing space or NUL.</p>  <p>The input buffer is allowed to contain all NULs, in which case the method returns 0L (this allows for missing fields).</p>  <p>To work-around some tar implementations that insert a leading NUL this method returns 0 if it detects a leading NUL since Commons Compress 1.4.</p>  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse - must be at least 2 bytes. @return The long value of the octal string. @throws IllegalArgumentException if the trailing space/NUL is missing or if a invalid byte is detected. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of octal strings, which is a critical part of reading TAR archive headers. The failure in the test suggests that there might be an issue with how this method interprets or validates the octal values, leading to an `IOException`. Fixing this method could resolve the root cause of the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::parseTarHeader(byte[],ZipEncoding)",
+            "method_code": "```java\n    public void parseTarHeader(byte[] header, ZipEncoding encoding)\n        throws IOException {\n        parseTarHeader(header, encoding, false);\n    }\n\n```",
+            "method_doc": " Parse an entry's header information from a header buffer.  @param header The tar entry header buffer to get information from. @param encoding encoding to use for file names @since Commons Compress 1.4 @throws IllegalArgumentException if any of the numeric fields have an invalid format ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of the TAR header, which is where the error occurred according to the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(byte[],ZipEncoding)",
+            "method_code": "```java\n    public TarArchiveEntry(byte[] headerBuf, ZipEncoding encoding)\n        throws IOException {\n        this();\n        parseTarHeader(headerBuf, encoding);\n    }\n\n```",
+            "method_doc": " Construct an entry from an archive's header bytes. File is set to null.  @param headerBuf The header bytes from a tar archive entry. @param encoding encoding to use for file names @since Commons Compress 1.4 @throws IllegalArgumentException if any of the numeric fields have an invalid format ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly constructs a TarArchiveEntry from the header bytes of a tar archive. Any issues with the header parsing would manifest here, leading to the observed IOException during the test execution.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+            "method_code": "```java\n    private byte[] getRecord() throws IOException {\n        if (hasHitEOF) {\n            return null;\n        }\n\n        byte[] headerBuf = buffer.readRecord();\n\n        if (headerBuf == null) {\n            hasHitEOF = true;\n        } else if (buffer.isEOFRecord(headerBuf)) {\n            hasHitEOF = true;\n        }\n\n        return hasHitEOF ? null : headerBuf;\n    }\n\n```",
+            "method_doc": " Get the next record in this tar archive. This will skip over any remaining data in the current entry, if there is one, and place the input stream at the header of the next entry. If there are no more entries in the archive, null will be returned to indicate that the end of the archive has been reached.  @return The next header in the archive, or null. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly interacts with the reading of records from the archive, which could potentially lead to issues if the archive is corrupted or improperly formatted. However, without further context about the specific nature of the corruption or formatting issue, it's difficult to pinpoint exactly why this method is failing.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 8,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+            "method_code": "```java\n    public byte[] readRecord() throws IOException {\n        if (inStream == null) {\n            if (outStream == null) {\n                throw new IOException(\"input buffer is closed\");\n            }\n            throw new IOException(\"reading from an output buffer\");\n        }\n\n        if (currRecIdx >= recsPerBlock && !readBlock()) {\n            return null;\n        }\n\n        byte[] result = new byte[recordSize];\n\n        System.arraycopy(blockBuffer,\n                         (currRecIdx * recordSize), result, 0,\n                         recordSize);\n\n        currRecIdx++;\n\n        return result;\n    }\n\n```",
+            "method_doc": " Read a record from the input stream and return the data.  @return The record data. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles reading records from the input stream, which could potentially be related to the issue of parsing the header incorrectly. However, without further context about the specific nature of the corruption or improper formatting, it's difficult to pinpoint exactly where the problem lies within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+            "method_code": "```java\n    private boolean readBlock() throws IOException {\n        if (inStream == null) {\n            throw new IOException(\"reading from an output buffer\");\n        }\n\n        currRecIdx = 0;\n\n        int offset = 0;\n        int bytesNeeded = blockSize;\n\n        while (bytesNeeded > 0) {\n            long numBytes = inStream.read(blockBuffer, offset,\n                                               bytesNeeded);\n\n            //\n            // NOTE\n            // We have fit EOF, and the block is not full!\n            //\n            // This is a broken archive. It does not follow the standard\n            // blocking algorithm. However, because we are generous, and\n            // it requires little effort, we will simply ignore the error\n            // and continue as if the entire block were read. This does\n            // not appear to break anything upstream. We used to return\n            // false in this case.\n            //\n            // Thanks to 'Yohann.Roussel@alcatel.fr' for this fix.\n            //\n            if (numBytes == -1) {\n                if (offset == 0) {\n                    // Ensure that we do not read gigabytes of zeros\n                    // for a corrupt tar file.\n                    // See http://issues.apache.org/bugzilla/show_bug.cgi?id=39924\n                    return false;\n                }\n                // However, just leaving the unread portion of the buffer dirty does\n                // cause problems in some cases.  This problem is described in\n                // http://issues.apache.org/bugzilla/show_bug.cgi?id=29877\n                //\n                // The solution is to fill the unused portion of the buffer with zeros.\n\n                Arrays.fill(blockBuffer, offset, offset + bytesNeeded, (byte) 0);\n\n                break;\n            }\n\n            offset += numBytes;\n            bytesNeeded -= numBytes;\n\n            if (numBytes != blockSize) {\n                // TODO: Incomplete Read occured - throw exception?\n            }\n        }\n\n        currBlkIdx++;\n\n        return true;\n    }\n\n```",
+            "method_doc": " @return false if End-Of-File, else true ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the end-of-file condition by filling the remaining buffer with zeros, which could potentially mask underlying issues in the archive format. Additionally, the TODO comment suggests there might be room for improvement regarding incomplete reads.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::isEOFRecord(byte[])",
+            "method_code": "```java\n    public boolean isEOFRecord(byte[] record) {\n        for (int i = 0, sz = getRecordSize(); i < sz; ++i) {\n            if (record[i] != 0) {\n                return false;\n            }\n        }\n\n        return true;\n    }\n\n```",
+            "method_doc": " Determine if an archive record indicate End of Archive. End of archive is indicated by a record that consists entirely of null bytes.  @param record The record data to check. @return true if the record data is an End of Archive ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it checks if a record is an EOF record by comparing each byte to zero. If the archive is corrupted or improperly formatted, this method might incorrectly identify a valid record as an EOF record, leading to test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctalOrBinary(final byte[] buffer, final int offset,\n                                          final int length) {\n\n        if ((buffer[offset] & 0x80) == 0) {\n            return parseOctal(buffer, offset, length);\n        }\n        final boolean negative = buffer[offset] == (byte) 0xff;\n        if (length < 9) {\n            return parseBinaryLong(buffer, offset, length, negative);\n        }\n        return parseBinaryBigInteger(buffer, offset, length, negative);\n    }\n\n```",
+            "method_doc": " Compute the value contained in a byte buffer.  If the most significant bit of the first byte in the buffer is set, this bit is ignored and the rest of the buffer is interpreted as a binary number.  Otherwise, the buffer is interpreted as an octal number as per the parseOctal function above.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The long value of the octal or binary string. @throws IllegalArgumentException if the trailing space/NUL is missing or an invalid byte is detected in an octal number, or if a binary number would exceed the size of a signed long 64-bit integer. @since 1.4 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly involves parsing data from the TAR archive header, which could be the source of the formatting issue. However, without further context about the specific content of `/COMPRESS-197.tar`, it's challenging to pinpoint exactly what part of the method is problematic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)",
+            "method_code": "```java\n    private static String exceptionMessage(byte[] buffer, final int offset,\n            final int length, int current, final byte currentByte) {\n        String string = new String(buffer, offset, length); // TODO default charset?\n        string=string.replaceAll(\"\\0\", \"{NUL}\"); // Replace NULs to allow string to be printed\n        final String s = \"Invalid byte \"+currentByte+\" at offset \"+(current-offset)+\" in '\"+string+\"' len=\"+length;\n        return s;\n    }\n\n```",
+            "method_doc": "Helper method to generate the exception message",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly constructs an error message from the input parameters, which could potentially lead to incorrect or misleading messages if the input data is malformed. However, without further context, it's difficult to pinpoint the exact issue causing the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(String name) {\n \n        // fallback encoding is good enough for utf-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the creation of zip encodings, which could potentially affect how filenames are parsed and processed within archives like TAR. However, the issue described seems more related to the specific implementation details of the TAR archive handling rather than the general encoding logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String encoding) {\n        if (encoding == null) {\n            // check platform's default encoding\n            encoding = System.getProperty(\"file.encoding\");\n        }\n        return UTF8.equalsIgnoreCase(encoding)\n            || UTF_DASH_8.equalsIgnoreCase(encoding);\n    }\n\n```",
+            "method_doc": " Whether a given encoding - or the platform's default encoding if the parameter is null - is UTF-8. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves checking the encoding of strings, which could potentially affect how data is parsed in archives. However, without further context about the specific issues encountered during testing, it's difficult to pinpoint whether this method is directly responsible for the failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is) {\n        this(is, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Incomplete or Missing Data\n**Description:** The TAR archive file may be incomplete or missing some data, leading to an `IOException` when the `TarArchiveInputStream` tries to read beyond the available data.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message suggests that an error occurred during parsing, which could be due to the archive being truncated or missing essential data.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the TarArchiveInputStream but does not handle potential errors related to the underlying InputStream. Since the failure occurs during the reading process, fixing the constructor might not directly resolve the issue if the problem lies elsewhere in the data handling.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::close()",
+            "method_code": "```java\n    @Override\n    public void close() throws IOException {\n        buffer.close();\n    }\n\n```",
+            "method_doc": " Closes this stream. Calls the TarBuffer's close() method. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+            "class_doc": " The TarInputStream reads a UNIX tar archive as an InputStream. methods are provided to position at each successive entry in the archive, and the read each entry as a normal input stream using read(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Resource Leak\n**Description:** Although unlikely given the presence of a `finally` block, there might be a subtle resource leak in the `TarArchiveInputStream` class that causes an `IOException` when the stream is closed.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** While less likely, the assertion message does indicate an `IOException`, which could potentially be related to a resource leak.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply calls the `buffer.close()` method. However, the root cause of the issue seems to be related to the parsing of the tar archive header rather than the closing of the stream itself. It's possible that the problem lies elsewhere in the `TarArchiveInputStream` class or its interaction with the underlying data source.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::getRecordSize()",
+            "method_code": "```java\n    public int getRecordSize() {\n        return this.recordSize;\n    }\n\n```",
+            "method_doc": " Get the TAR Buffer's record size. @return the record size ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Incomplete or Missing Data\n**Description:** The TAR archive file may be incomplete or missing some data, leading to an `IOException` when the `TarArchiveInputStream` tries to read beyond the available data.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message suggests that an error occurred during parsing, which could be due to the archive being truncated or missing essential data.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns a value stored in the instance variable `recordSize`. However, since the error occurs during parsing, it indicates that there might be an issue with how the `recordSize` is being set or used elsewhere in the code. Further investigation into the logic that sets `recordSize` and its usage within the `TarBuffer` class would be necessary to pinpoint the exact cause of the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(InputStream,int,int)",
+            "method_code": "```java\n    public TarBuffer(InputStream inStream, int blockSize, int recordSize) {\n        this(inStream, null, blockSize, recordSize);\n    }\n\n```",
+            "method_doc": " Constructor for a TarBuffer on an input stream. @param inStream the input stream to use @param blockSize the block size to use @param recordSize the record size to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Incorrect Header Parsing Logic\n**Description:** There might be a bug in the `TarArchiveInputStream` class where the logic for parsing the TAR header is incorrect, resulting in an `IOException`.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** The assertion message points out an error detected parsing the header, indicating a problem with the header parsing logic.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the TarBuffer with an InputStream, but does not handle the actual reading or parsing of the TAR header. Given that the failure is related to header parsing, it's plausible that there could be an issue with how the InputStream is being used or how data is being read from it.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::close()",
+            "method_code": "```java\n    public void close() throws IOException {\n        if (outStream != null) {\n            flushBlock();\n\n            if (outStream != System.out\n                    && outStream != System.err) {\n                outStream.close();\n\n                outStream = null;\n            }\n        } else if (inStream != null) {\n            if (inStream != System.in) {\n                inStream.close();\n            }\n            inStream = null;\n        }\n    }\n\n```",
+            "method_doc": " Close the TarBuffer. If this is an output buffer, also flush the current block before closing. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Resource Leak\n**Description:** Although unlikely given the presence of a `finally` block, there might be a subtle resource leak in the `TarArchiveInputStream` class that causes an `IOException` when the stream is closed.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** While less likely, the assertion message does indicate an `IOException`, which could potentially be related to a resource leak.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the closing of streams, which can lead to resource leaks if not handled properly. However, the issue described seems more related to the `TarArchiveInputStream` class rather than the `TarBuffer` class itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])",
+            "method_code": "```java\n    public String decode(byte[] data) throws IOException {\n        if (this.charset == null) { // i.e. use default charset, see no-args constructor\n            return new String(data);\n        } else {\n            return new String(data,this.charset);\n        }\n    }\n\n```",
+            "method_doc": " @see org.apache.commons.compress.archivers.zip.ZipEncoding#decode(byte[]) ",
+            "class_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+            "class_doc": " A fallback ZipEncoding, which uses a java.io means to encode names.  <p>This implementation is not suitable for encodings other than utf-8, because java.io encodes unmappable character as question marks leading to unreadable ZIP entries on some operating systems.</p>  <p>Furthermore this implementation is unable to tell whether a given name can be safely encoded or not.</p>  <p>This implementation acts as a last resort implementation, when neither {@link Simple8BitZipEnoding} nor {@link NioZipEncoding} is available.</p>  <p>The methods of this class are reentrant.</p> @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Incomplete or Missing Data\n**Description:** The TAR archive file may be incomplete or missing some data, leading to an `IOException` when the `TarArchiveInputStream` tries to read beyond the available data.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message suggests that an error occurred during parsing, which could be due to the archive being truncated or missing essential data.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly converts byte arrays to strings using the system's default charset or a specified one. If the archive contains non-standard characters or encodings, this could lead to errors like 'Error detected parsing the header'. However, without further context about the specific issues in the archive, it's difficult to pinpoint exactly why this method is causing problems.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(String charset) {\n        this.charset = charset;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charset The name of the charset or {@code null} for the platform's default character set. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+            "class_doc": " A fallback ZipEncoding, which uses a java.io means to encode names.  <p>This implementation is not suitable for encodings other than utf-8, because java.io encodes unmappable character as question marks leading to unreadable ZIP entries on some operating systems.</p>  <p>Furthermore this implementation is unable to tell whether a given name can be safely encoded or not.</p>  <p>This implementation acts as a last resort implementation, when neither {@link Simple8BitZipEnoding} nor {@link NioZipEncoding} is available.</p>  <p>The methods of this class are reentrant.</p> @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "test_failure_causes": "Resource Leak\n**Description:** Although unlikely given the presence of a `finally` block, there might be a subtle resource leak in the `TarArchiveInputStream` class that causes an `IOException` when the stream is closed.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** While less likely, the assertion message does indicate an `IOException`, which could potentially be related to a resource leak.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes a member variable with the provided charset, but it does not directly interact with the TarArchiveInputStream or handle any I/O operations that could cause an IOException. However, since the error message indicates an issue with parsing the header, it's plausible that the charset handling in this method could indirectly affect the behavior of the TarArchiveInputStream.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+            "method_code": "```java\n    public TarArchiveEntry getNextTarEntry() throws IOException {\n        if (hasHitEOF) {\n            return null;\n        }\n\n        if (currEntry != null) {\n            long numToSkip = entrySize - entryOffset;\n\n            while (numToSkip > 0) {\n                long skipped = skip(numToSkip);\n                if (skipped <= 0) {\n                    throw new RuntimeException(\"failed to skip current tar\"\n                                               + \" entry\");\n                }\n                numToSkip -= skipped;\n            }\n\n            readBuf = null;\n        }\n\n        byte[] headerBuf = getRecord();\n\n        if (hasHitEOF) {\n            currEntry = null;\n            return null;\n        }\n\n        try {\n            currEntry = new TarArchiveEntry(headerBuf, encoding);\n        } catch (IllegalArgumentException e) {\n            IOException ioe = new IOException(\"Error detected parsing the header\");\n            ioe.initCause(e);\n            throw ioe;\n        }\n        entryOffset = 0;\n        entrySize = currEntry.getSize();\n\n        if (currEntry.isGNULongNameEntry()) {\n            // read in the name\n            StringBuffer longName = new StringBuffer();\n            byte[] buf = new byte[SMALL_BUFFER_SIZE];\n            int length = 0;\n            while ((length = read(buf)) >= 0) {\n                longName.append(new String(buf, 0, length)); // TODO default charset?\n            }\n            getNextEntry();\n            if (currEntry == null) {\n                // Bugzilla: 40334\n                // Malformed tar file - long entry name not followed by entry\n                return null;\n            }\n            // remove trailing null terminator\n            if (longName.length() > 0\n                && longName.charAt(longName.length() - 1) == 0) {\n                longName.deleteCharAt(longName.length() - 1);\n            }\n            currEntry.setName(longName.toString());\n        }\n\n        if (currEntry.isPaxHeader()){ // Process Pax headers\n            paxHeaders();\n        }\n\n        if (currEntry.isGNUSparse()){ // Process sparse files\n            readGNUSparse();\n        }\n\n        // If the size of the next element in the archive has changed\n        // due to a new size being reported in the posix header\n        // information, we update entrySize here so that it contains\n        // the correct value.\n        entrySize = currEntry.getSize();\n        return currEntry;\n    }\n\n```",
+            "method_doc": " Get the next entry in this tar archive. This will skip over any remaining data in the current entry, if there is one, and place the input stream at the header of the next entry, and read the header and instantiate a new TarEntry from the header bytes and return that entry. If there are no more entries in the archive, null will be returned to indicate that the end of the archive has been reached.  @return The next TarEntry in the archive, or null. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctal(final byte[] buffer, final int offset, final int length) {\n        long    result = 0;\n        int     end = offset + length;\n        int     start = offset;\n\n        if (length < 2){\n            throw new IllegalArgumentException(\"Length \"+length+\" must be at least 2\");\n        }\n\n        if (buffer[start] == 0) {\n            return 0L;\n        }\n\n        // Skip leading spaces\n        while (start < end){\n            if (buffer[start] == ' '){\n                start++;\n            } else {\n                break;\n            }\n        }\n\n        // Must have trailing NUL or space\n        byte trailer;\n        trailer = buffer[end-1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        } else {\n            throw new IllegalArgumentException(\n                    exceptionMessage(buffer, offset, length, end-1, trailer));\n        }\n        // May have additional NULs or spaces\n        trailer = buffer[end - 1];\n        if (trailer == 0 || trailer == ' '){\n            end--;\n        }\n\n        for ( ;start < end; start++) {\n            final byte currentByte = buffer[start];\n            // CheckStyle:MagicNumber OFF\n            if (currentByte < '0' || currentByte > '7'){\n                throw new IllegalArgumentException(\n                        exceptionMessage(buffer, offset, length, start, currentByte));\n            }\n            result = (result << 3) + (currentByte - '0'); // convert from ASCII\n            // CheckStyle:MagicNumber ON\n        }\n\n        return result;\n    }\n\n```",
+            "method_doc": " Parse an octal string from a buffer.  <p>Leading spaces are ignored. The buffer must contain a trailing space or NUL, and may contain an additional trailing space or NUL.</p>  <p>The input buffer is allowed to contain all NULs, in which case the method returns 0L (this allows for missing fields).</p>  <p>To work-around some tar implementations that insert a leading NUL this method returns 0 if it detects a leading NUL since Commons Compress 1.4.</p>  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse - must be at least 2 bytes. @return The long value of the octal string. @throws IllegalArgumentException if the trailing space/NUL is missing or if a invalid byte is detected. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::parseTarHeader(byte[],ZipEncoding)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::parseTarHeader(byte[],ZipEncoding)",
+            "method_code": "```java\n    public void parseTarHeader(byte[] header, ZipEncoding encoding)\n        throws IOException {\n        parseTarHeader(header, encoding, false);\n    }\n\n```",
+            "method_doc": " Parse an entry's header information from a header buffer.  @param header The tar entry header buffer to get information from. @param encoding encoding to use for file names @since Commons Compress 1.4 @throws IllegalArgumentException if any of the numeric fields have an invalid format "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(byte[],ZipEncoding)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(byte[],ZipEncoding)",
+            "method_code": "```java\n    public TarArchiveEntry(byte[] headerBuf, ZipEncoding encoding)\n        throws IOException {\n        this();\n        parseTarHeader(headerBuf, encoding);\n    }\n\n```",
+            "method_doc": " Construct an entry from an archive's header bytes. File is set to null.  @param headerBuf The header bytes from a tar archive entry. @param encoding encoding to use for file names @since Commons Compress 1.4 @throws IllegalArgumentException if any of the numeric fields have an invalid format "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+            "method_code": "```java\n    private byte[] getRecord() throws IOException {\n        if (hasHitEOF) {\n            return null;\n        }\n\n        byte[] headerBuf = buffer.readRecord();\n\n        if (headerBuf == null) {\n            hasHitEOF = true;\n        } else if (buffer.isEOFRecord(headerBuf)) {\n            hasHitEOF = true;\n        }\n\n        return hasHitEOF ? null : headerBuf;\n    }\n\n```",
+            "method_doc": " Get the next record in this tar archive. This will skip over any remaining data in the current entry, if there is one, and place the input stream at the header of the next entry. If there are no more entries in the archive, null will be returned to indicate that the end of the archive has been reached.  @return The next header in the archive, or null. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+            "method_code": "```java\n    public byte[] readRecord() throws IOException {\n        if (inStream == null) {\n            if (outStream == null) {\n                throw new IOException(\"input buffer is closed\");\n            }\n            throw new IOException(\"reading from an output buffer\");\n        }\n\n        if (currRecIdx >= recsPerBlock && !readBlock()) {\n            return null;\n        }\n\n        byte[] result = new byte[recordSize];\n\n        System.arraycopy(blockBuffer,\n                         (currRecIdx * recordSize), result, 0,\n                         recordSize);\n\n        currRecIdx++;\n\n        return result;\n    }\n\n```",
+            "method_doc": " Read a record from the input stream and return the data.  @return The record data. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+            "method_code": "```java\n    private boolean readBlock() throws IOException {\n        if (inStream == null) {\n            throw new IOException(\"reading from an output buffer\");\n        }\n\n        currRecIdx = 0;\n\n        int offset = 0;\n        int bytesNeeded = blockSize;\n\n        while (bytesNeeded > 0) {\n            long numBytes = inStream.read(blockBuffer, offset,\n                                               bytesNeeded);\n\n            //\n            // NOTE\n            // We have fit EOF, and the block is not full!\n            //\n            // This is a broken archive. It does not follow the standard\n            // blocking algorithm. However, because we are generous, and\n            // it requires little effort, we will simply ignore the error\n            // and continue as if the entire block were read. This does\n            // not appear to break anything upstream. We used to return\n            // false in this case.\n            //\n            // Thanks to 'Yohann.Roussel@alcatel.fr' for this fix.\n            //\n            if (numBytes == -1) {\n                if (offset == 0) {\n                    // Ensure that we do not read gigabytes of zeros\n                    // for a corrupt tar file.\n                    // See http://issues.apache.org/bugzilla/show_bug.cgi?id=39924\n                    return false;\n                }\n                // However, just leaving the unread portion of the buffer dirty does\n                // cause problems in some cases.  This problem is described in\n                // http://issues.apache.org/bugzilla/show_bug.cgi?id=29877\n                //\n                // The solution is to fill the unused portion of the buffer with zeros.\n\n                Arrays.fill(blockBuffer, offset, offset + bytesNeeded, (byte) 0);\n\n                break;\n            }\n\n            offset += numBytes;\n            bytesNeeded -= numBytes;\n\n            if (numBytes != blockSize) {\n                // TODO: Incomplete Read occured - throw exception?\n            }\n        }\n\n        currBlkIdx++;\n\n        return true;\n    }\n\n```",
+            "method_doc": " @return false if End-Of-File, else true "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::isEOFRecord(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::isEOFRecord(byte[])",
+            "method_code": "```java\n    public boolean isEOFRecord(byte[] record) {\n        for (int i = 0, sz = getRecordSize(); i < sz; ++i) {\n            if (record[i] != 0) {\n                return false;\n            }\n        }\n\n        return true;\n    }\n\n```",
+            "method_doc": " Determine if an archive record indicate End of Archive. End of archive is indicated by a record that consists entirely of null bytes.  @param record The record data to check. @return true if the record data is an End of Archive "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+            "method_code": "```java\n    public static long parseOctalOrBinary(final byte[] buffer, final int offset,\n                                          final int length) {\n\n        if ((buffer[offset] & 0x80) == 0) {\n            return parseOctal(buffer, offset, length);\n        }\n        final boolean negative = buffer[offset] == (byte) 0xff;\n        if (length < 9) {\n            return parseBinaryLong(buffer, offset, length, negative);\n        }\n        return parseBinaryBigInteger(buffer, offset, length, negative);\n    }\n\n```",
+            "method_doc": " Compute the value contained in a byte buffer.  If the most significant bit of the first byte in the buffer is set, this bit is ignored and the rest of the buffer is interpreted as a binary number.  Otherwise, the buffer is interpreted as an octal number as per the parseOctal function above.  @param buffer The buffer from which to parse. @param offset The offset into the buffer from which to parse. @param length The maximum number of bytes to parse. @return The long value of the octal or binary string. @throws IllegalArgumentException if the trailing space/NUL is missing or an invalid byte is detected in an octal number, or if a binary number would exceed the size of a signed long 64-bit integer. @since 1.4 "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)",
+            "method_code": "```java\n    private static String exceptionMessage(byte[] buffer, final int offset,\n            final int length, int current, final byte currentByte) {\n        String string = new String(buffer, offset, length); // TODO default charset?\n        string=string.replaceAll(\"\\0\", \"{NUL}\"); // Replace NULs to allow string to be printed\n        final String s = \"Invalid byte \"+currentByte+\" at offset \"+(current-offset)+\" in '\"+string+\"' len=\"+length;\n        return s;\n    }\n\n```",
+            "method_doc": "Helper method to generate the exception message"
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(String name) {\n \n        // fallback encoding is good enough for utf-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String encoding) {\n        if (encoding == null) {\n            // check platform's default encoding\n            encoding = System.getProperty(\"file.encoding\");\n        }\n        return UTF8.equalsIgnoreCase(encoding)\n            || UTF_DASH_8.equalsIgnoreCase(encoding);\n    }\n\n```",
+            "method_doc": " Whether a given encoding - or the platform's default encoding if the parameter is null - is UTF-8. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public TarArchiveInputStream(InputStream is) {\n        this(is, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param is the input stream to use "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::close()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::close()",
+            "method_code": "```java\n    @Override\n    public void close() throws IOException {\n        buffer.close();\n    }\n\n```",
+            "method_doc": " Closes this stream. Calls the TarBuffer's close() method. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::getRecordSize()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::getRecordSize()",
+            "method_code": "```java\n    public int getRecordSize() {\n        return this.recordSize;\n    }\n\n```",
+            "method_doc": " Get the TAR Buffer's record size. @return the record size "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(InputStream,int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(InputStream,int,int)",
+            "method_code": "```java\n    public TarBuffer(InputStream inStream, int blockSize, int recordSize) {\n        this(inStream, null, blockSize, recordSize);\n    }\n\n```",
+            "method_doc": " Constructor for a TarBuffer on an input stream. @param inStream the input stream to use @param blockSize the block size to use @param recordSize the record size to use "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::close()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::close()",
+            "method_code": "```java\n    public void close() throws IOException {\n        if (outStream != null) {\n            flushBlock();\n\n            if (outStream != System.out\n                    && outStream != System.err) {\n                outStream.close();\n\n                outStream = null;\n            }\n        } else if (inStream != null) {\n            if (inStream != System.in) {\n                inStream.close();\n            }\n            inStream = null;\n        }\n    }\n\n```",
+            "method_doc": " Close the TarBuffer. If this is an output buffer, also flush the current block before closing. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])",
+            "method_code": "```java\n    public String decode(byte[] data) throws IOException {\n        if (this.charset == null) { // i.e. use default charset, see no-args constructor\n            return new String(data);\n        } else {\n            return new String(data,this.charset);\n        }\n    }\n\n```",
+            "method_doc": " @see org.apache.commons.compress.archivers.zip.ZipEncoding#decode(byte[]) "
+        },
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(String charset) {\n        this.charset = charset;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charset The name of the charset or {@code null} for the platform's default character set. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveInputStreamTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Invalid Archive Format\n**Description:** The TAR archive file `/COMPRESS-197.tar` may be corrupted or improperly formatted, causing the `TarArchiveInputStream` to throw an `IOException` when attempting to parse its header.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message indicates that an error was detected parsing the header, suggesting that the archive might have an invalid format.",
+                "Incomplete or Missing Data\n**Description:** The TAR archive file may be incomplete or missing some data, leading to an `IOException` when the `TarArchiveInputStream` tries to read beyond the available data.\n\n**Location:** The archive file itself (`/COMPRESS-197.tar`).\n\n**Observation Support:** The assertion message suggests that an error occurred during parsing, which could be due to the archive being truncated or missing essential data.",
+                "Incorrect Header Parsing Logic\n**Description:** There might be a bug in the `TarArchiveInputStream` class where the logic for parsing the TAR header is incorrect, resulting in an `IOException`.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** The assertion message points out an error detected parsing the header, indicating a problem with the header parsing logic.",
+                "Resource Leak\n**Description:** Although unlikely given the presence of a `finally` block, there might be a subtle resource leak in the `TarArchiveInputStream` class that causes an `IOException` when the stream is closed.\n\n**Location:** The `TarArchiveInputStream` class within the Apache Commons Compress library.\n\n**Observation Support:** While less likely, the assertion message does indicate an `IOException`, which could potentially be related to a resource leak.",
+                "Environment-Specific Issue\n**Description:** The failure might be environment-specific, such as differences in the operating system, Java version, or other runtime conditions that affect the behavior of the `TarArchiveInputStream`.\n\n**Location:** The runtime environment where the test is executed.\n\n**Observation Support:** The assertion message is generic and does not provide specific details about the environment, making it difficult to pinpoint an environment-specific issue directly from the stack trace."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    7.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    5,
+                    5.0
+                ],
+                "5": [
+                    8,
+                    7.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::isEOFRecord(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::parseTarHeader(byte[],ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(byte[],ZipEncoding)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::getRecordSize()"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(InputStream,int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::parseTarHeader(byte[],ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(byte[],ZipEncoding)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::close()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::close()"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])",
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getNextTarEntry()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::getRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveInputStream::TarArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readRecord()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::readBlock()",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::close()"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctal(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::parseOctalOrBinary(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::exceptionMessage(byte[],int,int,int,byte)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::decode(byte[])"
+                    ]
+                }
+            }
+        }
+    ]
+}

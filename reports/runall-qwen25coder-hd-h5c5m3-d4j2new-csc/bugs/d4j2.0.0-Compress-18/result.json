@@ -1,0 +1,849 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+        "org.apache.commons.compress.utils.CountingOutputStream",
+        "org.apache.commons.compress.archivers.tar.TarUtils",
+        "org.apache.commons.compress.archivers.tar.TarBuffer",
+        "org.apache.commons.compress.archivers.ArchiveOutputStream",
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+            "method_code": "```java\n    @Override\n    public void putArchiveEntry(ArchiveEntry archiveEntry) throws IOException {\n        if(finished) {\n            throw new IOException(\"Stream has already been finished\");\n        }\n        TarArchiveEntry entry = (TarArchiveEntry) archiveEntry;\n        Map<String, String> paxHeaders = new HashMap<String, String>();\n        final String entryName = entry.getName();\n        final ByteBuffer encodedName = encoding.encode(entryName);\n        final int nameLen = encodedName.limit() - encodedName.position();\n        boolean paxHeaderContainsPath = false;\n        if (nameLen >= TarConstants.NAMELEN) {\n\n            if (longFileMode == LONGFILE_POSIX) {\n                paxHeaders.put(\"path\", entryName);\n                paxHeaderContainsPath = true;\n            } else if (longFileMode == LONGFILE_GNU) {\n                // create a TarEntry for the LongLink, the contents\n                // of which are the entry's name\n                TarArchiveEntry longLinkEntry = new TarArchiveEntry(TarConstants.GNU_LONGLINK,\n                                                                    TarConstants.LF_GNUTYPE_LONGNAME);\n\n                longLinkEntry.setSize(nameLen + 1); // +1 for NUL\n                putArchiveEntry(longLinkEntry);\n                write(encodedName.array(), encodedName.arrayOffset(), nameLen);\n                write(0); // NUL terminator\n                closeArchiveEntry();\n            } else if (longFileMode != LONGFILE_TRUNCATE) {\n                throw new RuntimeException(\"file name '\" + entryName\n                                           + \"' is too long ( > \"\n                                           + TarConstants.NAMELEN + \" bytes)\");\n            }\n        }\n\n        if (bigNumberMode == BIGNUMBER_POSIX) {\n            addPaxHeadersForBigNumbers(paxHeaders, entry);\n        } else if (bigNumberMode != BIGNUMBER_STAR) {\n            failForBigNumbers(entry);\n        }\n\n        if (addPaxHeadersForNonAsciiNames && !paxHeaderContainsPath\n            && !ASCII.canEncode(entryName)) {\n            paxHeaders.put(\"path\", entryName);\n        }\n\n        if (addPaxHeadersForNonAsciiNames\n            && (entry.isLink() || entry.isSymbolicLink())\n            && !ASCII.canEncode(entry.getLinkName())) {\n            paxHeaders.put(\"linkpath\", entry.getLinkName());\n        }\n\n        if (paxHeaders.size() > 0) {\n            writePaxHeaders(entryName, paxHeaders);\n        }\n\n        entry.writeEntryHeader(recordBuf, encoding,\n                               bigNumberMode == BIGNUMBER_STAR);\n        buffer.writeRecord(recordBuf);\n\n        currBytes = 0;\n\n        if (entry.isDirectory()) {\n            currSize = 0;\n        } else {\n            currSize = entry.getSize();\n        }\n        currName = entryName;\n        haveUnclosedEntry = true;\n    }\n\n```",
+            "method_doc": " Put an entry on the output stream. This writes the entry's header record and positions the output stream for writing the contents of the entry. Once this method is called, the stream is ready for calls to write() to write the entry's contents. Once the contents are written, closeArchiveEntry() <B>MUST</B> be called to ensure that all buffered data is completely written to the output stream.  @param archiveEntry The TarEntry to be written to the archive. @throws IOException on error @throws ClassCastException if archiveEntry is not an instance of TarArchiveEntry ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the creation and writing of archive entries, including directory entries. The issue described in the test failure seems to stem from improper handling of these entries, making this method a prime candidate for fixing the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)",
+            "method_code": "```java\n    @Override\n    public void write(byte[] wBuf, int wOffset, int numToWrite) throws IOException {\n        if ((currBytes + numToWrite) > currSize) {\n            throw new IOException(\"request to write '\" + numToWrite\n                                  + \"' bytes exceeds size in header of '\"\n                                  + currSize + \"' bytes for entry '\"\n                                  + currName + \"'\");\n\n            //\n            // We have to deal with assembly!!!\n            // The programmer can be writing little 32 byte chunks for all\n            // we know, and we must assemble complete records for writing.\n            // REVIEW Maybe this should be in TarBuffer? Could that help to\n            // eliminate some of the buffer copying.\n            //\n        }\n\n        if (assemLen > 0) {\n            if ((assemLen + numToWrite) >= recordBuf.length) {\n                int aLen = recordBuf.length - assemLen;\n\n                System.arraycopy(assemBuf, 0, recordBuf, 0,\n                                 assemLen);\n                System.arraycopy(wBuf, wOffset, recordBuf,\n                                 assemLen, aLen);\n                buffer.writeRecord(recordBuf);\n\n                currBytes += recordBuf.length;\n                wOffset += aLen;\n                numToWrite -= aLen;\n                assemLen = 0;\n            } else {\n                System.arraycopy(wBuf, wOffset, assemBuf, assemLen,\n                                 numToWrite);\n\n                wOffset += numToWrite;\n                assemLen += numToWrite;\n                numToWrite = 0;\n            }\n        }\n\n        //\n        // When we get here we have EITHER:\n        // o An empty \"assemble\" buffer.\n        // o No bytes to write (numToWrite == 0)\n        //\n        while (numToWrite > 0) {\n            if (numToWrite < recordBuf.length) {\n                System.arraycopy(wBuf, wOffset, assemBuf, assemLen,\n                                 numToWrite);\n\n                assemLen += numToWrite;\n\n                break;\n            }\n\n            buffer.writeRecord(wBuf, wOffset);\n\n            int num = recordBuf.length;\n\n            currBytes += num;\n            numToWrite -= num;\n            wOffset += num;\n        }\n    }\n\n```",
+            "method_doc": " Writes bytes to the current tar archive entry. This method is aware of the current entry and will throw an exception if you attempt to write bytes past the length specified for the current entry. The method is also (painfully) aware of the record buffering required by TarBuffer, and manages buffers that are not a multiple of recordsize in length, including assembling records from small buffers.  @param wBuf The buffer to write to the archive. @param wOffset The offset in the buffer from which to get bytes. @param numToWrite The number of bytes to write. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the writing of data to the tar archive, including directory entries. The error message indicates that the request to write exceeds the size in the header, suggesting an issue with how the method processes directory entries. Fixing this method could resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)",
+            "method_code": "```java\n    void writePaxHeaders(String entryName,\n                         Map<String, String> headers) throws IOException {\n        String name = \"./PaxHeaders.X/\" + stripTo7Bits(entryName);\n            // TarEntry's constructor would think this is a directory\n            // and not allow any data to be written\n        if (name.length() >= TarConstants.NAMELEN) {\n            name = name.substring(0, TarConstants.NAMELEN - 1);\n        }\n        TarArchiveEntry pex = new TarArchiveEntry(name,\n                                                  TarConstants.LF_PAX_EXTENDED_HEADER_LC);\n\n        StringWriter w = new StringWriter();\n        for (Map.Entry<String, String> h : headers.entrySet()) {\n            String key = h.getKey();\n            String value = h.getValue();\n            int len = key.length() + value.length()\n                + 3 /* blank, equals and newline */\n                + 2 /* guess 9 < actual length < 100 */;\n            String line = len + \" \" + key + \"=\" + value + \"\\n\";\n            int actualLength = line.getBytes(CharsetNames.UTF_8).length;\n            while (len != actualLength) {\n                // Adjust for cases where length < 10 or > 100\n                // or where UTF-8 encoding isn't a single octet\n                // per character.\n                // Must be in loop as size may go from 99 to 100 in\n                // first pass so we'd need a second.\n                len = actualLength;\n                line = len + \" \" + key + \"=\" + value + \"\\n\";\n                actualLength = line.getBytes(CharsetNames.UTF_8).length;\n            }\n            w.write(line);\n        }\n        byte[] data = w.toString().getBytes(CharsetNames.UTF_8);\n        pex.setSize(data.length);\n        putArchiveEntry(pex);\n        write(data);\n        closeArchiveEntry();\n    }\n\n```",
+            "method_doc": " Writes a PAX extended header with the given map as contents. @since 1.4 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves handling the creation of Pax headers, which can affect the overall structure of the tar archive. The error message indicates that there might be an issue with the size calculation or handling of the directory entry, making this method a prime candidate for fixing the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+            "method_code": "```java\n    public static int formatNameBytes(String name, byte[] buf, final int offset, final int length) {\n        try {\n            return formatNameBytes(name, buf, offset, length, DEFAULT_ENCODING);\n        } catch (IOException ex) {\n            try {\n                return formatNameBytes(name, buf, offset, length,\n                                       FALLBACK_ENCODING);\n            } catch (IOException ex2) {\n                // impossible\n                throw new RuntimeException(ex2);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Copy a name into a buffer. Copies characters from the name into the buffer starting at the specified offset.  If the buffer is longer than the name, the buffer is filled with trailing NULs. If the name is longer than the buffer, the output is truncated.  @param name The header name from which to copy the characters. @param buf The buffer where the name is to be stored. @param offset The starting offset into the buffer @param length The maximum number of header bytes to copy. @return The updated offset, i.e. offset + length ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the conversion of string names to byte arrays, which could be causing issues when dealing with non-ASCII characters. The IOException in the stack trace points to a problem during the writing process, suggesting that the formatting of these names might be incorrect.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "4": 8,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+            "method_code": "```java\n    public static int formatNameBytes(String name, byte[] buf, final int offset,\n                                      final int length,\n                                      final ZipEncoding encoding)\n        throws IOException {\n        int len = name.length();\n        ByteBuffer b = encoding.encode(name);\n        while (b.limit() > length && len > 0) {\n            b = encoding.encode(name.substring(0, --len));\n        }\n        final int limit = b.limit() - b.position();\n        System.arraycopy(b.array(), b.arrayOffset(), buf, offset, limit);\n\n        // Pad any remaining output bytes with NUL\n        for (int i = limit; i < length; ++i) {\n            buf[offset + i] = 0;\n        }\n\n        return offset + length;\n    }\n\n```",
+            "method_doc": " Copy a name into a buffer. Copies characters from the name into the buffer starting at the specified offset.  If the buffer is longer than the name, the buffer is filled with trailing NULs. If the name is longer than the buffer, the output is truncated.  @param name The header name from which to copy the characters. @param buf The buffer where the name is to be stored. @param offset The starting offset into the buffer @param length The maximum number of header bytes to copy. @param encoding name of the encoding to use for file names @since Commons Compress 1.4 @return The updated offset, i.e. offset + length ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the formatting of file names, including directory names, which could be causing the issue in the test case.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::writeRecord(byte[])",
+            "method_code": "```java\n    public void writeRecord(byte[] record) throws IOException {\n        if (outStream == null) {\n            if (inStream == null){\n                throw new IOException(\"Output buffer is closed\");\n            }\n            throw new IOException(\"writing to an input buffer\");\n        }\n\n        if (record.length != recordSize) {\n            throw new IOException(\"record to write has length '\"\n                                  + record.length\n                                  + \"' which is not the record size of '\"\n                                  + recordSize + \"'\");\n        }\n\n        if (currRecIdx >= recsPerBlock) {\n            writeBlock();\n        }\n\n        System.arraycopy(record, 0, blockBuffer,\n                         (currRecIdx * recordSize),\n                         recordSize);\n\n        currRecIdx++;\n    }\n\n```",
+            "method_doc": " Write an archive record to the archive.  @param record The record data to write to the archive. @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for writing records to the archive, and the error message indicates that the request to write exceeds the size in the header. This suggests that there might be an issue with how the record is being written or the header is being updated.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)",
+            "method_code": "```java\n    public CountingOutputStream(final OutputStream out) {\n        super(out);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "org.apache.commons.compress.utils.CountingOutputStream",
+            "class_doc": " Stream that tracks the number of bytes read. @since 1.3 @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of directory entries in the tar archive, rather than the initialization of the `CountingOutputStream`. The `CountingOutputStream` constructor itself does not appear to be directly involved in the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::computeCheckSum(byte[])",
+            "method_code": "```java\n    public static long computeCheckSum(final byte[] buf) {\n        long sum = 0;\n\n        for (int i = 0; i < buf.length; ++i) {\n            sum += BYTE_MASK & buf[i];\n        }\n\n        return sum;\n    }\n\n```",
+            "method_doc": " Compute the checksum of a tar entry header.  @param buf The tar entry's header buffer. @return The computed checksum. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to handling directory entries in the tar archive, rather than the checksum calculation itself. The `computeCheckSum(byte[])` method appears to be functioning correctly according to its intended purpose.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "4": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(OutputStream,int,int)",
+            "method_code": "```java\n    public TarBuffer(OutputStream outStream, int blockSize, int recordSize) {\n        this(null, outStream, blockSize, recordSize);\n    }\n\n```",
+            "method_doc": " Constructor for a TarBuffer on an output stream. @param outStream the output stream to use @param blockSize the block size to use @param recordSize the record size to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarBuffer",
+            "class_doc": " The TarBuffer class implements the tar archive concept of a buffered input stream. This concept goes back to the days of blocked tape drives and special io devices. In the Java universe, the only real function that this class performs is to ensure that files have the correct \"block\" size, or other tars will complain. <p> You should never have a need to access this class directly. TarBuffers are created by Tar IO Streams. @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of directory entries in the `TarArchiveOutputStream`, rather than the constructor of the `TarBuffer`. The `TarBuffer` constructor itself appears to be functioning correctly according to its documentation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::setAddPaxHeadersForNonAsciiNames(boolean)",
+            "method_code": "```java\n    public void setAddPaxHeadersForNonAsciiNames(boolean b) {\n        addPaxHeadersForNonAsciiNames = b;\n    }\n\n```",
+            "method_doc": " Whether to add a PAX extension header for non-ASCII file names. @since 1.4 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it controls whether Pax headers are added for non-ASCII file names. Given that the failure involves issues with handling non-ASCII directory names, modifying this setting could directly address the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::isDirectory()",
+            "method_code": "```java\n    public boolean isDirectory() {\n        if (file != null) {\n            return file.isDirectory();\n        }\n\n        if (linkFlag == LF_DIR) {\n            return true;\n        }\n\n        if (getName().endsWith(\"/\")) {\n            return true;\n        }\n\n        return false;\n    }\n\n```",
+            "method_doc": " Return whether or not this entry represents a directory.  @return True if this entry is a directory. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly determines whether an entry is a directory. The current implementation checks if the entry's name ends with '/' or if the link flag is 'LF_DIR', which are correct conditions for a directory. However, it does not consider the possibility that the file itself could be a directory, which is why the test is failing.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)",
+            "method_code": "```java\n    public TarArchiveEntry(String name) {\n        this(name, false);\n    }\n\n```",
+            "method_doc": " Construct an entry with only a name. This allows the programmer to construct the entry's header \"by hand\". File is set to null.  @param name the entry name ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it constructs an entry with only a name, which could potentially lead to issues when handling directory entries. The lack of proper initialization for directory flags in this method could be causing the failure in the test.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)",
+            "method_code": "```java\n    public TarArchiveEntry(String name, boolean preserveLeadingSlashes) {\n        this();\n\n        name = normalizeFileName(name, preserveLeadingSlashes);\n        boolean isDir = name.endsWith(\"/\");\n\n        this.devMajor = 0;\n        this.devMinor = 0;\n        this.name = name;\n        this.mode = isDir ? DEFAULT_DIR_MODE : DEFAULT_FILE_MODE;\n        this.linkFlag = isDir ? LF_DIR : LF_NORMAL;\n        this.userId = 0;\n        this.groupId = 0;\n        this.size = 0;\n        this.modTime = (new Date()).getTime() / MILLIS_PER_SECOND;\n        this.linkName = \"\";\n        this.userName = \"\";\n        this.groupName = \"\";\n    }\n\n```",
+            "method_doc": " Construct an entry with only a name. This allows the programmer to construct the entry's header \"by hand\". File is set to null.  @param name the entry name @param preserveLeadingSlashes whether to allow leading slashes in the name.  @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly constructs the TarArchiveEntry object and sets its properties, including the directory flag. The failure in the test indicates that the method is not correctly handling directory entries, which suggests that fixing the implementation of this method could resolve the issue.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream,int,int)",
+            "method_code": "```java\n    public TarArchiveOutputStream(OutputStream os, int blockSize, int recordSize) {\n        this(os, blockSize, recordSize, null);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param os the output stream to use @param blockSize the block size to use @param recordSize the record size to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The constructor initializes the TarArchiveOutputStream but does not directly interact with the entries being written. The issue seems to be related to how directory entries are handled within the `putArchiveEntry` method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatUnsignedOctalString(long,byte[],int,int)",
+            "method_code": "```java\n    public static void formatUnsignedOctalString(final long value, byte[] buffer,\n            final int offset, final int length) {\n        int remaining = length;\n        remaining--;\n        if (value == 0) {\n            buffer[offset + remaining--] = (byte) '0';\n        } else {\n            long val = value;\n            for (; remaining >= 0 && val != 0; --remaining) {\n                // CheckStyle:MagicNumber OFF\n                buffer[offset + remaining] = (byte) ((byte) '0' + (byte) (val & 7));\n                val = val >>> 3;\n                // CheckStyle:MagicNumber ON\n            }\n            if (val != 0){\n                throw new IllegalArgumentException\n                (value+\"=\"+Long.toOctalString(value)+ \" will not fit in octal number buffer of length \"+length);\n            }\n        }\n\n        for (; remaining >= 0; --remaining) { // leading zeros\n            buffer[offset + remaining] = (byte) '0';\n        }\n    }\n\n```",
+            "method_doc": " Fill buffer with unsigned octal number, padded with leading zeroes.  @param value number to convert to octal - treated as unsigned @param buffer destination buffer @param offset starting offset in buffer @param length length of buffer to fill @throws IllegalArgumentException if the value will not fit in the buffer ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Lack of Proper Entry Closure Before Adding New One\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly close the current entry before adding a new one, leading to an invalid tar archive structure.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly closed entry before adding a new one.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles formatting of unsigned octal strings, which could potentially lead to issues when dealing with non-ASCII characters or large values. However, without direct evidence linking this method to the specific failure, it's not the most likely candidate for fixing the issue.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::getName()",
+            "method_code": "```java\n    public String getName() {\n        return name.toString();\n    }\n\n```",
+            "method_doc": " Get this entry's name.  @return This entry's name. ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+            "class_doc": " This class represents an entry in a Tar archive. It consists of the entry's header, as well as the entry's File. Entries can be instantiated in one of three ways, depending on how they are to be used. <p> TarEntries that are created from the header bytes read from an archive are instantiated with the TarEntry( byte[] ) constructor. These entries will be used when extracting from or listing the contents of an archive. These entries have their header filled in using the header bytes. They also set the File to null, since they reference an archive entry not a file. <p> TarEntries that are created from Files that are to be written into an archive are instantiated with the TarEntry( File ) constructor. These entries have their header filled in using the File's information. They also keep a reference to the File for convenience when writing entries. <p> Finally, TarEntries can be constructed from nothing but a name. This allows the programmer to construct the entry by hand, for instance when only an InputStream is available for writing to the archive, and the header information is constructed from other information. In this case the header fields are set to defaults and the File is set to null.  <p> The C structure for a Tar Entry's header is: <pre> struct header { char name[100];     // TarConstants.NAMELEN    - offset   0 char mode[8];       // TarConstants.MODELEN    - offset 100 char uid[8];        // TarConstants.UIDLEN     - offset 108 char gid[8];        // TarConstants.GIDLEN     - offset 116 char size[12];      // TarConstants.SIZELEN    - offset 124 char mtime[12];     // TarConstants.MODTIMELEN - offset 136 char chksum[8];     // TarConstants.CHKSUMLEN  - offset 148 char linkflag[1];   //                         - offset 156 char linkname[100]; // TarConstants.NAMELEN    - offset 157 The following fields are only present in new-style POSIX tar archives: char magic[6];      // TarConstants.MAGICLEN   - offset 257 char version[2];    // TarConstants.VERSIONLEN - offset 263 char uname[32];     // TarConstants.UNAMELEN   - offset 265 char gname[32];     // TarConstants.GNAMELEN   - offset 297 char devmajor[8];   // TarConstants.DEVLEN     - offset 329 char devminor[8];   // TarConstants.DEVLEN     - offset 337 char prefix[155];   // TarConstants.PREFIXLEN  - offset 345 Used if \"name\" field is not long enough to hold the path char pad[12];       // NULs                    - offset 500 } header; All unused bytes are set to null. New-style GNU tar files are slightly different from the above. For values of size larger than 077777777777L (11 7s) or uid and gid larger than 07777777L (7 7s) the sign bit of the first byte is set, and the rest of the field is the binary representation of the number. See TarUtils.parseOctalOrBinary. </pre>  <p> The C structure for a old GNU Tar Entry's header is: <pre> struct oldgnu_header { char unused_pad1[345]; // TarConstants.PAD1LEN_GNU       - offset 0 char atime[12];        // TarConstants.ATIMELEN_GNU      - offset 345 char ctime[12];        // TarConstants.CTIMELEN_GNU      - offset 357 char offset[12];       // TarConstants.OFFSETLEN_GNU     - offset 369 char longnames[4];     // TarConstants.LONGNAMESLEN_GNU  - offset 381 char unused_pad2;      // TarConstants.PAD2LEN_GNU       - offset 385 struct sparse sp[4];   // TarConstants.SPARSELEN_GNU     - offset 386 char isextended;       // TarConstants.ISEXTENDEDLEN_GNU - offset 482 char realsize[12];     // TarConstants.REALSIZELEN_GNU   - offset 483 char unused_pad[17];   // TarConstants.PAD3LEN_GNU       - offset 495 }; </pre> Whereas, \"struct sparse\" is: <pre> struct sparse { char offset[12];   // offset 0 char numbytes[12]; // offset 12 }; </pre>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incorrect Size Calculation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method may be calculating the size of the directory entry incorrectly, leading to an overflow or underflow that results in an invalid tar archive.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace indicates that the request to write exceeds the size in the header, suggesting that the size calculation for the directory entry is incorrect.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the value stored in the `name` field. However, the issue might lie elsewhere in the process of creating or handling the TarArchiveEntry, rather than directly in the `getName()` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(String name) {\n \n        // fallback encoding is good enough for utf-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles different encodings for ZIP files, but it does not directly relate to the specific issue of Pax headers in TAR archives. The problem seems to be within the handling of non-ASCII characters in directory names, which might require adjustments in the way these names are encoded and processed in the TAR archive.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String encoding) {\n        if (encoding == null) {\n            // check platform's default encoding\n            encoding = System.getProperty(\"file.encoding\");\n        }\n        return UTF8.equalsIgnoreCase(encoding)\n            || UTF_DASH_8.equalsIgnoreCase(encoding);\n    }\n\n```",
+            "method_doc": " Whether a given encoding - or the platform's default encoding if the parameter is null - is UTF-8. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it determines whether a given encoding is UTF-8, which could affect how non-ASCII characters are handled in file names. However, the issue described seems to be related to Pax header writing rather than encoding detection.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::encode(String)",
+            "method_code": "```java\n    public ByteBuffer encode(String name) throws IOException {\n        if (this.charset == null) { // i.e. use default charset, see no-args constructor\n            return ByteBuffer.wrap(name.getBytes());\n        } else {\n            return ByteBuffer.wrap(name.getBytes(this.charset));\n        }\n    }\n\n```",
+            "method_doc": " @see org.apache.commons.compress.archivers.zip.ZipEncoding#encode(java.lang.String) ",
+            "class_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+            "class_doc": " A fallback ZipEncoding, which uses a java.io means to encode names.  <p>This implementation is not suitable for encodings other than utf-8, because java.io encodes unmappable character as question marks leading to unreadable ZIP entries on some operating systems.</p>  <p>Furthermore this implementation is unable to tell whether a given name can be safely encoded or not.</p>  <p>This implementation acts as a last resort implementation, when neither {@link Simple8BitZipEnoding} nor {@link NioZipEncoding} is available.</p>  <p>The methods of this class are reentrant.</p> @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly converts strings to byte arrays using the specified charset, which might not handle non-ASCII characters correctly. However, it's not the primary suspect since the issue seems to be related to Pax header handling in TarArchiveOutputStream.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(String charset) {\n        this.charset = charset;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charset The name of the charset or {@code null} for the platform's default character set. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+            "class_doc": " A fallback ZipEncoding, which uses a java.io means to encode names.  <p>This implementation is not suitable for encodings other than utf-8, because java.io encodes unmappable character as question marks leading to unreadable ZIP entries on some operating systems.</p>  <p>Furthermore this implementation is unable to tell whether a given name can be safely encoded or not.</p>  <p>This implementation acts as a last resort implementation, when neither {@link Simple8BitZipEnoding} nor {@link NioZipEncoding} is available.</p>  <p>The methods of this class are reentrant.</p> @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the `charset` field but does not directly interact with the Pax headers or directory entries. However, since the failure involves issues related to non-ASCII characters and Pax headers, there might be indirect connections through other parts of the codebase.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream)",
+            "method_code": "```java\n    public TarArchiveOutputStream(OutputStream os) {\n        this(os, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param os the output stream to use ",
+            "class_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+            "class_doc": " The TarOutputStream writes a UNIX tar archive as an OutputStream. Methods are provided to put entries, and then write their contents by writing to this stream using write(). @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "test_failure_causes": "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to handling non-ASCII directory names and the correct identification of directory entries, which is not addressed in the constructor of `TarArchiveOutputStream`. The actual problem lies within the implementation of the `putArchiveEntry(TarArchiveEntry)` method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+            "method_code": "```java\n    @Override\n    public void putArchiveEntry(ArchiveEntry archiveEntry) throws IOException {\n        if(finished) {\n            throw new IOException(\"Stream has already been finished\");\n        }\n        TarArchiveEntry entry = (TarArchiveEntry) archiveEntry;\n        Map<String, String> paxHeaders = new HashMap<String, String>();\n        final String entryName = entry.getName();\n        final ByteBuffer encodedName = encoding.encode(entryName);\n        final int nameLen = encodedName.limit() - encodedName.position();\n        boolean paxHeaderContainsPath = false;\n        if (nameLen >= TarConstants.NAMELEN) {\n\n            if (longFileMode == LONGFILE_POSIX) {\n                paxHeaders.put(\"path\", entryName);\n                paxHeaderContainsPath = true;\n            } else if (longFileMode == LONGFILE_GNU) {\n                // create a TarEntry for the LongLink, the contents\n                // of which are the entry's name\n                TarArchiveEntry longLinkEntry = new TarArchiveEntry(TarConstants.GNU_LONGLINK,\n                                                                    TarConstants.LF_GNUTYPE_LONGNAME);\n\n                longLinkEntry.setSize(nameLen + 1); // +1 for NUL\n                putArchiveEntry(longLinkEntry);\n                write(encodedName.array(), encodedName.arrayOffset(), nameLen);\n                write(0); // NUL terminator\n                closeArchiveEntry();\n            } else if (longFileMode != LONGFILE_TRUNCATE) {\n                throw new RuntimeException(\"file name '\" + entryName\n                                           + \"' is too long ( > \"\n                                           + TarConstants.NAMELEN + \" bytes)\");\n            }\n        }\n\n        if (bigNumberMode == BIGNUMBER_POSIX) {\n            addPaxHeadersForBigNumbers(paxHeaders, entry);\n        } else if (bigNumberMode != BIGNUMBER_STAR) {\n            failForBigNumbers(entry);\n        }\n\n        if (addPaxHeadersForNonAsciiNames && !paxHeaderContainsPath\n            && !ASCII.canEncode(entryName)) {\n            paxHeaders.put(\"path\", entryName);\n        }\n\n        if (addPaxHeadersForNonAsciiNames\n            && (entry.isLink() || entry.isSymbolicLink())\n            && !ASCII.canEncode(entry.getLinkName())) {\n            paxHeaders.put(\"linkpath\", entry.getLinkName());\n        }\n\n        if (paxHeaders.size() > 0) {\n            writePaxHeaders(entryName, paxHeaders);\n        }\n\n        entry.writeEntryHeader(recordBuf, encoding,\n                               bigNumberMode == BIGNUMBER_STAR);\n        buffer.writeRecord(recordBuf);\n\n        currBytes = 0;\n\n        if (entry.isDirectory()) {\n            currSize = 0;\n        } else {\n            currSize = entry.getSize();\n        }\n        currName = entryName;\n        haveUnclosedEntry = true;\n    }\n\n```",
+            "method_doc": " Put an entry on the output stream. This writes the entry's header record and positions the output stream for writing the contents of the entry. Once this method is called, the stream is ready for calls to write() to write the entry's contents. Once the contents are written, closeArchiveEntry() <B>MUST</B> be called to ensure that all buffered data is completely written to the output stream.  @param archiveEntry The TarEntry to be written to the archive. @throws IOException on error @throws ClassCastException if archiveEntry is not an instance of TarArchiveEntry "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)",
+            "method_code": "```java\n    @Override\n    public void write(byte[] wBuf, int wOffset, int numToWrite) throws IOException {\n        if ((currBytes + numToWrite) > currSize) {\n            throw new IOException(\"request to write '\" + numToWrite\n                                  + \"' bytes exceeds size in header of '\"\n                                  + currSize + \"' bytes for entry '\"\n                                  + currName + \"'\");\n\n            //\n            // We have to deal with assembly!!!\n            // The programmer can be writing little 32 byte chunks for all\n            // we know, and we must assemble complete records for writing.\n            // REVIEW Maybe this should be in TarBuffer? Could that help to\n            // eliminate some of the buffer copying.\n            //\n        }\n\n        if (assemLen > 0) {\n            if ((assemLen + numToWrite) >= recordBuf.length) {\n                int aLen = recordBuf.length - assemLen;\n\n                System.arraycopy(assemBuf, 0, recordBuf, 0,\n                                 assemLen);\n                System.arraycopy(wBuf, wOffset, recordBuf,\n                                 assemLen, aLen);\n                buffer.writeRecord(recordBuf);\n\n                currBytes += recordBuf.length;\n                wOffset += aLen;\n                numToWrite -= aLen;\n                assemLen = 0;\n            } else {\n                System.arraycopy(wBuf, wOffset, assemBuf, assemLen,\n                                 numToWrite);\n\n                wOffset += numToWrite;\n                assemLen += numToWrite;\n                numToWrite = 0;\n            }\n        }\n\n        //\n        // When we get here we have EITHER:\n        // o An empty \"assemble\" buffer.\n        // o No bytes to write (numToWrite == 0)\n        //\n        while (numToWrite > 0) {\n            if (numToWrite < recordBuf.length) {\n                System.arraycopy(wBuf, wOffset, assemBuf, assemLen,\n                                 numToWrite);\n\n                assemLen += numToWrite;\n\n                break;\n            }\n\n            buffer.writeRecord(wBuf, wOffset);\n\n            int num = recordBuf.length;\n\n            currBytes += num;\n            numToWrite -= num;\n            wOffset += num;\n        }\n    }\n\n```",
+            "method_doc": " Writes bytes to the current tar archive entry. This method is aware of the current entry and will throw an exception if you attempt to write bytes past the length specified for the current entry. The method is also (painfully) aware of the record buffering required by TarBuffer, and manages buffers that are not a multiple of recordsize in length, including assembling records from small buffers.  @param wBuf The buffer to write to the archive. @param wOffset The offset in the buffer from which to get bytes. @param numToWrite The number of bytes to write. @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)",
+            "method_code": "```java\n    void writePaxHeaders(String entryName,\n                         Map<String, String> headers) throws IOException {\n        String name = \"./PaxHeaders.X/\" + stripTo7Bits(entryName);\n            // TarEntry's constructor would think this is a directory\n            // and not allow any data to be written\n        if (name.length() >= TarConstants.NAMELEN) {\n            name = name.substring(0, TarConstants.NAMELEN - 1);\n        }\n        TarArchiveEntry pex = new TarArchiveEntry(name,\n                                                  TarConstants.LF_PAX_EXTENDED_HEADER_LC);\n\n        StringWriter w = new StringWriter();\n        for (Map.Entry<String, String> h : headers.entrySet()) {\n            String key = h.getKey();\n            String value = h.getValue();\n            int len = key.length() + value.length()\n                + 3 /* blank, equals and newline */\n                + 2 /* guess 9 < actual length < 100 */;\n            String line = len + \" \" + key + \"=\" + value + \"\\n\";\n            int actualLength = line.getBytes(CharsetNames.UTF_8).length;\n            while (len != actualLength) {\n                // Adjust for cases where length < 10 or > 100\n                // or where UTF-8 encoding isn't a single octet\n                // per character.\n                // Must be in loop as size may go from 99 to 100 in\n                // first pass so we'd need a second.\n                len = actualLength;\n                line = len + \" \" + key + \"=\" + value + \"\\n\";\n                actualLength = line.getBytes(CharsetNames.UTF_8).length;\n            }\n            w.write(line);\n        }\n        byte[] data = w.toString().getBytes(CharsetNames.UTF_8);\n        pex.setSize(data.length);\n        putArchiveEntry(pex);\n        write(data);\n        closeArchiveEntry();\n    }\n\n```",
+            "method_doc": " Writes a PAX extended header with the given map as contents. @since 1.4 "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+            "method_code": "```java\n    public static int formatNameBytes(String name, byte[] buf, final int offset, final int length) {\n        try {\n            return formatNameBytes(name, buf, offset, length, DEFAULT_ENCODING);\n        } catch (IOException ex) {\n            try {\n                return formatNameBytes(name, buf, offset, length,\n                                       FALLBACK_ENCODING);\n            } catch (IOException ex2) {\n                // impossible\n                throw new RuntimeException(ex2);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Copy a name into a buffer. Copies characters from the name into the buffer starting at the specified offset.  If the buffer is longer than the name, the buffer is filled with trailing NULs. If the name is longer than the buffer, the output is truncated.  @param name The header name from which to copy the characters. @param buf The buffer where the name is to be stored. @param offset The starting offset into the buffer @param length The maximum number of header bytes to copy. @return The updated offset, i.e. offset + length "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+            "method_code": "```java\n    public static int formatNameBytes(String name, byte[] buf, final int offset,\n                                      final int length,\n                                      final ZipEncoding encoding)\n        throws IOException {\n        int len = name.length();\n        ByteBuffer b = encoding.encode(name);\n        while (b.limit() > length && len > 0) {\n            b = encoding.encode(name.substring(0, --len));\n        }\n        final int limit = b.limit() - b.position();\n        System.arraycopy(b.array(), b.arrayOffset(), buf, offset, limit);\n\n        // Pad any remaining output bytes with NUL\n        for (int i = limit; i < length; ++i) {\n            buf[offset + i] = 0;\n        }\n\n        return offset + length;\n    }\n\n```",
+            "method_doc": " Copy a name into a buffer. Copies characters from the name into the buffer starting at the specified offset.  If the buffer is longer than the name, the buffer is filled with trailing NULs. If the name is longer than the buffer, the output is truncated.  @param name The header name from which to copy the characters. @param buf The buffer where the name is to be stored. @param offset The starting offset into the buffer @param length The maximum number of header bytes to copy. @param encoding name of the encoding to use for file names @since Commons Compress 1.4 @return The updated offset, i.e. offset + length "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::writeRecord(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::writeRecord(byte[])",
+            "method_code": "```java\n    public void writeRecord(byte[] record) throws IOException {\n        if (outStream == null) {\n            if (inStream == null){\n                throw new IOException(\"Output buffer is closed\");\n            }\n            throw new IOException(\"writing to an input buffer\");\n        }\n\n        if (record.length != recordSize) {\n            throw new IOException(\"record to write has length '\"\n                                  + record.length\n                                  + \"' which is not the record size of '\"\n                                  + recordSize + \"'\");\n        }\n\n        if (currRecIdx >= recsPerBlock) {\n            writeBlock();\n        }\n\n        System.arraycopy(record, 0, blockBuffer,\n                         (currRecIdx * recordSize),\n                         recordSize);\n\n        currRecIdx++;\n    }\n\n```",
+            "method_doc": " Write an archive record to the archive.  @param record The record data to write to the archive. @throws IOException on error "
+        },
+        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)": {
+            "method_name": "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)",
+            "method_code": "```java\n    public CountingOutputStream(final OutputStream out) {\n        super(out);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::computeCheckSum(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::computeCheckSum(byte[])",
+            "method_code": "```java\n    public static long computeCheckSum(final byte[] buf) {\n        long sum = 0;\n\n        for (int i = 0; i < buf.length; ++i) {\n            sum += BYTE_MASK & buf[i];\n        }\n\n        return sum;\n    }\n\n```",
+            "method_doc": " Compute the checksum of a tar entry header.  @param buf The tar entry's header buffer. @return The computed checksum. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(OutputStream,int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(OutputStream,int,int)",
+            "method_code": "```java\n    public TarBuffer(OutputStream outStream, int blockSize, int recordSize) {\n        this(null, outStream, blockSize, recordSize);\n    }\n\n```",
+            "method_doc": " Constructor for a TarBuffer on an output stream. @param outStream the output stream to use @param blockSize the block size to use @param recordSize the record size to use "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::setAddPaxHeadersForNonAsciiNames(boolean)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::setAddPaxHeadersForNonAsciiNames(boolean)",
+            "method_code": "```java\n    public void setAddPaxHeadersForNonAsciiNames(boolean b) {\n        addPaxHeadersForNonAsciiNames = b;\n    }\n\n```",
+            "method_doc": " Whether to add a PAX extension header for non-ASCII file names. @since 1.4 "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::isDirectory()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::isDirectory()",
+            "method_code": "```java\n    public boolean isDirectory() {\n        if (file != null) {\n            return file.isDirectory();\n        }\n\n        if (linkFlag == LF_DIR) {\n            return true;\n        }\n\n        if (getName().endsWith(\"/\")) {\n            return true;\n        }\n\n        return false;\n    }\n\n```",
+            "method_doc": " Return whether or not this entry represents a directory.  @return True if this entry is a directory. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)",
+            "method_code": "```java\n    public TarArchiveEntry(String name) {\n        this(name, false);\n    }\n\n```",
+            "method_doc": " Construct an entry with only a name. This allows the programmer to construct the entry's header \"by hand\". File is set to null.  @param name the entry name "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)",
+            "method_code": "```java\n    public TarArchiveEntry(String name, boolean preserveLeadingSlashes) {\n        this();\n\n        name = normalizeFileName(name, preserveLeadingSlashes);\n        boolean isDir = name.endsWith(\"/\");\n\n        this.devMajor = 0;\n        this.devMinor = 0;\n        this.name = name;\n        this.mode = isDir ? DEFAULT_DIR_MODE : DEFAULT_FILE_MODE;\n        this.linkFlag = isDir ? LF_DIR : LF_NORMAL;\n        this.userId = 0;\n        this.groupId = 0;\n        this.size = 0;\n        this.modTime = (new Date()).getTime() / MILLIS_PER_SECOND;\n        this.linkName = \"\";\n        this.userName = \"\";\n        this.groupName = \"\";\n    }\n\n```",
+            "method_doc": " Construct an entry with only a name. This allows the programmer to construct the entry's header \"by hand\". File is set to null.  @param name the entry name @param preserveLeadingSlashes whether to allow leading slashes in the name.  @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream,int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream,int,int)",
+            "method_code": "```java\n    public TarArchiveOutputStream(OutputStream os, int blockSize, int recordSize) {\n        this(os, blockSize, recordSize, null);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param os the output stream to use @param blockSize the block size to use @param recordSize the record size to use "
+        },
+        "org.apache.commons.compress.archivers.tar.TarUtils::formatUnsignedOctalString(long,byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarUtils::formatUnsignedOctalString(long,byte[],int,int)",
+            "method_code": "```java\n    public static void formatUnsignedOctalString(final long value, byte[] buffer,\n            final int offset, final int length) {\n        int remaining = length;\n        remaining--;\n        if (value == 0) {\n            buffer[offset + remaining--] = (byte) '0';\n        } else {\n            long val = value;\n            for (; remaining >= 0 && val != 0; --remaining) {\n                // CheckStyle:MagicNumber OFF\n                buffer[offset + remaining] = (byte) ((byte) '0' + (byte) (val & 7));\n                val = val >>> 3;\n                // CheckStyle:MagicNumber ON\n            }\n            if (val != 0){\n                throw new IllegalArgumentException\n                (value+\"=\"+Long.toOctalString(value)+ \" will not fit in octal number buffer of length \"+length);\n            }\n        }\n\n        for (; remaining >= 0; --remaining) { // leading zeros\n            buffer[offset + remaining] = (byte) '0';\n        }\n    }\n\n```",
+            "method_doc": " Fill buffer with unsigned octal number, padded with leading zeroes.  @param value number to convert to octal - treated as unsigned @param buffer destination buffer @param offset starting offset in buffer @param length length of buffer to fill @throws IllegalArgumentException if the value will not fit in the buffer "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::getName()": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveEntry::getName()",
+            "method_code": "```java\n    public String getName() {\n        return name.toString();\n    }\n\n```",
+            "method_doc": " Get this entry's name.  @return This entry's name. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(String name) {\n \n        // fallback encoding is good enough for utf-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String encoding) {\n        if (encoding == null) {\n            // check platform's default encoding\n            encoding = System.getProperty(\"file.encoding\");\n        }\n        return UTF8.equalsIgnoreCase(encoding)\n            || UTF_DASH_8.equalsIgnoreCase(encoding);\n    }\n\n```",
+            "method_doc": " Whether a given encoding - or the platform's default encoding if the parameter is null - is UTF-8. "
+        },
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::encode(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::encode(String)",
+            "method_code": "```java\n    public ByteBuffer encode(String name) throws IOException {\n        if (this.charset == null) { // i.e. use default charset, see no-args constructor\n            return ByteBuffer.wrap(name.getBytes());\n        } else {\n            return ByteBuffer.wrap(name.getBytes(this.charset));\n        }\n    }\n\n```",
+            "method_doc": " @see org.apache.commons.compress.archivers.zip.ZipEncoding#encode(java.lang.String) "
+        },
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(String charset) {\n        this.charset = charset;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charset The name of the charset or {@code null} for the platform's default character set. "
+        },
+        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream)": {
+            "method_name": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream)",
+            "method_code": "```java\n    public TarArchiveOutputStream(OutputStream os) {\n        this(os, TarBuffer.DEFAULT_BLKSIZE, TarBuffer.DEFAULT_RCDSIZE);\n    }\n\n```",
+            "method_doc": " Constructor for TarInputStream. @param os the output stream to use "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.tar.TarArchiveOutputStreamTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly handle directory entries. It may be attempting to write the directory entry without closing the previous entry, leading to an invalid tar archive structure.\n\n**Location:** Likely within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly handled directory entry.",
+                "Missing Implementation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method lacks the necessary logic to handle directory entries. It might be treating all entries as regular files instead of directories.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The assertion that the tar archive entry is marked as a directory fails, indicating that the method is not correctly identifying or setting the directory flag.",
+                "Incomplete Pax Header Writing\n**Description:** When Pax headers are enabled, the `writePaxHeaders` method may not be fully populating the Pax headers for directory entries, leading to incomplete or incorrect metadata.\n\n**Location:** Within the `writePaxHeaders` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace points to an issue during the writing of Pax headers, suggesting that the headers are either not being written at all or are being written incompletely.",
+                "Incorrect Size Calculation for Directory Entries\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method may be calculating the size of the directory entry incorrectly, leading to an overflow or underflow that results in an invalid tar archive.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace indicates that the request to write exceeds the size in the header, suggesting that the size calculation for the directory entry is incorrect.",
+                "Lack of Proper Entry Closure Before Adding New One\n**Description:** The `putArchiveEntry(TarArchiveEntry)` method does not properly close the current entry before adding a new one, leading to an invalid tar archive structure.\n\n**Location:** Within the `putArchiveEntry(TarArchiveEntry)` method in the `TarArchiveOutputStream` class.\n\n**Observation Support:** The stack trace shows an `IOException` indicating that the request to write exceeds the size in the header. This suggests that the tar archive is not being constructed correctly, possibly due to an improperly closed entry before adding a new one."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+                    "org.apache.commons.compress.utils.CountingOutputStream",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.ArchiveOutputStream"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+                    "org.apache.commons.compress.utils.CountingOutputStream",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+                    "org.apache.commons.compress.archivers.ArchiveOutputStream"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+                    "org.apache.commons.compress.utils.CountingOutputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+                    "org.apache.commons.compress.utils.CountingOutputStream",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream",
+                    "org.apache.commons.compress.utils.CountingOutputStream",
+                    "org.apache.commons.compress.archivers.tar.TarBuffer",
+                    "org.apache.commons.compress.archivers.tar.TarUtils",
+                    "org.apache.commons.compress.archivers.ArchiveOutputStream"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)"
+                    ],
+                    "org.apache.commons.compress.utils.CountingOutputStream": [
+                        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::computeCheckSum(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::writeRecord(byte[])",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(OutputStream,int,int)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream,int,int)"
+                    ],
+                    "org.apache.commons.compress.utils.CountingOutputStream": [
+                        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatUnsignedOctalString(long,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::isDirectory()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::setAddPaxHeadersForNonAsciiNames(boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::getName()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)"
+                    ],
+                    "org.apache.commons.compress.utils.CountingOutputStream": [
+                        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::encode(String)",
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::writePaxHeaders(String,Map)"
+                    ],
+                    "org.apache.commons.compress.utils.CountingOutputStream": [
+                        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::computeCheckSum(byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarArchiveEntry": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::getName()",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveEntry::TarArchiveEntry(String,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream": [
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::putArchiveEntry(ArchiveEntry)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::write(byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarArchiveOutputStream::TarArchiveOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.utils.CountingOutputStream": [
+                        "org.apache.commons.compress.utils.CountingOutputStream::CountingOutputStream(OutputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarBuffer": [
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::writeRecord(byte[])",
+                        "org.apache.commons.compress.archivers.tar.TarBuffer::TarBuffer(OutputStream,int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.tar.TarUtils": [
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatNameBytes(String,byte[],int,int,ZipEncoding)",
+                        "org.apache.commons.compress.archivers.tar.TarUtils::formatUnsignedOctalString(long,byte[],int,int)"
+                    ]
+                }
+            }
+        }
+    ]
+}

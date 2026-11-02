@@ -1,0 +1,1072 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.InlineFunctions",
+        "com.google.javascript.rhino.jstype.FunctionType",
+        "com.google.javascript.rhino.jstype.JSTypeRegistry",
+        "com.google.javascript.rhino.jstype.JSType",
+        "com.google.javascript.rhino.jstype.ObjectType",
+        "com.google.javascript.rhino.jstype.FunctionPrototypeType"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    Preconditions.checkState(compiler.getLifeCycleStage().isNormalized());\n\n    NodeTraversal.traverse(compiler, root, new FindCandidateFunctions());\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n    NodeTraversal.traverse(compiler, root,\n       new FindCandidatesReferences(fns, anonFns));\n    trimCanidatesNotMeetingMinimumRequirements();\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n\n    // Store the set of function names eligible for inlining and use this to\n    // prevent function names from being moved into temporaries during\n    // expression decomposition. If this movement were allowed it would prevent\n    // the Inline callback from finding the function calls.\n    //\n    // This pass already assumes these are constants, so this is safe for anyone\n    // using function inlining.\n    //\n    Set<String> fnNames = Sets.newHashSet(fns.keySet());\n    injector.setKnownConstants(fnNames);\n\n    trimCanidatesUsingOnCost();\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n    resolveInlineConflicts();\n    decomposeExpressions(fnNames);\n    NodeTraversal.traverse(compiler, root,\n        new CallVisitor(\n            fns, anonFns, new Inline(injector, specializationState)));\n\n    removeInlinedFunctions();\n  }\n\n```",
+            "method_doc": "This method processes the JavaScript AST to identify and inline candidate functions. It calls methods like `FindCandidateFunctions`, `FindCandidatesReferences`, `trimCanidatesNotMeetingMinimumRequirements`, `trimCanidatesUsingOnCost`, `resolveInlineConflicts`, `decomposeExpressions`, and `CallVisitor` to perform various steps of the inlining process.",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for identifying and inlining candidate functions. The issue observed in the test suggests that there might be a problem with how the `this` context is handled during the inlining process. By fixing the logic in this method, particularly around function calls and bindings, the inlining behavior can be improved, potentially resolving the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::maybeAddFunction(Function,JSModule)",
+            "method_code": "```java\n  private void maybeAddFunction(Function fn, JSModule module) {\n    String name = fn.getName();\n    FunctionState fs = getOrCreateFunctionState(name);\n\n    // TODO(johnlenz): Maybe \"smarten\" FunctionState by adding this logic\n    // to it?\n\n    // If the function has multiple definitions, don't inline it.\n    if (fs.hasExistingFunctionDefinition()) {\n      fs.setInline(false);\n    } else {\n      // verify the function hasn't already been marked as \"don't inline\"\n      if (fs.canInline()) {\n        // store it for use when inlining.\n        fs.setFn(fn);\n        if (injector.isDirectCallNodeReplacementPossible(\n            fn.getFunctionNode())) {\n          fs.inlineDirectly(true);\n        }\n\n        // verify the function meets all the requirements.\n        // TODO(johnlenz): Minimum requirement checks are about 5% of the\n        // runtime cost of this pass.\n        if (!isCandidateFunction(fn)) {\n          // It doesn't meet the requirements.\n          fs.setInline(false);\n        }\n\n        // Set the module and gather names that need temporaries.\n        if (fs.canInline()) {\n          fs.setModule(module);\n\n          Node fnNode = fn.getFunctionNode();\n          Set<String> namesToAlias =\n              FunctionArgumentInjector.findModifiedParameters(fnNode);\n          if (!namesToAlias.isEmpty()) {\n            fs.inlineDirectly(false);\n            fs.setNamesToAlias(namesToAlias);\n          }\n\n          Node block = NodeUtil.getFunctionBody(fnNode);\n          if (NodeUtil.referencesThis(block)) {\n            fs.setReferencesThis(true);\n          }\n\n          if (NodeUtil.containsFunction(block)) {\n            fs.setHasInnerFunctions(true);\n            // If there are inner functions, we can inline into global scope\n            // if there are no local vars or named functions.\n            // TODO(johnlenz): this can be improved by looking at the possible\n            // values for locals.  If there are simple values, or constants\n            // we could still inline.\n            if (hasLocalNames(fnNode)) {\n              fs.setInline(false);\n            }\n          }\n        }\n\n        // Check if block inlining is allowed.\n        if (fs.canInline() && !fs.canInlineDirectly()) {\n          if (!blockFunctionInliningEnabled) {\n            fs.setInline(false);\n          }\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Updates the FunctionState object for the given function. Checks if the given function matches the criteria for an inlinable function. ",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves the logic for identifying and processing functions that can be inlined. The issue described in the test failure pertains to the incorrect handling of the `this` context during inlining, which is a critical aspect of the `InlineFunctions` pass. By fixing the logic in this method, we can ensure that the `this` context is correctly maintained during inlining, thereby resolving the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::isCandidateFunction(Function)",
+            "method_code": "```java\n  private boolean isCandidateFunction(Function fn) {\n    // Don't inline exported functions.\n    String fnName = fn.getName();\n    if (compiler.getCodingConvention().isExported(fnName)) {\n      // TODO(johnlenz): Should we allow internal references to be inlined?\n      // An exported name can be replaced externally, any inlined instance\n      // would not reflect this change.\n      // To allow inlining we need to be able to distinguish between exports\n      // that are used in a read-only fashion and those that can be replaced\n      // by external definitions.\n      return false;\n    }\n\n    // Don't inline this special function\n    if (RenameProperties.RENAME_PROPERTY_FUNCTION_NAME.equals(fnName)) {\n      return false;\n    }\n\n    // Don't inline if we are specializing and the function can't be fixed up\n    if (specializationState != null &&\n        !specializationState.canFixupFunction(fn.getFunctionNode())) {\n      return false;\n    }\n\n    Node fnNode = fn.getFunctionNode();\n    return injector.doesFunctionMeetMinimumRequirements(fnName, fnNode);\n  }\n\n```",
+            "method_doc": " Checks if the given function matches the criteria for an inlinable function. ",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly checks whether a function meets the criteria for being inlined. Given that the issue seems to stem from incorrect handling of the `this` context during inlining, ensuring that the function meets the necessary requirements for inlining is crucial. The method's role in filtering out non-inlinable functions makes it a prime candidate for fixing the root cause of the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it resets various internal state of the JSTypeRegistry, which might affect the behavior of inlined functions that rely on the current state of the registry.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 5,
+                "3": 9,
+                "4": 5,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    ObjectType TOP_LEVEL_PROTOTYPE =\n        new FunctionPrototypeType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    OBJECT_FUNCTION_TYPE.defineDeclaredProperty(\n        \"prototype\", TOP_LEVEL_PROTOTYPE, true, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createFunctionType(NO_TYPE, true, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n      createFunctionType(ALL_TYPE, true, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes built-in types by creating instances of various JavaScript primitive types and registering them with the type registry.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes built-in types which might be causing issues during the inlining process.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()",
+            "method_code": "```java\n  private void initializeRegistry() {\n    register(getNativeType(JSTypeNative.ARRAY_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_TYPE));\n    register(getNativeType(JSTypeNative.DATE_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE), \"Null\");\n    register(getNativeType(JSTypeNative.NUMBER_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.NUMBER_TYPE));\n    register(getNativeType(JSTypeNative.OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.ERROR_TYPE));\n    register(getNativeType(JSTypeNative.URI_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.EVAL_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.TYPE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.RANGE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REFERENCE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.SYNTAX_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REGEXP_TYPE));\n    register(getNativeType(JSTypeNative.STRING_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.STRING_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"Undefined\");\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"void\");\n    register(getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE), \"Function\");\n  }\n\n```",
+            "method_doc": "Registers built-in types with their respective names and namespaces.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it registers built-in types which might be causing issues during the inlining process if not handled correctly.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 0,
+                "3": 9,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtype(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType instanceof UnionType) {\n      UnionType union = (UnionType)thatType;\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // named types\n    if (thatType instanceof NamedType) {\n      return thisType.isSubtype(((NamedType)thatType).getReferencedType());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is a fundamental part of the type checking mechanism in the compiler. Any bugs in this method could have far-reaching consequences throughout the entire compilation process. The fact that the test case is failing suggests that there might be an issue with how the `this` context is being handled during the subtype check, which is critical for maintaining the integrity of the type system.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 0,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, boolean inExterns, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false, inExterns,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param inExterns {@code true} if this property was defined in an externs file. TightenTypes assumes that any function passed to an externs property could be called, so setting this incorrectly could result in live code being removed. @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves the definition of properties on object types, which could potentially affect the behavior of inlined functions that rely on the correct `this` context.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)",
+            "method_code": "```java\n  boolean hasOwnDeclaredProperty(String name) {\n    return hasOwnProperty(name) && isPropertyTypeDeclared(name);\n  }\n\n```",
+            "method_doc": " Whether the given property is declared on this object. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves checking if a property is declared on an object, which could be related to the issue of maintaining the correct `this` context during inlining.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+            "method_code": "```java\n  @Override\n  public boolean isConstructor() {\n    return kind == Kind.CONSTRUCTOR;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents a constructor.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the `isConstructor()` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents an interface.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the `isInterface()` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()",
+            "method_code": "```java\n  @Override\n  public boolean isFunctionType() {\n    return true;\n  }\n\n```",
+            "method_doc": "Always returns `true` indicating the type is a function type.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the correctness of the `isFunctionType()` method itself. The method always returns `true`, which is consistent with its intended behavior.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the `getNativeType` method itself. The `getNativeType` method simply retrieves a native type from the registry, which does not directly involve the `this` context.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)",
+            "method_code": "```java\n  JSType(JSTypeRegistry registry) {\n    this.registry = registry;\n  }\n\n```",
+            "method_doc": "This method initializes the \"registry\" field with the provided \"JSTypeRegistry\" object.",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the initialization of the `registry` field in the `JSType` constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+            "method_code": "```java\n  public static String createDelegateSuffix(String suffix) {\n    return \"(\" + suffix + \")\";\n  }\n\n```",
+            "method_doc": " Creates a suffix for a proxy delegate. @see #getNormalizedReferenceName ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of the `this` context in inlined functions, rather than the functionality of the `createDelegateSuffix` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public boolean shouldTraverse(\n        NodeTraversal nodeTraversal, Node n, Node parent) {\n      // Don't traverse into function bodies\n      // if we aren't inlining local functions.\n      return inlineLocalFunctions || nodeTraversal.inGlobalScope();\n    }\n\n```",
+            "method_doc": "This method determines whether to traverse into function bodies based on the inlining options. It returns `true` if local functions should be inlined or if the traversal is in the global scope.",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it controls whether function bodies should be traversed during the inlining process. If the method incorrectly decides not to traverse into function bodies when inlining local functions, it could lead to issues like the one observed in the test case, where the `preload_check_all.call(this)` method is not preserved during inlining.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public void visit(NodeTraversal t, Node n, Node parent) {\n      if ((t.inGlobalScope() && inlineGlobalFunctions)\n          || (!t.inGlobalScope() && inlineLocalFunctions)) {\n        findNamedFunctions(t, n, parent);\n\n        findFunctionExpressions(t, n);\n      }\n    }\n\n```",
+            "method_doc": "This method visits nodes to find candidate functions for inlining. It calls `findNamedFunctions` and `findFunctionExpressions`.",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for finding candidate functions for inlining. Given the observed issue with the `preload_check_all.call(this)` method not being preserved during inlining, it is reasonable to suspect that the logic within this method might be incorrectly handling the binding of the `this` context. By fixing the inlining logic in this method, we can ensure that the correct context is maintained when inlining functions.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::findNamedFunctions(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public void findNamedFunctions(NodeTraversal t, Node n, Node parent) {\n      if (!NodeUtil.isStatement(n)) {\n        // There aren't any interesting functions here.\n        return;\n      }\n\n      switch (n.getType()) {\n        // Functions expressions in the form of:\n        //   var fooFn = function(x) { return ... }\n        case Token.VAR:\n          Preconditions.checkState(n.hasOneChild());\n          Node nameNode = n.getFirstChild();\n          if (nameNode.getType() == Token.NAME && nameNode.hasChildren()\n              && nameNode.getFirstChild().getType() == Token.FUNCTION) {\n            maybeAddFunction(new FunctionVar(n), t.getModule());\n          }\n          break;\n\n        // Named functions\n        // function Foo(x) { return ... }\n        case Token.FUNCTION:\n          Preconditions.checkState(NodeUtil.isStatementBlock(parent)\n              || parent.getType() == Token.LABEL);\n          if (!NodeUtil.isFunctionExpression(n)) {\n            Function fn = new NamedFunction(n);\n            maybeAddFunction(fn, t.getModule());\n          }\n          break;\n      }\n    }\n\n```",
+            "method_doc": "This method identifies named functions and function expressions within a given node. It calls `maybeAddFunction` for each identified function.",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly deals with identifying and adding functions to the candidate list. Given the observed issue with the inlining process not preserving the `call` method, it's reasonable to suspect that the problem lies in how this method handles function calls and bindings.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::resolveInlineConflicts()",
+            "method_code": "```java\n  private void resolveInlineConflicts() {\n    for (FunctionState fs : fns.values()) {\n      resolveInlineConflictsForFunction(fs);\n    }\n  }\n\n```",
+            "method_doc": " Size base inlining calculations are thrown off when a function that is being inlined also contains calls to functions that are slated for inlining.  Specifically, a clone of the FUNCTION node tree is used when the function is inlined. Calls in this new tree are not included in the list of function references so they won't be inlined (which is what we want). Here we mark those functions as non-removable (as they will have new references in the cloned node trees).  This prevents a function that would only be inlined because it is referenced once from being inlined into multiple call sites because the calling function has been inlined in multiple locations or the function being removed while there are still references. ",
+            "class_name": "com.google.javascript.jscomp.InlineFunctions",
+            "class_doc": " Inlines functions that are divided into two types: \"direct call node replacement\" (aka \"direct\") and as a block of statements (aka block). Function that can be inlined \"directly\" functions consist of a single return statement, everything else is must be inlined as a \"block\". These functions must meet these general requirements: - it is not recursive - the function does not contain another function -- these may be intentional to to limit the scope of closures. - function is called only once OR the size of the inline function is smaller than the call itself. - the function name is not referenced in any other manner  \"directly\" inlined functions must meet these additional requirements: - consists of a single return statement  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Issue with Scope Management During Inlining\n**Description**: The `InlineFunctions` pass might have issues managing scopes during the inlining process, leading to incorrect handling of the `this` context in inlined functions.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that manages scopes and bindings during the inlining process.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`, while the expected output does. This suggests that there is an issue with scope management during the inlining process, causing the inlined function to lose the `this` context binding.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for resolving conflicts during the inlining process. Given the description of the method and its role in managing function references, it is plausible that issues within this method could lead to problems with scope management and the correct handling of the `this` context during inlining.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isSubtype(JSType)",
+            "method_code": "```java\n  @Override\n  public boolean isSubtype(JSType that) {\n    if (JSType.isSubtype(this, that)) {\n      return true;\n    }\n\n    if (that.isFunctionType()) {\n      if (((FunctionType) that).isInterface()) {\n        // Any function can be assigned to an interface function.\n        return true;\n      }\n      if (this.isInterface()) {\n        // An interface function cannot be assigned to anything.\n        return false;\n      }\n      // If functionA is a subtype of functionB, then their \"this\" types\n      // should be contravariant. However, this causes problems because\n      // of the way we enforce overrides. Because function(this:SubFoo)\n      // is not a subtype of function(this:Foo), our override check treats\n      // this as an error. It also screws up out standard method\n      // for aliasing constructors. Let's punt on all this for now.\n      // TODO(nicksantos): fix this.\n      FunctionType other = (FunctionType) that;\n      boolean treatThisTypesAsCovariant =\n        // If either one of these is a ctor, skip 'this' checking.\n        this.isConstructor() || other.isConstructor() ||\n\n        // An interface 'this'-type is non-restrictive.\n        // In practical terms, if C implements I, and I has a method m,\n        // then any m doesn't necessarily have to C#m's 'this'\n        // type doesn't need to match I.\n        (other.typeOfThis.getConstructor() != null &&\n             other.typeOfThis.getConstructor().isInterface()) ||\n\n        // If one of the 'this' types is covariant of the other,\n        // then we'll treat them as covariant (see comment above).\n        other.typeOfThis.isSubtype(this.typeOfThis) ||\n        this.typeOfThis.isSubtype(other.typeOfThis);\n      return treatThisTypesAsCovariant && this.call.isSubtype(other.call);\n    }\n\n    return getNativeType(JSTypeNative.FUNCTION_PROTOTYPE).isSubtype(that);\n  }\n\n```",
+            "method_doc": " A function is a subtype of another if their call methods are related via subtyping and {@code this} is a subtype of {@code that} with regard to the prototype chain. ",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves the logic for determining whether one function type is a subtype of another, which includes handling the `this` context. The issue described in the test failure seems to stem from a problem with how the `this` context is handled during inlining, and the `isSubtype` method is central to this logic.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::FunctionType(JSTypeRegistry,String,Node,ArrowType,ObjectType,String,boolean,boolean)",
+            "method_code": "```java\n  FunctionType(JSTypeRegistry registry, String name, Node source,\n      ArrowType arrowType, ObjectType typeOfThis,\n      String templateTypeName,  boolean isConstructor, boolean nativeType) {\n    super(registry, name,\n        registry.getNativeObjectType(JSTypeNative.FUNCTION_INSTANCE_TYPE),\n        nativeType);\n    Preconditions.checkArgument(source == null ||\n        Token.FUNCTION == source.getType());\n    Preconditions.checkNotNull(arrowType);\n    this.source = source;\n    this.kind = isConstructor ? Kind.CONSTRUCTOR : Kind.ORDINARY;\n    if (isConstructor) {\n      this.typeOfThis = typeOfThis != null ?\n          typeOfThis : new InstanceObjectType(registry, this, nativeType);\n    } else {\n      this.typeOfThis = typeOfThis != null ?\n          typeOfThis :\n          registry.getNativeObjectType(JSTypeNative.UNKNOWN_TYPE);\n    }\n    this.call = arrowType;\n    this.templateTypeName = templateTypeName;\n  }\n\n```",
+            "method_doc": "Creates an instance for a function that might be a constructor. */",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Issue with Scope Management During Inlining\n**Description**: The `InlineFunctions` pass might have issues managing scopes during the inlining process, leading to incorrect handling of the `this` context in inlined functions.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that manages scopes and bindings during the inlining process.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`, while the expected output does. This suggests that there is an issue with scope management during the inlining process, causing the inlined function to lose the `this` context binding.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for creating instances of function types, which could affect the scope management and `this` context during inlining.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::clearCachedValues()",
+            "method_code": "```java\n  @Override\n  public void clearCachedValues() {\n    super.clearCachedValues();\n\n    if (subTypes != null) {\n      for (FunctionType subType : subTypes) {\n        subType.clearCachedValues();\n      }\n    }\n\n    if (!isNativeObjectType()) {\n      if (hasInstanceType()) {\n        getInstanceType().clearCachedValues();\n      }\n\n      if (prototype != null) {\n        prototype.clearCachedValues();\n      }\n    }\n  }\n\n```",
+            "method_doc": "Clears cached values for the function type and its subtypes, prototype, and instance type. Calls `subType.clearCachedValues`, `getInstanceType.clearCachedValues`, and `prototype.clearCachedValues`.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the binding of the `this` context during the inlining process, rather than the caching of values within the function type.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoType()",
+            "method_code": "```java\n  public boolean isNoType() {\n    return false;\n  }\n\n```",
+            "method_doc": "This method does not call any other methods.",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Error in Function Replacement Logic\n**Description**: There might be an error in the logic used to replace function calls with their inlined versions in the `InlineFunctions` pass. This could result in the inlined function not being executed in the correct context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that replaces function calls with their inlined bodies.\n\n**Observation Support**: The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does. This suggests that there is an error in the function replacement logic, causing the inlined function to execute in the wrong context.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the context binding during function inlining, rather than the behavior of the `isNoType()` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoResolvedType()",
+            "method_code": "```java\n  public boolean isNoResolvedType() {\n    return false;\n  }\n\n```",
+            "method_doc": "This method does not call any other methods.",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Error in Function Replacement Logic\n**Description**: There might be an error in the logic used to replace function calls with their inlined versions in the `InlineFunctions` pass. This could result in the inlined function not being executed in the correct context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that replaces function calls with their inlined bodies.\n\n**Observation Support**: The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does. This suggests that there is an error in the function replacement logic, causing the inlined function to execute in the wrong context.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the context binding during function inlining, rather than the behavior of the `isNoResolvedType()` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()",
+            "method_code": "```java\n  @Override\n  public String getReferenceName() {\n    if (ownerFunction == null) {\n      return \"{...}.prototype\";\n    } else {\n      return ownerFunction.getReferenceName() + \".prototype\";\n    }\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType",
+            "class_doc": " Represents the prototype of a {@link FunctionType}. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incomplete Inlining of Function Calls\n**Description**: The `InlineFunctions` pass might be incomplete in its inlining of function calls, leading to partial or incorrect inlining of functions that depend on the `this` context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that handles the replacement of function calls with their inlined bodies.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`. This suggests that the inlining process did not fully replace the function call with its inlined body, leading to a loss of the `this` context binding.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the inlining of function calls within the JavaScript compiler, rather than the reference name of a function prototype.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()",
+            "method_code": "```java\n  @Override\n  public boolean hasReferenceName() {\n    return ownerFunction != null && ownerFunction.hasReferenceName();\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType",
+            "class_doc": " Represents the prototype of a {@link FunctionType}. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incomplete Inlining of Function Calls\n**Description**: The `InlineFunctions` pass might be incomplete in its inlining of function calls, leading to partial or incorrect inlining of functions that depend on the `this` context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that handles the replacement of function calls with their inlined bodies.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`. This suggests that the inlining process did not fully replace the function call with its inlined body, leading to a loss of the `this` context binding.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the inlining of function calls and the preservation of the `this` context, which is handled elsewhere in the compiler's passes rather than within the `hasReferenceName()` method of `FunctionPrototypeType`. The `hasReferenceName()` method appears to be correctly checking if the owner function has a reference name, which is unrelated to the specific problem encountered in the test.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::FunctionPrototypeType(JSTypeRegistry,FunctionType,ObjectType,boolean)",
+            "method_code": "```java\n  FunctionPrototypeType(JSTypeRegistry registry, FunctionType ownerFunction,\n      ObjectType implicitPrototype, boolean isNative) {\n    super(registry, null /* has no class name */, implicitPrototype,\n        isNative);\n    this.ownerFunction = ownerFunction;\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType",
+            "class_doc": " Represents the prototype of a {@link FunctionType}. ",
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "test_failure_causes": "Incomplete Inlining of Function Calls\n**Description**: The `InlineFunctions` pass might be incomplete in its inlining of function calls, leading to partial or incorrect inlining of functions that depend on the `this` context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that handles the replacement of function calls with their inlined bodies.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`. This suggests that the inlining process did not fully replace the function call with its inlined body, leading to a loss of the `this` context binding.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the inlining of function calls and the preservation of the `this` context, which is handled elsewhere in the compiler's passes rather than within the constructor of `FunctionPrototypeType`. The constructor itself does not directly involve function inlining or `this` context handling.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    Preconditions.checkState(compiler.getLifeCycleStage().isNormalized());\n\n    NodeTraversal.traverse(compiler, root, new FindCandidateFunctions());\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n    NodeTraversal.traverse(compiler, root,\n       new FindCandidatesReferences(fns, anonFns));\n    trimCanidatesNotMeetingMinimumRequirements();\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n\n    // Store the set of function names eligible for inlining and use this to\n    // prevent function names from being moved into temporaries during\n    // expression decomposition. If this movement were allowed it would prevent\n    // the Inline callback from finding the function calls.\n    //\n    // This pass already assumes these are constants, so this is safe for anyone\n    // using function inlining.\n    //\n    Set<String> fnNames = Sets.newHashSet(fns.keySet());\n    injector.setKnownConstants(fnNames);\n\n    trimCanidatesUsingOnCost();\n    if (fns.isEmpty()) {\n      return;  // Nothing left to do.\n    }\n    resolveInlineConflicts();\n    decomposeExpressions(fnNames);\n    NodeTraversal.traverse(compiler, root,\n        new CallVisitor(\n            fns, anonFns, new Inline(injector, specializationState)));\n\n    removeInlinedFunctions();\n  }\n\n```",
+            "method_doc": "This method processes the JavaScript AST to identify and inline candidate functions. It calls methods like `FindCandidateFunctions`, `FindCandidatesReferences`, `trimCanidatesNotMeetingMinimumRequirements`, `trimCanidatesUsingOnCost`, `resolveInlineConflicts`, `decomposeExpressions`, and `CallVisitor` to perform various steps of the inlining process."
+        },
+        "com.google.javascript.jscomp.InlineFunctions::maybeAddFunction(Function,JSModule)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::maybeAddFunction(Function,JSModule)",
+            "method_code": "```java\n  private void maybeAddFunction(Function fn, JSModule module) {\n    String name = fn.getName();\n    FunctionState fs = getOrCreateFunctionState(name);\n\n    // TODO(johnlenz): Maybe \"smarten\" FunctionState by adding this logic\n    // to it?\n\n    // If the function has multiple definitions, don't inline it.\n    if (fs.hasExistingFunctionDefinition()) {\n      fs.setInline(false);\n    } else {\n      // verify the function hasn't already been marked as \"don't inline\"\n      if (fs.canInline()) {\n        // store it for use when inlining.\n        fs.setFn(fn);\n        if (injector.isDirectCallNodeReplacementPossible(\n            fn.getFunctionNode())) {\n          fs.inlineDirectly(true);\n        }\n\n        // verify the function meets all the requirements.\n        // TODO(johnlenz): Minimum requirement checks are about 5% of the\n        // runtime cost of this pass.\n        if (!isCandidateFunction(fn)) {\n          // It doesn't meet the requirements.\n          fs.setInline(false);\n        }\n\n        // Set the module and gather names that need temporaries.\n        if (fs.canInline()) {\n          fs.setModule(module);\n\n          Node fnNode = fn.getFunctionNode();\n          Set<String> namesToAlias =\n              FunctionArgumentInjector.findModifiedParameters(fnNode);\n          if (!namesToAlias.isEmpty()) {\n            fs.inlineDirectly(false);\n            fs.setNamesToAlias(namesToAlias);\n          }\n\n          Node block = NodeUtil.getFunctionBody(fnNode);\n          if (NodeUtil.referencesThis(block)) {\n            fs.setReferencesThis(true);\n          }\n\n          if (NodeUtil.containsFunction(block)) {\n            fs.setHasInnerFunctions(true);\n            // If there are inner functions, we can inline into global scope\n            // if there are no local vars or named functions.\n            // TODO(johnlenz): this can be improved by looking at the possible\n            // values for locals.  If there are simple values, or constants\n            // we could still inline.\n            if (hasLocalNames(fnNode)) {\n              fs.setInline(false);\n            }\n          }\n        }\n\n        // Check if block inlining is allowed.\n        if (fs.canInline() && !fs.canInlineDirectly()) {\n          if (!blockFunctionInliningEnabled) {\n            fs.setInline(false);\n          }\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Updates the FunctionState object for the given function. Checks if the given function matches the criteria for an inlinable function. "
+        },
+        "com.google.javascript.jscomp.InlineFunctions::isCandidateFunction(Function)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::isCandidateFunction(Function)",
+            "method_code": "```java\n  private boolean isCandidateFunction(Function fn) {\n    // Don't inline exported functions.\n    String fnName = fn.getName();\n    if (compiler.getCodingConvention().isExported(fnName)) {\n      // TODO(johnlenz): Should we allow internal references to be inlined?\n      // An exported name can be replaced externally, any inlined instance\n      // would not reflect this change.\n      // To allow inlining we need to be able to distinguish between exports\n      // that are used in a read-only fashion and those that can be replaced\n      // by external definitions.\n      return false;\n    }\n\n    // Don't inline this special function\n    if (RenameProperties.RENAME_PROPERTY_FUNCTION_NAME.equals(fnName)) {\n      return false;\n    }\n\n    // Don't inline if we are specializing and the function can't be fixed up\n    if (specializationState != null &&\n        !specializationState.canFixupFunction(fn.getFunctionNode())) {\n      return false;\n    }\n\n    Node fnNode = fn.getFunctionNode();\n    return injector.doesFunctionMeetMinimumRequirements(fnName, fnNode);\n  }\n\n```",
+            "method_doc": " Checks if the given function matches the criteria for an inlinable function. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    ObjectType TOP_LEVEL_PROTOTYPE =\n        new FunctionPrototypeType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    OBJECT_FUNCTION_TYPE.defineDeclaredProperty(\n        \"prototype\", TOP_LEVEL_PROTOTYPE, true, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createFunctionType(NO_TYPE, true, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n      createFunctionType(ALL_TYPE, true, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes built-in types by creating instances of various JavaScript primitive types and registering them with the type registry."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()",
+            "method_code": "```java\n  private void initializeRegistry() {\n    register(getNativeType(JSTypeNative.ARRAY_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_TYPE));\n    register(getNativeType(JSTypeNative.DATE_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE), \"Null\");\n    register(getNativeType(JSTypeNative.NUMBER_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.NUMBER_TYPE));\n    register(getNativeType(JSTypeNative.OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.ERROR_TYPE));\n    register(getNativeType(JSTypeNative.URI_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.EVAL_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.TYPE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.RANGE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REFERENCE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.SYNTAX_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REGEXP_TYPE));\n    register(getNativeType(JSTypeNative.STRING_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.STRING_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"Undefined\");\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"void\");\n    register(getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE), \"Function\");\n  }\n\n```",
+            "method_doc": "Registers built-in types with their respective names and namespaces."
+        },
+        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtype(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType instanceof UnionType) {\n      UnionType union = (UnionType)thatType;\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // named types\n    if (thatType instanceof NamedType) {\n      return thisType.isSubtype(((NamedType)thatType).getReferencedType());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, boolean inExterns, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false, inExterns,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param inExterns {@code true} if this property was defined in an externs file. TightenTypes assumes that any function passed to an externs property could be called, so setting this incorrectly could result in live code being removed. @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)",
+            "method_code": "```java\n  boolean hasOwnDeclaredProperty(String name) {\n    return hasOwnProperty(name) && isPropertyTypeDeclared(name);\n  }\n\n```",
+            "method_doc": " Whether the given property is declared on this object. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+            "method_code": "```java\n  @Override\n  public boolean isConstructor() {\n    return kind == Kind.CONSTRUCTOR;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents a constructor."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isInterface()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents an interface."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()",
+            "method_code": "```java\n  @Override\n  public boolean isFunctionType() {\n    return true;\n  }\n\n```",
+            "method_doc": "Always returns `true` indicating the type is a function type."
+        },
+        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. "
+        },
+        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)",
+            "method_code": "```java\n  JSType(JSTypeRegistry registry) {\n    this.registry = registry;\n  }\n\n```",
+            "method_doc": "This method initializes the \"registry\" field with the provided \"JSTypeRegistry\" object."
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+            "method_code": "```java\n  public static String createDelegateSuffix(String suffix) {\n    return \"(\" + suffix + \")\";\n  }\n\n```",
+            "method_doc": " Creates a suffix for a proxy delegate. @see #getNormalizedReferenceName "
+        },
+        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public boolean shouldTraverse(\n        NodeTraversal nodeTraversal, Node n, Node parent) {\n      // Don't traverse into function bodies\n      // if we aren't inlining local functions.\n      return inlineLocalFunctions || nodeTraversal.inGlobalScope();\n    }\n\n```",
+            "method_doc": "This method determines whether to traverse into function bodies based on the inlining options. It returns `true` if local functions should be inlined or if the traversal is in the global scope."
+        },
+        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public void visit(NodeTraversal t, Node n, Node parent) {\n      if ((t.inGlobalScope() && inlineGlobalFunctions)\n          || (!t.inGlobalScope() && inlineLocalFunctions)) {\n        findNamedFunctions(t, n, parent);\n\n        findFunctionExpressions(t, n);\n      }\n    }\n\n```",
+            "method_doc": "This method visits nodes to find candidate functions for inlining. It calls `findNamedFunctions` and `findFunctionExpressions`."
+        },
+        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::findNamedFunctions(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::findNamedFunctions(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public void findNamedFunctions(NodeTraversal t, Node n, Node parent) {\n      if (!NodeUtil.isStatement(n)) {\n        // There aren't any interesting functions here.\n        return;\n      }\n\n      switch (n.getType()) {\n        // Functions expressions in the form of:\n        //   var fooFn = function(x) { return ... }\n        case Token.VAR:\n          Preconditions.checkState(n.hasOneChild());\n          Node nameNode = n.getFirstChild();\n          if (nameNode.getType() == Token.NAME && nameNode.hasChildren()\n              && nameNode.getFirstChild().getType() == Token.FUNCTION) {\n            maybeAddFunction(new FunctionVar(n), t.getModule());\n          }\n          break;\n\n        // Named functions\n        // function Foo(x) { return ... }\n        case Token.FUNCTION:\n          Preconditions.checkState(NodeUtil.isStatementBlock(parent)\n              || parent.getType() == Token.LABEL);\n          if (!NodeUtil.isFunctionExpression(n)) {\n            Function fn = new NamedFunction(n);\n            maybeAddFunction(fn, t.getModule());\n          }\n          break;\n      }\n    }\n\n```",
+            "method_doc": "This method identifies named functions and function expressions within a given node. It calls `maybeAddFunction` for each identified function."
+        },
+        "com.google.javascript.jscomp.InlineFunctions::resolveInlineConflicts()": {
+            "method_name": "com.google.javascript.jscomp.InlineFunctions::resolveInlineConflicts()",
+            "method_code": "```java\n  private void resolveInlineConflicts() {\n    for (FunctionState fs : fns.values()) {\n      resolveInlineConflictsForFunction(fs);\n    }\n  }\n\n```",
+            "method_doc": " Size base inlining calculations are thrown off when a function that is being inlined also contains calls to functions that are slated for inlining.  Specifically, a clone of the FUNCTION node tree is used when the function is inlined. Calls in this new tree are not included in the list of function references so they won't be inlined (which is what we want). Here we mark those functions as non-removable (as they will have new references in the cloned node trees).  This prevents a function that would only be inlined because it is referenced once from being inlined into multiple call sites because the calling function has been inlined in multiple locations or the function being removed while there are still references. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isSubtype(JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isSubtype(JSType)",
+            "method_code": "```java\n  @Override\n  public boolean isSubtype(JSType that) {\n    if (JSType.isSubtype(this, that)) {\n      return true;\n    }\n\n    if (that.isFunctionType()) {\n      if (((FunctionType) that).isInterface()) {\n        // Any function can be assigned to an interface function.\n        return true;\n      }\n      if (this.isInterface()) {\n        // An interface function cannot be assigned to anything.\n        return false;\n      }\n      // If functionA is a subtype of functionB, then their \"this\" types\n      // should be contravariant. However, this causes problems because\n      // of the way we enforce overrides. Because function(this:SubFoo)\n      // is not a subtype of function(this:Foo), our override check treats\n      // this as an error. It also screws up out standard method\n      // for aliasing constructors. Let's punt on all this for now.\n      // TODO(nicksantos): fix this.\n      FunctionType other = (FunctionType) that;\n      boolean treatThisTypesAsCovariant =\n        // If either one of these is a ctor, skip 'this' checking.\n        this.isConstructor() || other.isConstructor() ||\n\n        // An interface 'this'-type is non-restrictive.\n        // In practical terms, if C implements I, and I has a method m,\n        // then any m doesn't necessarily have to C#m's 'this'\n        // type doesn't need to match I.\n        (other.typeOfThis.getConstructor() != null &&\n             other.typeOfThis.getConstructor().isInterface()) ||\n\n        // If one of the 'this' types is covariant of the other,\n        // then we'll treat them as covariant (see comment above).\n        other.typeOfThis.isSubtype(this.typeOfThis) ||\n        this.typeOfThis.isSubtype(other.typeOfThis);\n      return treatThisTypesAsCovariant && this.call.isSubtype(other.call);\n    }\n\n    return getNativeType(JSTypeNative.FUNCTION_PROTOTYPE).isSubtype(that);\n  }\n\n```",
+            "method_doc": " A function is a subtype of another if their call methods are related via subtyping and {@code this} is a subtype of {@code that} with regard to the prototype chain. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::FunctionType(JSTypeRegistry,String,Node,ArrowType,ObjectType,String,boolean,boolean)": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::FunctionType(JSTypeRegistry,String,Node,ArrowType,ObjectType,String,boolean,boolean)",
+            "method_code": "```java\n  FunctionType(JSTypeRegistry registry, String name, Node source,\n      ArrowType arrowType, ObjectType typeOfThis,\n      String templateTypeName,  boolean isConstructor, boolean nativeType) {\n    super(registry, name,\n        registry.getNativeObjectType(JSTypeNative.FUNCTION_INSTANCE_TYPE),\n        nativeType);\n    Preconditions.checkArgument(source == null ||\n        Token.FUNCTION == source.getType());\n    Preconditions.checkNotNull(arrowType);\n    this.source = source;\n    this.kind = isConstructor ? Kind.CONSTRUCTOR : Kind.ORDINARY;\n    if (isConstructor) {\n      this.typeOfThis = typeOfThis != null ?\n          typeOfThis : new InstanceObjectType(registry, this, nativeType);\n    } else {\n      this.typeOfThis = typeOfThis != null ?\n          typeOfThis :\n          registry.getNativeObjectType(JSTypeNative.UNKNOWN_TYPE);\n    }\n    this.call = arrowType;\n    this.templateTypeName = templateTypeName;\n  }\n\n```",
+            "method_doc": "Creates an instance for a function that might be a constructor. */"
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::clearCachedValues()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::clearCachedValues()",
+            "method_code": "```java\n  @Override\n  public void clearCachedValues() {\n    super.clearCachedValues();\n\n    if (subTypes != null) {\n      for (FunctionType subType : subTypes) {\n        subType.clearCachedValues();\n      }\n    }\n\n    if (!isNativeObjectType()) {\n      if (hasInstanceType()) {\n        getInstanceType().clearCachedValues();\n      }\n\n      if (prototype != null) {\n        prototype.clearCachedValues();\n      }\n    }\n  }\n\n```",
+            "method_doc": "Clears cached values for the function type and its subtypes, prototype, and instance type. Calls `subType.clearCachedValues`, `getInstanceType.clearCachedValues`, and `prototype.clearCachedValues`."
+        },
+        "com.google.javascript.rhino.jstype.JSType::isNoType()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoType()",
+            "method_code": "```java\n  public boolean isNoType() {\n    return false;\n  }\n\n```",
+            "method_doc": "This method does not call any other methods."
+        },
+        "com.google.javascript.rhino.jstype.JSType::isNoResolvedType()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoResolvedType()",
+            "method_code": "```java\n  public boolean isNoResolvedType() {\n    return false;\n  }\n\n```",
+            "method_doc": "This method does not call any other methods."
+        },
+        "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()",
+            "method_code": "```java\n  @Override\n  public String getReferenceName() {\n    if (ownerFunction == null) {\n      return \"{...}.prototype\";\n    } else {\n      return ownerFunction.getReferenceName() + \".prototype\";\n    }\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()",
+            "method_code": "```java\n  @Override\n  public boolean hasReferenceName() {\n    return ownerFunction != null && ownerFunction.hasReferenceName();\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.rhino.jstype.FunctionPrototypeType::FunctionPrototypeType(JSTypeRegistry,FunctionType,ObjectType,boolean)": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionPrototypeType::FunctionPrototypeType(JSTypeRegistry,FunctionType,ObjectType,boolean)",
+            "method_code": "```java\n  FunctionPrototypeType(JSTypeRegistry registry, FunctionType ownerFunction,\n      ObjectType implicitPrototype, boolean isNative) {\n    super(registry, null /* has no class name */, implicitPrototype,\n        isNative);\n    this.ownerFunction = ownerFunction;\n  }\n\n```",
+            "method_doc": ""
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.InlineFunctionsTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of `this` Context in Inlined Functions\n**Description**: The `InlineFunctions` pass may not be correctly handling the `this` context when inlining functions that rely on it. This could lead to issues where the inlined function does not maintain the correct reference to `this`.\n\n**Location**: Likely within the `InlineFunctions` pass implementation, specifically in how it processes function calls and bindings.\n\n**Observation Support**: The stack trace points to an assertion failure in the `CompilerTestCase` class, indicating that the actual result does not match the expected output. The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does.",
+                "Missing Function Call Binding in Inlining Process\n**Description**: When inlining functions, the `InlineFunctions` pass might be missing the necessary steps to bind the `this` context properly. This could result in the inlined function executing in the global scope instead of the intended object context.\n\n**Location**: Within the `InlineFunctions` pass, particularly in the logic responsible for replacing function calls with their inlined versions.\n\n**Observation Support**: The test output highlights a discrepancy between the expected and actual AST structures. Specifically, the expected output includes a call to `preload_check_all.call(this)`, whereas the actual output only contains a direct call to `$(this).data('checkboxes')`. This suggests that the inlining process did not correctly preserve the `call` method.",
+                "Incomplete Inlining of Function Calls\n**Description**: The `InlineFunctions` pass might be incomplete in its inlining of function calls, leading to partial or incorrect inlining of functions that depend on the `this` context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that handles the replacement of function calls with their inlined bodies.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`. This suggests that the inlining process did not fully replace the function call with its inlined body, leading to a loss of the `this` context binding.",
+                "Error in Function Replacement Logic\n**Description**: There might be an error in the logic used to replace function calls with their inlined versions in the `InlineFunctions` pass. This could result in the inlined function not being executed in the correct context.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that replaces function calls with their inlined bodies.\n\n**Observation Support**: The test output shows that the inlined version of `preload_check_all` does not correctly bind the `this` context, while the expected output does. This suggests that there is an error in the function replacement logic, causing the inlined function to execute in the wrong context.",
+                "Issue with Scope Management During Inlining\n**Description**: The `InlineFunctions` pass might have issues managing scopes during the inlining process, leading to incorrect handling of the `this` context in inlined functions.\n\n**Location**: Within the `InlineFunctions` pass, specifically in the logic that manages scopes and bindings during the inlining process.\n\n**Observation Support**: The test output indicates that the inlined version of `preload_check_all` is missing the necessary call to `preload_check_all.call(this)`, while the expected output does. This suggests that there is an issue with scope management during the inlining process, causing the inlined function to lose the `this` context binding."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    9.0
+                ],
+                "2": [
+                    9,
+                    9.0
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    9.0
+                ],
+                "5": [
+                    9,
+                    9.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.InlineFunctions",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.ObjectType"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.InlineFunctions",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.ObjectType"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.InlineFunctions",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.InlineFunctions",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.InlineFunctions",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.InlineFunctions": [
+                        "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions::maybeAddFunction(Function,JSModule)",
+                        "com.google.javascript.jscomp.InlineFunctions::isCandidateFunction(Function)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.InlineFunctions": [
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::findNamedFunctions(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isSubtype(JSType)",
+                        "com.google.javascript.rhino.jstype.FunctionType::clearCachedValues()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.InlineFunctions": [
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions$FindCandidateFunctions::findNamedFunctions(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType": [
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()",
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()",
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::FunctionPrototypeType(JSTypeRegistry,FunctionType,ObjectType,boolean)"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.InlineFunctions": [
+                        "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions::maybeAddFunction(Function,JSModule)",
+                        "com.google.javascript.jscomp.InlineFunctions::isCandidateFunction(Function)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isNoType()",
+                        "com.google.javascript.rhino.jstype.JSType::isNoResolvedType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType": [
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()",
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.InlineFunctions": [
+                        "com.google.javascript.jscomp.InlineFunctions::process(Node,Node)",
+                        "com.google.javascript.jscomp.InlineFunctions::resolveInlineConflicts()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::FunctionType(JSTypeRegistry,String,Node,ArrowType,ObjectType,String,boolean,boolean)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionPrototypeType": [
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::getReferenceName()",
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::hasReferenceName()",
+                        "com.google.javascript.rhino.jstype.FunctionPrototypeType::FunctionPrototypeType(JSTypeRegistry,FunctionType,ObjectType,boolean)"
+                    ]
+                }
+            }
+        }
+    ]
+}

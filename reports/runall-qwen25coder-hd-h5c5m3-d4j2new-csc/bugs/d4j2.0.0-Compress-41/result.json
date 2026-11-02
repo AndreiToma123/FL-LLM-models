@@ -1,0 +1,1280 @@
+{
+    "buggy_classes": [
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+        "org.apache.commons.compress.archivers.zip.ZipLong",
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+        "org.apache.commons.compress.utils.IOUtils",
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+        "org.apache.commons.compress.archivers.ArchiveInputStream"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+            "method_code": "```java\n    public ZipArchiveEntry getNextZipEntry() throws IOException {\n        boolean firstEntry = true;\n        if (closed || hitCentralDirectory) {\n            return null;\n        }\n        if (current != null) {\n            closeEntry();\n            firstEntry = false;\n        }\n\n        try {\n            if (firstEntry) {\n                // split archives have a special signature before the\n                // first local file header - look for it and fail with\n                // the appropriate error message if this is a split\n                // archive.\n                readFirstLocalFileHeader(LFH_BUF);\n            } else {\n                readFully(LFH_BUF);\n            }\n        } catch (final EOFException e) {\n            return null;\n        }\n\n        final ZipLong sig = new ZipLong(LFH_BUF);\n        if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {\n            hitCentralDirectory = true;\n            skipRemainderOfArchive();\n        }\n        if (!sig.equals(ZipLong.LFH_SIG)) {\n            return null;\n        }\n\n        int off = WORD;\n        current = new CurrentEntry();\n\n        final int versionMadeBy = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n        current.entry.setPlatform((versionMadeBy >> ZipFile.BYTE_SHIFT) & ZipFile.NIBLET_MASK);\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(LFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding = hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        current.hasDataDescriptor = gpFlag.usesDataDescriptor();\n        current.entry.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        current.entry.setMethod(ZipShort.getValue(LFH_BUF, off));\n        off += SHORT;\n\n        final long time = ZipUtil.dosToJavaTime(ZipLong.getValue(LFH_BUF, off));\n        current.entry.setTime(time);\n        off += WORD;\n\n        ZipLong size = null, cSize = null;\n        if (!current.hasDataDescriptor) {\n            current.entry.setCrc(ZipLong.getValue(LFH_BUF, off));\n            off += WORD;\n\n            cSize = new ZipLong(LFH_BUF, off);\n            off += WORD;\n\n            size = new ZipLong(LFH_BUF, off);\n            off += WORD;\n        } else {\n            off += 3 * WORD;\n        }\n\n        final int fileNameLen = ZipShort.getValue(LFH_BUF, off);\n\n        off += SHORT;\n\n        final int extraLen = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n\n        final byte[] fileName = new byte[fileNameLen];\n        readFully(fileName);\n        current.entry.setName(entryEncoding.decode(fileName), fileName);\n\n        final byte[] extraData = new byte[extraLen];\n        readFully(extraData);\n        current.entry.setExtra(extraData);\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            ZipUtil.setNameAndCommentFromExtraFields(current.entry, fileName, null);\n        }\n\n        processZip64Extra(size, cSize);\n\n        if (current.entry.getCompressedSize() != ArchiveEntry.SIZE_UNKNOWN) {\n            if (current.entry.getMethod() == ZipMethod.UNSHRINKING.getCode()) {\n                current.in = new UnshrinkingInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.IMPLODING.getCode()) {\n                current.in = new ExplodingInputStream(\n                        current.entry.getGeneralPurposeBit().getSlidingDictionarySize(),\n                        current.entry.getGeneralPurposeBit().getNumberOfShannonFanoTrees(),\n                        new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.BZIP2.getCode()) {\n                current.in = new BZip2CompressorInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            }\n        }\n        \n        entriesRead++;\n        return current.entry;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the extraction of zip entries, which could lead to issues when dealing with nested archives. The failure in the test indicates that there might be a problem with how nested archives are being processed, and fixing the `getNextZipEntry()` method could resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public ZipArchiveInputStream(final InputStream inputStream) {\n        this(inputStream, ZipEncodingHelper.UTF8);\n    }\n\n```",
+            "method_doc": " Create an instance using UTF-8 encoding @param inputStream the stream to wrap ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the ZipArchiveInputStream and sets up the necessary state. Any issues related to the initialization process would likely manifest here.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 7,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+            "method_code": "```java\n    private void readFirstLocalFileHeader(final byte[] lfh) throws IOException {\n        readFully(lfh);\n        final ZipLong sig = new ZipLong(lfh);\n        if (sig.equals(ZipLong.DD_SIG)) {\n            throw new UnsupportedZipFeatureException(UnsupportedZipFeatureException.Feature.SPLITTING);\n        }\n\n        if (sig.equals(ZipLong.SINGLE_SEGMENT_SPLIT_MARKER)) {\n            // The archive is not really split as only one segment was\n            // needed in the end.  Just skip over the marker.\n            final byte[] missedLfhBytes = new byte[4];\n            readFully(missedLfhBytes);\n            System.arraycopy(lfh, 4, lfh, 0, LFH_LEN - 4);\n            System.arraycopy(missedLfhBytes, 0, lfh, LFH_LEN - 4, 4);\n        }\n    }\n\n```",
+            "method_doc": " Fills the given array with the first local file header and deals with splitting/spanning markers that may prefix the first LFH. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the reading and parsing of the first local file header, which is crucial for detecting invalid entries. The test failure indicates that there might be an issue with how this method processes certain types of zip entries, leading to incorrect behavior or exceptions that are not properly handled.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+            "method_code": "```java\n    @Override\n    public ArchiveEntry getNextEntry() throws IOException {\n        return getNextZipEntry();\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it is responsible for retrieving the next entry in the ZIP archive. The issue described involves nested archives, and the problem might lie in how the nested archive streams are being handled or closed. Fixing the implementation of `getNextEntry()` could resolve the issue by ensuring proper management of nested archive streams.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+            "method_code": "```java\n    @Override\n    public void setExtra(final byte[] extra) throws RuntimeException {\n        try {\n            final ZipExtraField[] local =\n                ExtraFieldUtils.parse(extra, true,\n                                      ExtraFieldUtils.UnparseableExtraField.READ);\n            mergeExtraFields(local, true);\n        } catch (final ZipException e) {\n            // actually this is not possible as of Commons Compress 1.1\n            throw new RuntimeException(\"Error parsing extra fields for entry: \"\n                                       + getName() + \" - \" + e.getMessage(), e);\n        }\n    }\n\n```",
+            "method_doc": " Parses the given bytes as extra field data and consumes any unparseable data as an {@link UnparseableExtraFieldData} instance. @param extra an array of bytes to be parsed into extra fields @throws RuntimeException if the bytes cannot be parsed @throws RuntimeException on error ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\">APPNOTE.TXT</a>:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly handles the parsing of extra fields, which could potentially lead to errors when dealing with malformed extra data. The fact that it throws a `RuntimeException` if the bytes cannot be parsed suggests that there might be issues with how it handles unexpected data, which could explain why multiple `ZipException`s are being thrown during nested archive extraction.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)",
+            "method_code": "```java\n    public static int readFully(final InputStream input, final byte[] b, final int offset, final int len)\n        throws IOException {\n        if (len < 0 || offset < 0 || len + offset > b.length) {\n            throw new IndexOutOfBoundsException();\n        }\n        int count = 0, x = 0;\n        while (count != len) {\n            x = input.read(b, offset + count, len - count);\n            if (x == -1) {\n                break;\n            }\n            count += x;\n        }\n        return count;\n    }\n\n```",
+            "method_doc": " Reads as much from input as possible to fill the given array with the given amount of bytes.  <p>This method may invoke read repeatedly to read the bytes and only read less bytes than the requested length if the end of the stream has been reached.</p>  @param input stream to read from @param b buffer to fill @param offset offset into the buffer to start filling at @param len of bytes to read @return the number of bytes actually read @throws IOException if an I/O error has occurred ",
+            "class_name": "org.apache.commons.compress.utils.IOUtils",
+            "class_doc": " Utility functions @Immutable (has mutable data but it is write-only) ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be part of the issue, but it's not the primary culprit. The problem seems to stem from improper handling of nested archives rather than the readFully method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+            "method_code": "```java\n    public static int readFully(final InputStream input, final byte[] b) throws IOException {\n        return readFully(input, b, 0, b.length);\n    }\n\n```",
+            "method_doc": " Reads as much from input as possible to fill the given array.  <p>This method may invoke read repeatedly to fill the array and only read less bytes than the length of the array if the end of the stream has been reached.</p>  @param input stream to read from @param b buffer to fill @return the number of bytes actually read @throws IOException on error ",
+            "class_name": "org.apache.commons.compress.utils.IOUtils",
+            "class_doc": " Utility functions @Immutable (has mutable data but it is write-only) ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles reading from an input stream, which could potentially interact with other parts of the system in ways that might affect the test outcome. However, without further context about how this method interacts with the rest of the codebase, it's difficult to pinpoint exactly where the issue lies.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+            "method_code": "```java\n    public static long getValue(final byte[] bytes, final int offset) {\n        long value = (bytes[offset + BYTE_3] << BYTE_3_SHIFT) & BYTE_3_MASK;\n        value += (bytes[offset + BYTE_2] << BYTE_2_SHIFT) & BYTE_2_MASK;\n        value += (bytes[offset + BYTE_1] << BYTE_1_SHIFT) & BYTE_1_MASK;\n        value += (bytes[offset] & BYTE_MASK);\n        return value;\n    }\n\n```",
+            "method_doc": " Helper method to get the value as a Java long from four bytes starting at given array offset @param bytes the array of bytes @param offset the offset to start @return the corresponding Java long value ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly handles the conversion of bytes to a long value, which could potentially be affected by issues related to data integrity or stream handling. However, without further context about the root cause of the test failure, it's difficult to pinpoint if this method is the exact source of the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "2": 7,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+            "method_code": "```java\n    public ZipLong (final byte[] bytes) {\n        this(bytes, 0);\n    }\n\n```",
+            "method_doc": " Create instance from bytes. @param bytes the bytes to store as a ZipLong ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes a `ZipLong` object from a byte array. However, the issue described in the test failure seems to be related to the handling of invalid entries within the `ZipArchiveInputStream`. While the `ZipLong` constructor itself does not directly handle input streams, its misuse or incorrect state could indirectly contribute to the problem. Further investigation into how `ZipLong` objects are used within the `ZipArchiveInputStream` and how they interact with invalid data would be necessary to pinpoint the exact cause.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)",
+            "method_code": "```java\n    public ZipLong (final byte[] bytes, final int offset) {\n        value = ZipLong.getValue(bytes, offset);\n    }\n\n```",
+            "method_doc": " Create instance from the four bytes starting at offset. @param bytes the bytes to store as a ZipLong @param offset the offset to start ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipLong",
+            "class_doc": " Utility class that represents a four byte integer with conversion rules for the big endian byte order of ZIP files. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves parsing bytes into a long value, which can be prone to errors if the input data is invalid. However, without further context about the specific issues causing the test failures, it's difficult to pinpoint exactly why this method is problematic.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(final String name) {\n \n        // fallback encoding is good enough for UTF-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        final SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            final Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (final UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles different encodings and might not correctly handle invalid input, which could affect the behavior of the `ZipArchiveInputStream`. However, it is unlikely to be the direct cause of the specific test failure mentioned.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String charsetName) {\n        if (charsetName == null) {\n            // check platform's default encoding\n            charsetName = Charset.defaultCharset().name();\n        }\n        if (Charsets.UTF_8.name().equalsIgnoreCase(charsetName)) {\n            return true;\n        }\n        for (final String alias : Charsets.UTF_8.aliases()) {\n            if (alias.equalsIgnoreCase(charsetName)) {\n                return true;\n            }\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Returns whether a given encoding is UTF-8. If the given name is null, then check the platform's default encoding.  @param charsetName If the given name is null, then check the platform's default encoding. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+            "class_doc": " Static helper functions for robustly encoding filenames in zip files.  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves checking character encodings, which can sometimes lead to issues when dealing with different platforms or file formats. However, without further context about the specific issues encountered in the test, it's difficult to pinpoint exactly why this method might be causing problems.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveInputStream::count(int)",
+            "method_code": "```java\n    protected void count(final int read) {\n        count((long) read);\n    }\n\n```",
+            "method_doc": " Increments the counter of already read bytes. Doesn't increment if the EOF has been hit (read == -1)  @param read the number of bytes read ",
+            "class_name": "org.apache.commons.compress.archivers.ArchiveInputStream",
+            "class_doc": " Archive input streams <b>MUST</b> override the  {@link #read(byte[], int, int)} - or {@link #read()} - method so that reading from the stream generates EOF for the end of data in each entry as well as at the end of the file proper. <p> The {@link #getNextEntry()} method is used to reset the input stream ready for reading the data from the next entry. <p> The input stream classes must also implement a method with the signature: <pre> public static boolean matches(byte[] signature, int length) </pre> which is used by the {@link ArchiveStreamFactory} to autodetect the archive type from the first few bytes of a stream.  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it increments the byte counter, which could potentially affect the state of the input stream. However, without further context, it's unclear if this directly contributes to the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveInputStream::count(long)",
+            "method_code": "```java\n    protected void count(final long read) {\n        if (read != -1) {\n            bytesRead = bytesRead + read;\n        }\n    }\n\n```",
+            "method_doc": " Increments the counter of already read bytes. Doesn't increment if the EOF has been hit (read == -1)  @param read the number of bytes read @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.ArchiveInputStream",
+            "class_doc": " Archive input streams <b>MUST</b> override the  {@link #read(byte[], int, int)} - or {@link #read()} - method so that reading from the stream generates EOF for the end of data in each entry as well as at the end of the file proper. <p> The {@link #getNextEntry()} method is used to reset the input stream ready for reading the data from the next entry. <p> The input stream classes must also implement a method with the signature: <pre> public static boolean matches(byte[] signature, int length) </pre> which is used by the {@link ArchiveStreamFactory} to autodetect the archive type from the first few bytes of a stream.  ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it increments the byte counter only if the read value is not -1. However, the root cause of the test failure seems to be related to the handling of invalid entries within the ZIP archive, rather than the counting mechanism itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getName()",
+            "method_code": "```java\n    @Override\n    public String getName() {\n        return name == null ? super.getName() : name;\n    }\n\n```",
+            "method_doc": " Get the name of the entry. @return the entry name ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\">APPNOTE.TXT</a>:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of nested archives and the creation of multiple `ArchiveInputStream` instances, rather than the `getName()` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+            "method_code": "```java\n    public ZipArchiveEntry(final String name) {\n        super(name);\n        setName(name);\n    }\n\n```",
+            "method_doc": " Creates a new zip entry with the specified name.  <p>Assumes the entry represents a directory if and only if the name ends with a forward slash \"/\".</p>  @param name the name of the entry ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\">APPNOTE.TXT</a>:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of nested archives rather than the creation of `ZipArchiveEntry` objects.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::closeEntry()",
+            "method_code": "```java\n    private void closeEntry() throws IOException {\n        if (closed) {\n            throw new IOException(\"The stream is closed\");\n        }\n        if (current == null) {\n            return;\n        }\n\n        // Ensure all entry bytes are read\n        if (currentEntryHasOutstandingBytes()) {\n            drainCurrentEntryData();\n        } else {\n            skip(Long.MAX_VALUE);\n\n            final long inB = current.entry.getMethod() == ZipArchiveOutputStream.DEFLATED\n                       ? getBytesInflated() : current.bytesRead;\n\n            // this is at most a single read() operation and can't\n            // exceed the range of int\n            final int diff = (int) (current.bytesReadFromStream - inB);\n\n            // Pushback any required bytes\n            if (diff > 0) {\n                pushback(buf.array(), buf.limit() - diff, diff);\n                current.bytesReadFromStream -= diff;\n            }\n\n            // Drain remainder of entry if not all data bytes were required\n            if (currentEntryHasOutstandingBytes()) {\n                drainCurrentEntryData();\n            }\n        }\n\n        if (lastStoredEntry == null && current.hasDataDescriptor) {\n            readDataDescriptor();\n        }\n\n        inf.reset();\n        buf.clear().flip();\n        current = null;\n        lastStoredEntry = null;\n    }\n\n```",
+            "method_doc": " Closes the current ZIP archive entry and positions the underlying stream to the beginning of the next entry. All per-entry variables and data structures are cleared. <p> If the compressed size of this entry is included in the entry header, then any outstanding bytes are simply skipped from the underlying stream without uncompressing them. This allows an entry to be safely closed even if the compression method is unsupported. <p> In case we don't know the compressed size of this entry or have already buffered too much data from the underlying stream to support uncompression, then the uncompression process is completed and the end position of the stream is adjusted based on the result of that process.  @throws IOException if an error occurs ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly handles the closure of zip archive entries and ensures that all bytes are read before moving to the next entry. However, the issue might lie elsewhere in the handling of nested archive streams.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::close()",
+            "method_code": "```java\n    @Override\n    public void close() throws IOException {\n        if (!closed) {\n            closed = true;\n            try {\n                in.close();\n            } finally {\n                inf.end();\n            }\n        }\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it is responsible for closing the underlying input stream and releasing resources. However, the current implementation might be closing the nested `ArchiveInputStream` prematurely, which could lead to subsequent `ZipException`s when attempting to access nested archive entries.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::supportsDataDescriptorFor(ZipArchiveEntry)",
+            "method_code": "```java\n    private boolean supportsDataDescriptorFor(final ZipArchiveEntry entry) {\n        return !entry.getGeneralPurposeBit().usesDataDescriptor()\n\n                || (allowStoredEntriesWithDataDescriptor && entry.getMethod() == ZipEntry.STORED)\n                || entry.getMethod() == ZipEntry.DEFLATED;\n    }\n\n```",
+            "method_doc": " Whether this entry requires a data descriptor this library can work with.  @return true if allowStoredEntriesWithDataDescriptor is true, the entry doesn't require any data descriptor or the method is DEFLATED. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incomplete Initialization of Nested Archive Streams\n**Description:** The code might be failing to properly initialize the nested `ArchiveInputStream` for certain entries, leading to `ZipException`s when trying to access the nested archive content.\n\n**Location:** The line where the nested `ArchiveInputStream` is created inside the inner loop.\n\n**Observation:** The assertion failure implies that the nested archive handling logic is not functioning as expected, possibly due to incomplete initialization of the nested streams.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it determines whether a data descriptor is supported for a given zip entry. If the method incorrectly identifies a data descriptor as unsupported, it could lead to issues when attempting to read nested archives, which seems to be the case in the failing test.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 7,
+                "4": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::setNameAndCommentFromExtraFields(ZipArchiveEntry,byte[],byte[])",
+            "method_code": "```java\n    static void setNameAndCommentFromExtraFields(final ZipArchiveEntry ze,\n                                                 final byte[] originalNameBytes,\n                                                 final byte[] commentBytes) {\n        final UnicodePathExtraField name = (UnicodePathExtraField)\n            ze.getExtraField(UnicodePathExtraField.UPATH_ID);\n        final String originalName = ze.getName();\n        final String newName = getUnicodeStringIfOriginalMatches(name,\n                                                           originalNameBytes);\n        if (newName != null && !originalName.equals(newName)) {\n            ze.setName(newName);\n        }\n\n        if (commentBytes != null && commentBytes.length > 0) {\n            final UnicodeCommentExtraField cmt = (UnicodeCommentExtraField)\n                ze.getExtraField(UnicodeCommentExtraField.UCOM_ID);\n            final String newComment =\n                getUnicodeStringIfOriginalMatches(cmt, commentBytes);\n            if (newComment != null) {\n                ze.setComment(newComment);\n            }\n        }\n    }\n\n```",
+            "method_doc": " If the entry has Unicode*ExtraFields and the CRCs of the names/comments match those of the extra fields, transfer the known Unicode values from the extra field. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly manipulates the name and comment of the ZipArchiveEntry using extra fields. However, the issue described seems to be related to the management of nested archive streams rather than the manipulation of entry names and comments.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::getUnicodeStringIfOriginalMatches(AbstractUnicodeExtraField,byte[])",
+            "method_code": "```java\n    private static \n        String getUnicodeStringIfOriginalMatches(final AbstractUnicodeExtraField f,\n                                                 final byte[] orig) {\n        if (f != null) {\n            final CRC32 crc32 = new CRC32();\n            crc32.update(orig);\n            final long origCRC32 = crc32.getValue();\n\n            if (origCRC32 == f.getNameCRC32()) {\n                try {\n                    return ZipEncodingHelper\n                        .UTF8_ZIP_ENCODING.decode(f.getUnicodeName());\n                } catch (final IOException ex) {\n                    // UTF-8 unsupported?  should be impossible the\n                    // Unicode*ExtraField must contain some bad bytes\n\n                    // TODO log this anywhere?\n                    return null;\n                }\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " If the stored CRC matches the one of the given name, return the Unicode name of the given field.  <p>If the field is null or the CRCs don't match, return null instead.</p> ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 7.0,
+            "reason": "#7# This method is moderately likely to be the best location that needs to be fixed, because it involves handling Unicode strings and CRC values, which could be related to the issue of nested archive streams not being properly managed.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+            "method_code": "```java\n    public static void register(final Class<?> c) {\n        try {\n            final ZipExtraField ze = (ZipExtraField) c.newInstance();\n            implementations.put(ze.getHeaderId(), c);\n        } catch (final ClassCastException cc) {\n            throw new RuntimeException(c + \" doesn\\'t implement ZipExtraField\");\n        } catch (final InstantiationException ie) {\n            throw new RuntimeException(c + \" is not a concrete class\");\n        } catch (final IllegalAccessException ie) {\n            throw new RuntimeException(c + \"\\'s no-arg constructor is not public\");\n        }\n    }\n\n```",
+            "method_doc": " Register a ZipExtraField implementation.  <p>The given class must have a no-arg constructor and implement the {@link ZipExtraField ZipExtraField interface}.</p> @param c the class to register ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incomplete Initialization of Nested Archive Streams\n**Description:** The code might be failing to properly initialize the nested `ArchiveInputStream` for certain entries, leading to `ZipException`s when trying to access the nested archive content.\n\n**Location:** The line where the nested `ArchiveInputStream` is created inside the inner loop.\n\n**Observation:** The assertion failure implies that the nested archive handling logic is not functioning as expected, possibly due to incomplete initialization of the nested streams.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it involves registering classes that implement the `ZipExtraField` interface. If there's an issue with how these classes are instantiated or registered, it could affect the behavior of other parts of the library, including the nested archive handling in the test case.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)",
+            "method_code": "```java\n    public static ZipExtraField createExtraField(final ZipShort headerId)\n        throws InstantiationException, IllegalAccessException {\n        final Class<?> c = implementations.get(headerId);\n        if (c != null) {\n            return (ZipExtraField) c.newInstance();\n        }\n        final UnrecognizedExtraField u = new UnrecognizedExtraField();\n        u.setHeaderId(headerId);\n        return u;\n    }\n\n```",
+            "method_doc": " Create an instance of the appropriate ExtraField, falls back to {@link UnrecognizedExtraField UnrecognizedExtraField}. @param headerId the header identifier @return an instance of the appropriate ExtraField @throws InstantiationException if unable to instantiate the class @throws IllegalAccessException if not allowed to instantiate the class ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incomplete Initialization of Nested Archive Streams\n**Description:** The code might be failing to properly initialize the nested `ArchiveInputStream` for certain entries, leading to `ZipException`s when trying to access the nested archive content.\n\n**Location:** The line where the nested `ArchiveInputStream` is created inside the inner loop.\n\n**Observation:** The assertion failure implies that the nested archive handling logic is not functioning as expected, possibly due to incomplete initialization of the nested streams.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it is responsible for creating instances of `ZipExtraField`, which could potentially lead to issues if the instantiation fails or if the wrong type of extra field is created.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "3": 7,
+                "4": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+            "method_code": "```java\n    public static ZipExtraField[] parse(final byte[] data, final boolean local,\n                                        final UnparseableExtraField onUnparseableData)\n        throws ZipException {\n        final List<ZipExtraField> v = new ArrayList<>();\n        int start = 0;\n        LOOP:\n        while (start <= data.length - WORD) {\n            final ZipShort headerId = new ZipShort(data, start);\n            final int length = new ZipShort(data, start + 2).getValue();\n            if (start + WORD + length > data.length) {\n                switch(onUnparseableData.getKey()) {\n                case UnparseableExtraField.THROW_KEY:\n                    throw new ZipException(\"bad extra field starting at \"\n                                           + start + \".  Block length of \"\n                                           + length + \" bytes exceeds remaining\"\n                                           + \" data of \"\n                                           + (data.length - start - WORD)\n                                           + \" bytes.\");\n                case UnparseableExtraField.READ_KEY:\n                    final UnparseableExtraFieldData field =\n                        new UnparseableExtraFieldData();\n                    if (local) {\n                        field.parseFromLocalFileData(data, start,\n                                                     data.length - start);\n                    } else {\n                        field.parseFromCentralDirectoryData(data, start,\n                                                            data.length - start);\n                    }\n                    v.add(field);\n                    //$FALL-THROUGH$\n                case UnparseableExtraField.SKIP_KEY:\n                    // since we cannot parse the data we must assume\n                    // the extra field consumes the whole rest of the\n                    // available data\n                    break LOOP;\n                default:\n                    throw new ZipException(\"unknown UnparseableExtraField key: \"\n                                           + onUnparseableData.getKey());\n                }\n            }\n            try {\n                final ZipExtraField ze = createExtraField(headerId);\n                if (local) {\n                    ze.parseFromLocalFileData(data, start + WORD, length);\n                } else {\n                    ze.parseFromCentralDirectoryData(data, start + WORD,\n                                                     length);\n                }\n                v.add(ze);\n            } catch (final InstantiationException | IllegalAccessException ie) {\n                throw (ZipException) new ZipException(ie.getMessage()).initCause(ie);\n            }\n            start += length + WORD;\n        }\n\n        final ZipExtraField[] result = new ZipExtraField[v.size()];\n        return v.toArray(result);\n    }\n\n```",
+            "method_doc": " Split the array into ExtraFields and populate them with the given data. @param data an array of bytes @param local whether data originates from the local file data or the central directory @param onUnparseableData what to do if the extra field data cannot be parsed. @return an array of ExtraFields @throws ZipException on error  @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+            "class_doc": "CheckStyle:HideUtilityClassConstructorCheck OFF (bc)",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly handles the parsing of extra fields in zip files. The failure in the test suggests an issue with how extra fields are being handled or parsed, which could be addressed within this method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 7,
+                "3": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)",
+            "method_code": "```java\n    public ZipArchiveInputStream(final InputStream inputStream,\n                                 final String encoding,\n                                 final boolean useUnicodeExtraFields,\n                                 final boolean allowStoredEntriesWithDataDescriptor) {\n        this.encoding = encoding;\n        zipEncoding = ZipEncodingHelper.getZipEncoding(encoding);\n        this.useUnicodeExtraFields = useUnicodeExtraFields;\n        in = new PushbackInputStream(inputStream, buf.capacity());\n        this.allowStoredEntriesWithDataDescriptor =\n            allowStoredEntriesWithDataDescriptor;\n        // haven't read anything so far\n        buf.limit(0);\n    }\n\n```",
+            "method_doc": " Create an instance using the specified encoding @param inputStream the stream to wrap @param encoding the encoding to use for file names, use null for the platform's default encoding @param useUnicodeExtraFields whether to use InfoZIP Unicode Extra Fields (if present) to set the file names. @param allowStoredEntriesWithDataDescriptor whether the stream will try to read STORED entries that use a data descriptor @since 1.1 ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+            "class_doc": " Implements an input stream that can read Zip archives.  <p>As of Apache Commons Compress it transparently supports Zip64 extensions and thus individual entries and archives larger than 4 GB or with more than 65536 entries.</p>  <p>The {@link ZipFile} class is preferred when reading from files as {@link ZipArchiveInputStream} is limited by not being able to read the central directory header before returning entries.  In particular {@link ZipArchiveInputStream}</p>  <ul>  <li>may return entries that are not part of the central directory at all and shouldn't be considered part of the archive.</li>  <li>may return several entries with the same name.</li>  <li>will not return internal or external attributes.</li>  <li>may return incomplete extra field data.</li>  <li>may return unknown sizes and CRC values for entries until the next entry has been reached if the archive uses the data descriptor feature.</li>  </ul>  @see ZipFile @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Invalid Record Signature\n**Description:** The `ZipArchiveInputStream` might not be correctly identifying invalid record signatures, leading to a failure to throw a `ZipException`.\n\n**Location:** Likely within the `ZipArchiveInputStream` class, specifically in the method responsible for parsing the ZIP archive headers.\n\n**Observation Support:** The stack trace shows that a `ZipException` was caught, but the message did not contain the expected \"Unexpected record signature.\" This suggests that the exception was thrown, but the message was incorrect or incomplete.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it initializes the `ZipArchiveInputStream` and sets up its initial state. However, the issue described seems to be related to handling invalid records, which might involve methods like `readCentralDirectory()` or `parseNextEntry()`. The constructor itself does not directly handle the content of the ZIP entries, making it less likely to be the primary source of the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 7,
+                "4": 7,
+                "5": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(final String charsetName) {\n        this.charsetName = charsetName;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charsetName The name of the charset or {@code null} for the platform's default character set. ",
+            "class_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+            "class_doc": " A fallback ZipEncoding, which uses a java.io means to encode names.  <p>This implementation is not suitable for encodings other than UTF-8, because java.io encodes unmappable character as question marks leading to unreadable ZIP entries on some operating systems.</p>  <p>Furthermore this implementation is unable to tell whether a given name can be safely encoded or not.</p>  <p>This implementation acts as a last resort implementation, when neither {@link Simple8BitZipEnoding} nor {@link NioZipEncoding} is available.</p>  <p>The methods of this class are reentrant.</p> @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "test_failure_causes": "Incorrect Handling of Invalid Record Signature\n**Description:** The `ZipArchiveInputStream` might not be correctly identifying invalid record signatures, leading to a failure to throw a `ZipException`.\n\n**Location:** Likely within the `ZipArchiveInputStream` class, specifically in the method responsible for parsing the ZIP archive headers.\n\n**Observation Support:** The stack trace shows that a `ZipException` was caught, but the message did not contain the expected \"Unexpected record signature.\" This suggests that the exception was thrown, but the message was incorrect or incomplete.",
+            "score": 5.0,
+            "reason": "#5# This method is not directly related to the issue described in the test failure. The test failure indicates a problem with handling invalid record signatures in the `ZipArchiveInputStream`, while the `FallbackZipEncoding` constructor simply initializes the charset name. It is unlikely that fixing this constructor alone would resolve the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry()",
+            "method_code": "```java\n    protected ZipArchiveEntry() {\n        this(\"\");\n    }\n\n```",
+            "method_doc": " ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+            "class_doc": " Extension that adds better handling of extra fields and provides access to the internal and external file attributes.  <p>The extra data is expected to follow the recommendation of <a href=\"http://www.pkware.com/documents/casestudies/APPNOTE.TXT\">APPNOTE.TXT</a>:</p> <ul> <li>the extra byte array consists of a sequence of extra fields</li> <li>each extra fields starts by a two byte header id followed by a two byte sequence holding the length of the remainder of data.</li> </ul>  <p>Any extra data that cannot be parsed by the rules above will be consumed as \"unparseable\" extra data and treated differently by the methods of this class.  Versions prior to Apache Commons Compress 1.1 would have thrown an exception if any attempt was made to read or write extra data not conforming to the recommendation.</p>  @NotThreadSafe ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incomplete Initialization of Nested Archive Streams\n**Description:** The code might be failing to properly initialize the nested `ArchiveInputStream` for certain entries, leading to `ZipException`s when trying to access the nested archive content.\n\n**Location:** The line where the nested `ArchiveInputStream` is created inside the inner loop.\n\n**Observation:** The assertion failure implies that the nested archive handling logic is not functioning as expected, possibly due to incomplete initialization of the nested streams.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of nested archives within the `ZipArchiveEntry` class, rather than the constructor itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::dosToJavaTime(long)",
+            "method_code": "```java\n    public static long dosToJavaTime(final long dosTime) {\n        final Calendar cal = Calendar.getInstance();\n        // CheckStyle:MagicNumberCheck OFF - no point\n        cal.set(Calendar.YEAR, (int) ((dosTime >> 25) & 0x7f) + 1980);\n        cal.set(Calendar.MONTH, (int) ((dosTime >> 21) & 0x0f) - 1);\n        cal.set(Calendar.DATE, (int) (dosTime >> 16) & 0x1f);\n        cal.set(Calendar.HOUR_OF_DAY, (int) (dosTime >> 11) & 0x1f);\n        cal.set(Calendar.MINUTE, (int) (dosTime >> 5) & 0x3f);\n        cal.set(Calendar.SECOND, (int) (dosTime << 1) & 0x3e);\n        cal.set(Calendar.MILLISECOND, 0);\n        // CheckStyle:MagicNumberCheck ON\n        return cal.getTime().getTime();\n    }\n\n```",
+            "method_doc": " Converts DOS time to Java time (number of milliseconds since epoch). @param dosTime time to convert @return converted time ",
+            "class_name": "org.apache.commons.compress.archivers.zip.ZipUtil",
+            "class_doc": " Utility class for handling DOS and Java time conversions. @Immutable ",
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "test_failure_causes": "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test case is related to the handling of nested archive streams, specifically the premature closure of the nested `ArchiveInputStream`. The `dosToJavaTime` method is responsible for converting DOS time to Java time and does not directly involve stream management.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+            "method_code": "```java\n    public ZipArchiveEntry getNextZipEntry() throws IOException {\n        boolean firstEntry = true;\n        if (closed || hitCentralDirectory) {\n            return null;\n        }\n        if (current != null) {\n            closeEntry();\n            firstEntry = false;\n        }\n\n        try {\n            if (firstEntry) {\n                // split archives have a special signature before the\n                // first local file header - look for it and fail with\n                // the appropriate error message if this is a split\n                // archive.\n                readFirstLocalFileHeader(LFH_BUF);\n            } else {\n                readFully(LFH_BUF);\n            }\n        } catch (final EOFException e) {\n            return null;\n        }\n\n        final ZipLong sig = new ZipLong(LFH_BUF);\n        if (sig.equals(ZipLong.CFH_SIG) || sig.equals(ZipLong.AED_SIG)) {\n            hitCentralDirectory = true;\n            skipRemainderOfArchive();\n        }\n        if (!sig.equals(ZipLong.LFH_SIG)) {\n            return null;\n        }\n\n        int off = WORD;\n        current = new CurrentEntry();\n\n        final int versionMadeBy = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n        current.entry.setPlatform((versionMadeBy >> ZipFile.BYTE_SHIFT) & ZipFile.NIBLET_MASK);\n\n        final GeneralPurposeBit gpFlag = GeneralPurposeBit.parse(LFH_BUF, off);\n        final boolean hasUTF8Flag = gpFlag.usesUTF8ForNames();\n        final ZipEncoding entryEncoding = hasUTF8Flag ? ZipEncodingHelper.UTF8_ZIP_ENCODING : zipEncoding;\n        current.hasDataDescriptor = gpFlag.usesDataDescriptor();\n        current.entry.setGeneralPurposeBit(gpFlag);\n\n        off += SHORT;\n\n        current.entry.setMethod(ZipShort.getValue(LFH_BUF, off));\n        off += SHORT;\n\n        final long time = ZipUtil.dosToJavaTime(ZipLong.getValue(LFH_BUF, off));\n        current.entry.setTime(time);\n        off += WORD;\n\n        ZipLong size = null, cSize = null;\n        if (!current.hasDataDescriptor) {\n            current.entry.setCrc(ZipLong.getValue(LFH_BUF, off));\n            off += WORD;\n\n            cSize = new ZipLong(LFH_BUF, off);\n            off += WORD;\n\n            size = new ZipLong(LFH_BUF, off);\n            off += WORD;\n        } else {\n            off += 3 * WORD;\n        }\n\n        final int fileNameLen = ZipShort.getValue(LFH_BUF, off);\n\n        off += SHORT;\n\n        final int extraLen = ZipShort.getValue(LFH_BUF, off);\n        off += SHORT;\n\n        final byte[] fileName = new byte[fileNameLen];\n        readFully(fileName);\n        current.entry.setName(entryEncoding.decode(fileName), fileName);\n\n        final byte[] extraData = new byte[extraLen];\n        readFully(extraData);\n        current.entry.setExtra(extraData);\n\n        if (!hasUTF8Flag && useUnicodeExtraFields) {\n            ZipUtil.setNameAndCommentFromExtraFields(current.entry, fileName, null);\n        }\n\n        processZip64Extra(size, cSize);\n\n        if (current.entry.getCompressedSize() != ArchiveEntry.SIZE_UNKNOWN) {\n            if (current.entry.getMethod() == ZipMethod.UNSHRINKING.getCode()) {\n                current.in = new UnshrinkingInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.IMPLODING.getCode()) {\n                current.in = new ExplodingInputStream(\n                        current.entry.getGeneralPurposeBit().getSlidingDictionarySize(),\n                        current.entry.getGeneralPurposeBit().getNumberOfShannonFanoTrees(),\n                        new BoundedInputStream(in, current.entry.getCompressedSize()));\n            } else if (current.entry.getMethod() == ZipMethod.BZIP2.getCode()) {\n                current.in = new BZip2CompressorInputStream(new BoundedInputStream(in, current.entry.getCompressedSize()));\n            }\n        }\n        \n        entriesRead++;\n        return current.entry;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+            "method_code": "```java\n    @Override\n    public ArchiveEntry getNextEntry() throws IOException {\n        return getNextZipEntry();\n    }\n\n```",
+            "method_doc": ""
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)",
+            "method_code": "```java\n    public ZipArchiveInputStream(final InputStream inputStream) {\n        this(inputStream, ZipEncodingHelper.UTF8);\n    }\n\n```",
+            "method_doc": " Create an instance using UTF-8 encoding @param inputStream the stream to wrap "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+            "method_code": "```java\n    @Override\n    public void setExtra(final byte[] extra) throws RuntimeException {\n        try {\n            final ZipExtraField[] local =\n                ExtraFieldUtils.parse(extra, true,\n                                      ExtraFieldUtils.UnparseableExtraField.READ);\n            mergeExtraFields(local, true);\n        } catch (final ZipException e) {\n            // actually this is not possible as of Commons Compress 1.1\n            throw new RuntimeException(\"Error parsing extra fields for entry: \"\n                                       + getName() + \" - \" + e.getMessage(), e);\n        }\n    }\n\n```",
+            "method_doc": " Parses the given bytes as extra field data and consumes any unparseable data as an {@link UnparseableExtraFieldData} instance. @param extra an array of bytes to be parsed into extra fields @throws RuntimeException if the bytes cannot be parsed @throws RuntimeException on error "
+        },
+        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)": {
+            "method_name": "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)",
+            "method_code": "```java\n    public static int readFully(final InputStream input, final byte[] b, final int offset, final int len)\n        throws IOException {\n        if (len < 0 || offset < 0 || len + offset > b.length) {\n            throw new IndexOutOfBoundsException();\n        }\n        int count = 0, x = 0;\n        while (count != len) {\n            x = input.read(b, offset + count, len - count);\n            if (x == -1) {\n                break;\n            }\n            count += x;\n        }\n        return count;\n    }\n\n```",
+            "method_doc": " Reads as much from input as possible to fill the given array with the given amount of bytes.  <p>This method may invoke read repeatedly to read the bytes and only read less bytes than the requested length if the end of the stream has been reached.</p>  @param input stream to read from @param b buffer to fill @param offset offset into the buffer to start filling at @param len of bytes to read @return the number of bytes actually read @throws IOException if an I/O error has occurred "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getName()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getName()",
+            "method_code": "```java\n    @Override\n    public String getName() {\n        return name == null ? super.getName() : name;\n    }\n\n```",
+            "method_doc": " Get the name of the entry. @return the entry name "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+            "method_code": "```java\n    public ZipArchiveEntry(final String name) {\n        super(name);\n        setName(name);\n    }\n\n```",
+            "method_doc": " Creates a new zip entry with the specified name.  <p>Assumes the entry represents a directory if and only if the name ends with a forward slash \"/\".</p>  @param name the name of the entry "
+        },
+        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])": {
+            "method_name": "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+            "method_code": "```java\n    public static int readFully(final InputStream input, final byte[] b) throws IOException {\n        return readFully(input, b, 0, b.length);\n    }\n\n```",
+            "method_doc": " Reads as much from input as possible to fill the given array.  <p>This method may invoke read repeatedly to fill the array and only read less bytes than the length of the array if the end of the stream has been reached.</p>  @param input stream to read from @param b buffer to fill @return the number of bytes actually read @throws IOException on error "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::closeEntry()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::closeEntry()",
+            "method_code": "```java\n    private void closeEntry() throws IOException {\n        if (closed) {\n            throw new IOException(\"The stream is closed\");\n        }\n        if (current == null) {\n            return;\n        }\n\n        // Ensure all entry bytes are read\n        if (currentEntryHasOutstandingBytes()) {\n            drainCurrentEntryData();\n        } else {\n            skip(Long.MAX_VALUE);\n\n            final long inB = current.entry.getMethod() == ZipArchiveOutputStream.DEFLATED\n                       ? getBytesInflated() : current.bytesRead;\n\n            // this is at most a single read() operation and can't\n            // exceed the range of int\n            final int diff = (int) (current.bytesReadFromStream - inB);\n\n            // Pushback any required bytes\n            if (diff > 0) {\n                pushback(buf.array(), buf.limit() - diff, diff);\n                current.bytesReadFromStream -= diff;\n            }\n\n            // Drain remainder of entry if not all data bytes were required\n            if (currentEntryHasOutstandingBytes()) {\n                drainCurrentEntryData();\n            }\n        }\n\n        if (lastStoredEntry == null && current.hasDataDescriptor) {\n            readDataDescriptor();\n        }\n\n        inf.reset();\n        buf.clear().flip();\n        current = null;\n        lastStoredEntry = null;\n    }\n\n```",
+            "method_doc": " Closes the current ZIP archive entry and positions the underlying stream to the beginning of the next entry. All per-entry variables and data structures are cleared. <p> If the compressed size of this entry is included in the entry header, then any outstanding bytes are simply skipped from the underlying stream without uncompressing them. This allows an entry to be safely closed even if the compression method is unsupported. <p> In case we don't know the compressed size of this entry or have already buffered too much data from the underlying stream to support uncompression, then the uncompression process is completed and the end position of the stream is adjusted based on the result of that process.  @throws IOException if an error occurs "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::close()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::close()",
+            "method_code": "```java\n    @Override\n    public void close() throws IOException {\n        if (!closed) {\n            closed = true;\n            try {\n                in.close();\n            } finally {\n                inf.end();\n            }\n        }\n    }\n\n```",
+            "method_doc": ""
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::supportsDataDescriptorFor(ZipArchiveEntry)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::supportsDataDescriptorFor(ZipArchiveEntry)",
+            "method_code": "```java\n    private boolean supportsDataDescriptorFor(final ZipArchiveEntry entry) {\n        return !entry.getGeneralPurposeBit().usesDataDescriptor()\n\n                || (allowStoredEntriesWithDataDescriptor && entry.getMethod() == ZipEntry.STORED)\n                || entry.getMethod() == ZipEntry.DEFLATED;\n    }\n\n```",
+            "method_doc": " Whether this entry requires a data descriptor this library can work with.  @return true if allowStoredEntriesWithDataDescriptor is true, the entry doesn't require any data descriptor or the method is DEFLATED. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::setNameAndCommentFromExtraFields(ZipArchiveEntry,byte[],byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::setNameAndCommentFromExtraFields(ZipArchiveEntry,byte[],byte[])",
+            "method_code": "```java\n    static void setNameAndCommentFromExtraFields(final ZipArchiveEntry ze,\n                                                 final byte[] originalNameBytes,\n                                                 final byte[] commentBytes) {\n        final UnicodePathExtraField name = (UnicodePathExtraField)\n            ze.getExtraField(UnicodePathExtraField.UPATH_ID);\n        final String originalName = ze.getName();\n        final String newName = getUnicodeStringIfOriginalMatches(name,\n                                                           originalNameBytes);\n        if (newName != null && !originalName.equals(newName)) {\n            ze.setName(newName);\n        }\n\n        if (commentBytes != null && commentBytes.length > 0) {\n            final UnicodeCommentExtraField cmt = (UnicodeCommentExtraField)\n                ze.getExtraField(UnicodeCommentExtraField.UCOM_ID);\n            final String newComment =\n                getUnicodeStringIfOriginalMatches(cmt, commentBytes);\n            if (newComment != null) {\n                ze.setComment(newComment);\n            }\n        }\n    }\n\n```",
+            "method_doc": " If the entry has Unicode*ExtraFields and the CRCs of the names/comments match those of the extra fields, transfer the known Unicode values from the extra field. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::getUnicodeStringIfOriginalMatches(AbstractUnicodeExtraField,byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::getUnicodeStringIfOriginalMatches(AbstractUnicodeExtraField,byte[])",
+            "method_code": "```java\n    private static \n        String getUnicodeStringIfOriginalMatches(final AbstractUnicodeExtraField f,\n                                                 final byte[] orig) {\n        if (f != null) {\n            final CRC32 crc32 = new CRC32();\n            crc32.update(orig);\n            final long origCRC32 = crc32.getValue();\n\n            if (origCRC32 == f.getNameCRC32()) {\n                try {\n                    return ZipEncodingHelper\n                        .UTF8_ZIP_ENCODING.decode(f.getUnicodeName());\n                } catch (final IOException ex) {\n                    // UTF-8 unsupported?  should be impossible the\n                    // Unicode*ExtraField must contain some bad bytes\n\n                    // TODO log this anywhere?\n                    return null;\n                }\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " If the stored CRC matches the one of the given name, return the Unicode name of the given field.  <p>If the field is null or the CRCs don't match, return null instead.</p> "
+        },
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+            "method_code": "```java\n    public static void register(final Class<?> c) {\n        try {\n            final ZipExtraField ze = (ZipExtraField) c.newInstance();\n            implementations.put(ze.getHeaderId(), c);\n        } catch (final ClassCastException cc) {\n            throw new RuntimeException(c + \" doesn\\'t implement ZipExtraField\");\n        } catch (final InstantiationException ie) {\n            throw new RuntimeException(c + \" is not a concrete class\");\n        } catch (final IllegalAccessException ie) {\n            throw new RuntimeException(c + \"\\'s no-arg constructor is not public\");\n        }\n    }\n\n```",
+            "method_doc": " Register a ZipExtraField implementation.  <p>The given class must have a no-arg constructor and implement the {@link ZipExtraField ZipExtraField interface}.</p> @param c the class to register "
+        },
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)",
+            "method_code": "```java\n    public static ZipExtraField createExtraField(final ZipShort headerId)\n        throws InstantiationException, IllegalAccessException {\n        final Class<?> c = implementations.get(headerId);\n        if (c != null) {\n            return (ZipExtraField) c.newInstance();\n        }\n        final UnrecognizedExtraField u = new UnrecognizedExtraField();\n        u.setHeaderId(headerId);\n        return u;\n    }\n\n```",
+            "method_doc": " Create an instance of the appropriate ExtraField, falls back to {@link UnrecognizedExtraField UnrecognizedExtraField}. @param headerId the header identifier @return an instance of the appropriate ExtraField @throws InstantiationException if unable to instantiate the class @throws IllegalAccessException if not allowed to instantiate the class "
+        },
+        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)",
+            "method_code": "```java\n    public static ZipExtraField[] parse(final byte[] data, final boolean local,\n                                        final UnparseableExtraField onUnparseableData)\n        throws ZipException {\n        final List<ZipExtraField> v = new ArrayList<>();\n        int start = 0;\n        LOOP:\n        while (start <= data.length - WORD) {\n            final ZipShort headerId = new ZipShort(data, start);\n            final int length = new ZipShort(data, start + 2).getValue();\n            if (start + WORD + length > data.length) {\n                switch(onUnparseableData.getKey()) {\n                case UnparseableExtraField.THROW_KEY:\n                    throw new ZipException(\"bad extra field starting at \"\n                                           + start + \".  Block length of \"\n                                           + length + \" bytes exceeds remaining\"\n                                           + \" data of \"\n                                           + (data.length - start - WORD)\n                                           + \" bytes.\");\n                case UnparseableExtraField.READ_KEY:\n                    final UnparseableExtraFieldData field =\n                        new UnparseableExtraFieldData();\n                    if (local) {\n                        field.parseFromLocalFileData(data, start,\n                                                     data.length - start);\n                    } else {\n                        field.parseFromCentralDirectoryData(data, start,\n                                                            data.length - start);\n                    }\n                    v.add(field);\n                    //$FALL-THROUGH$\n                case UnparseableExtraField.SKIP_KEY:\n                    // since we cannot parse the data we must assume\n                    // the extra field consumes the whole rest of the\n                    // available data\n                    break LOOP;\n                default:\n                    throw new ZipException(\"unknown UnparseableExtraField key: \"\n                                           + onUnparseableData.getKey());\n                }\n            }\n            try {\n                final ZipExtraField ze = createExtraField(headerId);\n                if (local) {\n                    ze.parseFromLocalFileData(data, start + WORD, length);\n                } else {\n                    ze.parseFromCentralDirectoryData(data, start + WORD,\n                                                     length);\n                }\n                v.add(ze);\n            } catch (final InstantiationException | IllegalAccessException ie) {\n                throw (ZipException) new ZipException(ie.getMessage()).initCause(ie);\n            }\n            start += length + WORD;\n        }\n\n        final ZipExtraField[] result = new ZipExtraField[v.size()];\n        return v.toArray(result);\n    }\n\n```",
+            "method_doc": " Split the array into ExtraFields and populate them with the given data. @param data an array of bytes @param local whether data originates from the local file data or the central directory @param onUnparseableData what to do if the extra field data cannot be parsed. @return an array of ExtraFields @throws ZipException on error  @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry()": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry()",
+            "method_code": "```java\n    protected ZipArchiveEntry() {\n        this(\"\");\n    }\n\n```",
+            "method_doc": " "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipUtil::dosToJavaTime(long)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipUtil::dosToJavaTime(long)",
+            "method_code": "```java\n    public static long dosToJavaTime(final long dosTime) {\n        final Calendar cal = Calendar.getInstance();\n        // CheckStyle:MagicNumberCheck OFF - no point\n        cal.set(Calendar.YEAR, (int) ((dosTime >> 25) & 0x7f) + 1980);\n        cal.set(Calendar.MONTH, (int) ((dosTime >> 21) & 0x0f) - 1);\n        cal.set(Calendar.DATE, (int) (dosTime >> 16) & 0x1f);\n        cal.set(Calendar.HOUR_OF_DAY, (int) (dosTime >> 11) & 0x1f);\n        cal.set(Calendar.MINUTE, (int) (dosTime >> 5) & 0x3f);\n        cal.set(Calendar.SECOND, (int) (dosTime << 1) & 0x3e);\n        cal.set(Calendar.MILLISECOND, 0);\n        // CheckStyle:MagicNumberCheck ON\n        return cal.getTime().getTime();\n    }\n\n```",
+            "method_doc": " Converts DOS time to Java time (number of milliseconds since epoch). @param dosTime time to convert @return converted time "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+            "method_code": "```java\n    private void readFirstLocalFileHeader(final byte[] lfh) throws IOException {\n        readFully(lfh);\n        final ZipLong sig = new ZipLong(lfh);\n        if (sig.equals(ZipLong.DD_SIG)) {\n            throw new UnsupportedZipFeatureException(UnsupportedZipFeatureException.Feature.SPLITTING);\n        }\n\n        if (sig.equals(ZipLong.SINGLE_SEGMENT_SPLIT_MARKER)) {\n            // The archive is not really split as only one segment was\n            // needed in the end.  Just skip over the marker.\n            final byte[] missedLfhBytes = new byte[4];\n            readFully(missedLfhBytes);\n            System.arraycopy(lfh, 4, lfh, 0, LFH_LEN - 4);\n            System.arraycopy(missedLfhBytes, 0, lfh, LFH_LEN - 4, 4);\n        }\n    }\n\n```",
+            "method_doc": " Fills the given array with the first local file header and deals with splitting/spanning markers that may prefix the first LFH. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+            "method_code": "```java\n    public static long getValue(final byte[] bytes, final int offset) {\n        long value = (bytes[offset + BYTE_3] << BYTE_3_SHIFT) & BYTE_3_MASK;\n        value += (bytes[offset + BYTE_2] << BYTE_2_SHIFT) & BYTE_2_MASK;\n        value += (bytes[offset + BYTE_1] << BYTE_1_SHIFT) & BYTE_1_MASK;\n        value += (bytes[offset] & BYTE_MASK);\n        return value;\n    }\n\n```",
+            "method_doc": " Helper method to get the value as a Java long from four bytes starting at given array offset @param bytes the array of bytes @param offset the offset to start @return the corresponding Java long value "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+            "method_code": "```java\n    public ZipLong (final byte[] bytes) {\n        this(bytes, 0);\n    }\n\n```",
+            "method_doc": " Create instance from bytes. @param bytes the bytes to store as a ZipLong "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)",
+            "method_code": "```java\n    public ZipLong (final byte[] bytes, final int offset) {\n        value = ZipLong.getValue(bytes, offset);\n    }\n\n```",
+            "method_doc": " Create instance from the four bytes starting at offset. @param bytes the bytes to store as a ZipLong @param offset the offset to start "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+            "method_code": "```java\n    public static ZipEncoding getZipEncoding(final String name) {\n \n        // fallback encoding is good enough for UTF-8.\n        if (isUTF8(name)) {\n            return UTF8_ZIP_ENCODING;\n        }\n\n        if (name == null) {\n            return new FallbackZipEncoding();\n        }\n\n        final SimpleEncodingHolder h = simpleEncodings.get(name);\n\n        if (h!=null) {\n            return h.getEncoding();\n        }\n\n        try {\n\n            final Charset cs = Charset.forName(name);\n            return new NioZipEncoding(cs);\n\n        } catch (final UnsupportedCharsetException e) {\n            return new FallbackZipEncoding(name);\n        }\n    }\n\n```",
+            "method_doc": " Instantiates a zip encoding.  @param name The name of the zip encoding. Specify {@code null} for the platform's default encoding. @return A zip encoding for the given encoding name. "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)",
+            "method_code": "```java\n    static boolean isUTF8(String charsetName) {\n        if (charsetName == null) {\n            // check platform's default encoding\n            charsetName = Charset.defaultCharset().name();\n        }\n        if (Charsets.UTF_8.name().equalsIgnoreCase(charsetName)) {\n            return true;\n        }\n        for (final String alias : Charsets.UTF_8.aliases()) {\n            if (alias.equalsIgnoreCase(charsetName)) {\n                return true;\n            }\n        }\n        return false;\n    }\n\n```",
+            "method_doc": " Returns whether a given encoding is UTF-8. If the given name is null, then check the platform's default encoding.  @param charsetName If the given name is null, then check the platform's default encoding. "
+        },
+        "org.apache.commons.compress.archivers.ArchiveInputStream::count(int)": {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveInputStream::count(int)",
+            "method_code": "```java\n    protected void count(final int read) {\n        count((long) read);\n    }\n\n```",
+            "method_doc": " Increments the counter of already read bytes. Doesn't increment if the EOF has been hit (read == -1)  @param read the number of bytes read "
+        },
+        "org.apache.commons.compress.archivers.ArchiveInputStream::count(long)": {
+            "method_name": "org.apache.commons.compress.archivers.ArchiveInputStream::count(long)",
+            "method_code": "```java\n    protected void count(final long read) {\n        if (read != -1) {\n            bytesRead = bytesRead + read;\n        }\n    }\n\n```",
+            "method_doc": " Increments the counter of already read bytes. Doesn't increment if the EOF has been hit (read == -1)  @param read the number of bytes read @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)",
+            "method_code": "```java\n    public ZipArchiveInputStream(final InputStream inputStream,\n                                 final String encoding,\n                                 final boolean useUnicodeExtraFields,\n                                 final boolean allowStoredEntriesWithDataDescriptor) {\n        this.encoding = encoding;\n        zipEncoding = ZipEncodingHelper.getZipEncoding(encoding);\n        this.useUnicodeExtraFields = useUnicodeExtraFields;\n        in = new PushbackInputStream(inputStream, buf.capacity());\n        this.allowStoredEntriesWithDataDescriptor =\n            allowStoredEntriesWithDataDescriptor;\n        // haven't read anything so far\n        buf.limit(0);\n    }\n\n```",
+            "method_doc": " Create an instance using the specified encoding @param inputStream the stream to wrap @param encoding the encoding to use for file names, use null for the platform's default encoding @param useUnicodeExtraFields whether to use InfoZIP Unicode Extra Fields (if present) to set the file names. @param allowStoredEntriesWithDataDescriptor whether the stream will try to read STORED entries that use a data descriptor @since 1.1 "
+        },
+        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)": {
+            "method_name": "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)",
+            "method_code": "```java\n    public FallbackZipEncoding(final String charsetName) {\n        this.charsetName = charsetName;\n    }\n\n```",
+            "method_doc": " Construct a fallback zip encoding, which uses the given charset.  @param charsetName The name of the charset or {@code null} for the platform's default character set. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "org.apache.commons.compress.archivers.ZipTestCase",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Multiple `ZipException`s Thrown During Nested Archive Extraction\n**Description:** The code may be incorrectly creating multiple `ArchiveInputStream` instances for nested archives, leading to multiple `ZipException`s being thrown. Each `ZipException` would then be caught and added to the `expectedExceptions` list, causing the assertion to fail.\n\n**Location:** The inner loop where a nested `ArchiveInputStream` is created for each entry within the nested zip file.\n\n**Observation:** The assertion `assertEquals(1, expectedExceptions.size());` failing suggests that more than one `ZipException` was thrown, indicating that the nested archive handling logic might be flawed.",
+                "Incorrect Handling of Nested Archive Streams\n**Description:** The code might be closing the nested `ArchiveInputStream` prematurely, preventing further entries from being processed. This premature closure could lead to subsequent `ZipException`s when attempting to access nested archive entries.\n\n**Location:** The line where the nested `ArchiveInputStream` is closed after reading the first nested entry.\n\n**Observation:** The fact that the test is designed to handle nested archives and still fails suggests that there might be an issue with how streams are managed and closed.",
+                "Incomplete Initialization of Nested Archive Streams\n**Description:** The code might be failing to properly initialize the nested `ArchiveInputStream` for certain entries, leading to `ZipException`s when trying to access the nested archive content.\n\n**Location:** The line where the nested `ArchiveInputStream` is created inside the inner loop.\n\n**Observation:** The assertion failure implies that the nested archive handling logic is not functioning as expected, possibly due to incomplete initialization of the nested streams.",
+                "Race Condition Between Stream Creation and Access\n**Description:** There might be a race condition between the creation and access of nested archive streams, leading to `ZipException`s when trying to access nested archive content before the stream is fully initialized.\n\n**Location:** The lines where the nested `ArchiveInputStream` is created and accessed inside the inner loop.\n\n**Observation:** The assertion failure suggests that there might be timing issues in how the nested archive streams are handled, leading to exceptions when accessing nested archive content.",
+                "Incorrect Use of `ArchiveStreamFactory`\n**Description:** The code might be using the `ArchiveStreamFactory` incorrectly, leading to `ZipException`s when trying to create nested archive streams. This could be due to passing incorrect parameters or using the factory inappropriately.\n\n**Location:** The lines where the `ArchiveStreamFactory` is used to create nested `ArchiveInputStream` instances.\n\n**Observation:** The assertion failure implies that there might be issues with how the `ArchiveStreamFactory` is being used to create nested archive streams, leading to exceptions when accessing nested archive content."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    7.666666666666667
+                ],
+                "2": [
+                    9,
+                    7.666666666666667
+                ],
+                "3": [
+                    9,
+                    7.666666666666667
+                ],
+                "4": [
+                    9,
+                    7.666666666666667
+                ],
+                "5": [
+                    7,
+                    7.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.utils.IOUtils"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipUtil",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.utils.IOUtils"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.utils.IOUtils"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry",
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils",
+                    "org.apache.commons.compress.utils.IOUtils"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::getName()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::closeEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::close()"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipUtil": [
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::dosToJavaTime(long)",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::setNameAndCommentFromExtraFields(ZipArchiveEntry,byte[],byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipUtil::getUnicodeStringIfOriginalMatches(AbstractUnicodeExtraField,byte[])"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::supportsDataDescriptorFor(ZipArchiveEntry)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::supportsDataDescriptorFor(ZipArchiveEntry)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry()"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::createExtraField(ZipShort)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveEntry": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::setExtra(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveEntry::ZipArchiveEntry(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ExtraFieldUtils": [
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::register(Class)",
+                        "org.apache.commons.compress.archivers.zip.ExtraFieldUtils::parse(byte[],boolean,UnparseableExtraField)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ]
+                }
+            }
+        },
+        {
+            "test_suite": "org.apache.commons.compress.archivers.zip.ZipArchiveInputStreamTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Invalid Record Signature\n**Description:** The `ZipArchiveInputStream` might not be correctly identifying invalid record signatures, leading to a failure to throw a `ZipException`.\n\n**Location:** Likely within the `ZipArchiveInputStream` class, specifically in the method responsible for parsing the ZIP archive headers.\n\n**Observation Support:** The stack trace shows that a `ZipException` was caught, but the message did not contain the expected \"Unexpected record signature.\" This suggests that the exception was thrown, but the message was incorrect or incomplete.",
+                "Incomplete or Corrupted Resource File\n**Description:** The `/invalid-zip.zip` resource file might be either incomplete or corrupted, causing the `ZipArchiveInputStream` to behave unexpectedly.\n\n**Location:** The location of the resource file (`/invalid-zip.zip`) needs to be verified to ensure its integrity.\n\n**Observation Support:** Although the test output is empty, the fact that the test is failing indicates that there is an issue with the resource file itself. A corrupted or incomplete file would prevent the `ZipArchiveInputStream` from correctly identifying invalid entries.",
+                "Race Condition During Stream Initialization\n**Description:** There might be a race condition during the initialization of the `ZipArchiveInputStream`, leading to inconsistent states that result in unexpected behavior.\n\n**Location:** Within the `ZipArchiveInputStream` constructor or initialization methods.\n\n**Observation Support:** The test failure occurs consistently, suggesting that the issue is reproducible under similar conditions. A race condition could lead to intermittent failures, but since it happens every time, it points towards a deterministic problem.",
+                "Incorrect Error Message Formatting\n**Description:** The error message formatting in the `ZipException` might be incorrect, preventing the expected substring match in the test assertion.\n\n**Location:** Within the `ZipException` class or wherever the error message is constructed.\n\n**Observation Support:** The assertion in the test expects the error message to contain \"Unexpected record signature,\" but it doesn't. This discrepancy suggests that the error message might be formatted incorrectly, leading to a mismatch in the assertion.",
+                "Missing or Incorrect Exception Handling\n**Description:** The `ZipArchiveInputStream` might be missing or incorrectly handling exceptions related to invalid entries, leading to a failure to throw the expected `ZipException`.\n\n**Location:** Within the `ZipArchiveInputStream` class, particularly in the method that processes ZIP archive entries.\n\n**Observation Support:** The test explicitly checks for a `ZipException` with a specific message. If the exception is missing or incorrectly handled, the test will fail, indicating a fundamental issue with how exceptions are managed in the `ZipArchiveInputStream`."
+            ],
+            "selected": 3,
+            "plausibility": {
+                "1": [
+                    9,
+                    8.333333333333334
+                ],
+                "2": [
+                    9,
+                    8.333333333333334
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    8.333333333333334
+                ],
+                "5": [
+                    9,
+                    8.333333333333334
+                ]
+            },
+            "classes": {
+                "1": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ],
+                "2": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding",
+                    "org.apache.commons.compress.archivers.ArchiveInputStream"
+                ],
+                "3": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.archivers.ArchiveInputStream"
+                ],
+                "4": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper"
+                ],
+                "5": [
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream",
+                    "org.apache.commons.compress.archivers.zip.ZipLong",
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper",
+                    "org.apache.commons.compress.utils.IOUtils",
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)"
+                    ]
+                },
+                "2": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.ArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.ArchiveInputStream::count(int)",
+                        "org.apache.commons.compress.archivers.ArchiveInputStream::count(long)"
+                    ]
+                },
+                "3": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.archivers.ArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.ArchiveInputStream::count(int)",
+                        "org.apache.commons.compress.archivers.ArchiveInputStream::count(long)"
+                    ]
+                },
+                "4": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ]
+                },
+                "5": {
+                    "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream": [
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::getNextZipEntry()",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::readFirstLocalFileHeader(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipArchiveInputStream::ZipArchiveInputStream(InputStream,String,boolean,boolean)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipLong": [
+                        "org.apache.commons.compress.archivers.zip.ZipLong::getValue(byte[],int)",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[])",
+                        "org.apache.commons.compress.archivers.zip.ZipLong::ZipLong(byte[],int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.ZipEncodingHelper": [
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::getZipEncoding(String)",
+                        "org.apache.commons.compress.archivers.zip.ZipEncodingHelper::isUTF8(String)"
+                    ],
+                    "org.apache.commons.compress.utils.IOUtils": [
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[])",
+                        "org.apache.commons.compress.utils.IOUtils::readFully(InputStream,byte[],int,int)"
+                    ],
+                    "org.apache.commons.compress.archivers.zip.FallbackZipEncoding": [
+                        "org.apache.commons.compress.archivers.zip.FallbackZipEncoding::FallbackZipEncoding(String)"
+                    ]
+                }
+            }
+        }
+    ]
+}

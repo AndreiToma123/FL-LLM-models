@@ -1,0 +1,878 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+        "com.fasterxml.jackson.databind.DeserializationContext",
+        "com.fasterxml.jackson.databind.ObjectMapper",
+        "com.fasterxml.jackson.databind.exc.InvalidFormatException",
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+        "com.fasterxml.jackson.databind.deser.DeserializerCache"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+            "method_code": "```java\n    @Override\n    protected UUID _deserialize(String id, DeserializationContext ctxt) throws IOException\n    {\n        // Adapted from java-uuid-generator (https://github.com/cowtowncoder/java-uuid-generator)\n        // which is 5x faster than UUID.fromString(value), as oper \"ManualReadPerfWithUUID\"\n        if (id.length() != 36) {\n            /* 14-Sep-2013, tatu: One trick we do allow, Base64-encoding, since we know\n             *   length it must have...\n             */\n            if (id.length() == 24) {\n                byte[] stuff = Base64Variants.getDefaultVariant().decode(id);\n                return _fromBytes(stuff, ctxt);\n            }\n            return _badFormat(id, ctxt);\n        }\n\n        // verify hyphens first:\n        if ((id.charAt(8) != '-') || (id.charAt(13) != '-')\n                || (id.charAt(18) != '-') || (id.charAt(23) != '-')) {\n            _badFormat(id, ctxt);\n        }\n        long l1 = intFromChars(id, 0, ctxt);\n        l1 <<= 32;\n        long l2 = ((long) shortFromChars(id, 9, ctxt)) << 16;\n        l2 |= shortFromChars(id, 14, ctxt);\n        long hi = l1 + l2;\n\n        int i1 = (shortFromChars(id, 19, ctxt) << 16) | shortFromChars(id, 24, ctxt);\n        l1 = i1;\n        l1 <<= 32;\n        l2 = intFromChars(id, 28, ctxt);\n        l2 = (l2 << 32) >>> 32; // sign removal, Java-style. Ugh.\n        long lo = l1 | l2;\n\n        return new UUID(hi, lo);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the deserialization of UUID strings, and the failure occurs when it encounters an invalid UUID string. Fixing the validation or handling within this method would address the root cause of the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)",
+            "method_code": "```java\n    private UUID _badFormat(String uuidStr, DeserializationContext ctxt)\n        throws IOException\n    {\n        return (UUID) ctxt.handleWeirdStringValue(handledType(), uuidStr,\n                \"UUID has to be represented by standard 36-char representation\");\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the case where the input string is not a valid UUID. By modifying this method, we can ensure that it returns `null` or another appropriate value when encountering invalid input, thus preventing the `InvalidFormatException` and making the test pass.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    @Override\n    public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException\n    {\n        // 22-Sep-2012, tatu: For 2.1, use this new method, may force coercion:\n        String text = p.getValueAsString();\n        if (text != null) { // has String representation\n            if (text.length() == 0 || (text = text.trim()).length() == 0) {\n                // 04-Feb-2013, tatu: Usually should become null; but not always\n                return _deserializeFromEmptyString();\n            }\n            Exception cause = null;\n            try {\n                // 19-May-2017, tatu: Used to require non-null result (assuming `null`\n                //    indicated error; but that seems wrong. Should be able to return\n                //    `null` as value.\n                if (_deserialize(text, ctxt) != null) {\n                return _deserialize(text, ctxt);\n                }\n            } catch (IllegalArgumentException iae) {\n                cause = iae;\n            } catch (MalformedURLException me) {\n                cause = me;\n            }\n            String msg = \"not a valid textual representation\";\n            if (cause != null) {\n                String m2 = cause.getMessage();\n                if (m2 != null) {\n                    msg = msg + \", problem: \"+m2;\n                }\n            }\n            // 05-May-2016, tatu: Unlike most usage, this seems legit, so...\n            JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);\n            if (cause != null) {\n                e.initCause(cause);\n            }\n            throw e;\n            // nothing to do here, yet? We'll fail anyway\n        }\n        JsonToken t = p.getCurrentToken();\n        // [databind#381]\n        if (t == JsonToken.START_ARRAY) {\n            return _deserializeFromArray(p, ctxt);\n        }\n        if (t == JsonToken.VALUE_EMBEDDED_OBJECT) {\n            // Trivial cases; null to null, instance of type itself returned as is\n            Object ob = p.getEmbeddedObject();\n            if (ob == null) {\n                return null;\n            }\n            if (_valueClass.isAssignableFrom(ob.getClass())) {\n                return (T) ob;\n            }\n            return _deserializeEmbedded(ob, ctxt);\n        }\n        return (T) ctxt.handleUnexpectedToken(_valueClass, p);\n    }\n\n```",
+            "method_doc": "  Deserializer implementations  ",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+            "class_doc": " Base class for simple deserializers that only accept JSON String values as the source. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the deserialization of strings into specific types, which is where the failure occurs in the test case. The method attempts to convert a string into a UUID, but when the string is not a valid UUID, it throws an exception instead of returning null, causing the test to fail.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the deserialization process from a JSON string to a Java object. The failure in the test case suggests that the current implementation does not handle unexpected string values gracefully, leading to an `InvalidFormatException`. By modifying the `readValue` method, we can introduce better error handling or fallback mechanisms to manage such cases.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 7,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()",
+            "method_code": "```java\n    public UUIDDeserializer() { super(UUID.class); }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the UUIDDeserializer but does not handle the actual deserialization logic, which could lead to issues when unexpected input is provided.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::FromStringDeserializer(Class)",
+            "method_code": "```java\n    protected FromStringDeserializer(Class<?> vc) {\n        super(vc);\n    }\n\n```",
+            "method_doc": "  Deserializer implementations  ",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+            "class_doc": " Base class for simple deserializers that only accept JSON String values as the source. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the deserializer with a specific class type but does not handle the actual deserialization logic. Given the error stack trace, it's plausible that the issue lies in how the deserialization process is implemented rather than just the initialization.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)",
+            "method_code": "```java\n    protected String _quotedString(String desc) {\n        if (desc == null) {\n            return \"[N/A]\";\n        }\n        // !!! should we quote it? (in case there are control chars, linefeeds)\n        if (desc.length() > MAX_ERROR_STR_LEN) {\n            return String.format(\"\\\"%s]...[%s\\\"\",\n                    desc.substring(0, MAX_ERROR_STR_LEN),\n                    desc.substring(desc.length() - MAX_ERROR_STR_LEN));\n        }\n        return \"\\\"\" + desc + \"\\\"\";\n    }\n\n```",
+            "method_doc": "@since 2.7",
+            "class_name": "com.fasterxml.jackson.databind.DeserializationContext",
+            "class_doc": " Context for the process of deserialization a single root-level value. Used to allow passing in configuration settings and reusable temporary objects (scrap arrays, containers). <p> Instance life-cycle is such that an partially configured \"blueprint\" object is registered with {@link ObjectMapper} (and {@link ObjectReader}, and when an actual instance is needed for deserialization, a fully configured instance will be created using a method in excented API of sub-class ({@link com.fasterxml.jackson.databind.deser.DefaultDeserializationContext#createInstance}). Each instance is guaranteed to only be used from single-threaded context; instances may be reused iff no configuration has changed. <p> Defined as abstract class so that implementations must define methods for reconfiguring blueprints and creating instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles quoted strings but does not address the core issue of invalid data types during deserialization. The failure occurs when trying to deserialize a non-UUID string into a UUID, which suggests that the problem lies in the handling of different data types rather than just string quoting.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n    protected DeserializationContext(DeserializationContext src,\n            DeserializationConfig config, JsonParser p,\n            InjectableValues injectableValues)\n    {\n        _cache = src._cache;\n        _factory = src._factory;\n        \n        _config = config;\n        _featureFlags = config.getDeserializationFeatures();\n        _view = config.getActiveView();\n        _parser = p;\n        _injectableValues = injectableValues;\n        _attributes = config.getAttributes();\n    }\n\n```",
+            "method_doc": " Constructor used for creating actual per-call instances. ",
+            "class_name": "com.fasterxml.jackson.databind.DeserializationContext",
+            "class_doc": " Context for the process of deserialization a single root-level value. Used to allow passing in configuration settings and reusable temporary objects (scrap arrays, containers). <p> Instance life-cycle is such that an partially configured \"blueprint\" object is registered with {@link ObjectMapper} (and {@link ObjectReader}, and when an actual instance is needed for deserialization, a fully configured instance will be created using a method in excented API of sub-class ({@link com.fasterxml.jackson.databind.deser.DefaultDeserializationContext#createInstance}). Each instance is guaranteed to only be used from single-threaded context; instances may be reused iff no configuration has changed. <p> Defined as abstract class so that implementations must define methods for reconfiguring blueprints and creating instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes various fields of the `DeserializationContext` but does not directly handle the deserialization process. The issue in the test failure seems related to how `ObjectMapper` handles unexpected string values during deserialization, which could be better managed in a different part of the codebase rather than in the constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw JsonMappingException.from(ctxt,\n                    \"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it is responsible for finding root-level deserializers, but the issue seems to be related to handling unexpected string values during deserialization rather than directly finding the deserializer.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 8,
+                "4": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException::from(JsonParser,String,Object,Class)",
+            "method_code": "```java\n    public static InvalidFormatException from(JsonParser p, String msg,\n            Object value, Class<?> targetType)\n    {\n        return new InvalidFormatException(p, msg, value, targetType);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException",
+            "class_doc": " Specialized sub-class of {@link JsonMappingException} that is used when the underlying problem appears to be that of bad formatting of a value to deserialize.  @since 2.1 ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly constructs an `InvalidFormatException`, which could potentially be improved to handle unexpected string values more gracefully. However, fixing this method alone may not resolve the root cause of the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException::InvalidFormatException(JsonParser,String,Object,Class)",
+            "method_code": "```java\n    public InvalidFormatException(JsonParser p,\n            String msg, Object value, Class<?> targetType)\n    {\n        super(p, msg);\n        _value = value;\n        _targetType = targetType;\n    }\n\n```",
+            "method_doc": " @since 2.7 ",
+            "class_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException",
+            "class_doc": " Specialized sub-class of {@link JsonMappingException} that is used when the underlying problem appears to be that of bad formatting of a value to deserialize.  @since 2.1 ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles exceptions related to invalid formats during deserialization. However, fixing this method alone may not resolve the root cause of the test failure, which seems to be related to how `ObjectMapper` handles unexpected string values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializerFactory,DeserializerCache)",
+            "method_code": "```java\n    protected DeserializationContext(DeserializerFactory df,\n            DeserializerCache cache)\n    {\n        if (df == null) {\n            throw new IllegalArgumentException(\"Can not pass null DeserializerFactory\");\n        }\n        _factory = df;\n        _cache = (cache == null) ? new DeserializerCache() : cache;\n        \n        _featureFlags = 0;\n        _config = null;\n        _injectableValues = null;\n        _view = null;\n        _attributes = null;\n    }\n\n```",
+            "method_doc": "Initializes a new deserialization context with a factory and cache.",
+            "class_name": "com.fasterxml.jackson.databind.DeserializationContext",
+            "class_doc": " Context for the process of deserialization a single root-level value. Used to allow passing in configuration settings and reusable temporary objects (scrap arrays, containers). <p> Instance life-cycle is such that an partially configured \"blueprint\" object is registered with {@link ObjectMapper} (and {@link ObjectReader}, and when an actual instance is needed for deserialization, a fully configured instance will be created using a method in excented API of sub-class ({@link com.fasterxml.jackson.databind.deser.DefaultDeserializationContext#createInstance}). Each instance is guaranteed to only be used from single-threaded context; instances may be reused iff no configuration has changed. <p> Defined as abstract class so that implementations must define methods for reconfiguring blueprints and creating instances. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The `DeserializationContext` constructor initializes the context but does not directly handle the deserialization of values. The issue in the test failure is related to the handling of invalid strings during deserialization, which is more likely to be addressed in the deserializer itself or in the `ObjectMapper`'s configuration.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test case is caused by the way the `UUID` deserializer handles invalid input strings, rather than the default constructor of `ObjectMapper`. The `ObjectMapper` itself is functioning correctly according to its intended design, and the issue lies in the deserialization process for the `UUID` type.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+            "method_code": "```java\n    public ObjectMapper addHandler(DeserializationProblemHandler h) {\n        _deserializationConfig = _deserializationConfig.withHandler(h);\n        return this;\n    }\n\n```",
+            "method_doc": " Method for adding specified {@link DeserializationProblemHandler} to be used for handling specific problems during deserialization. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it adds handlers to the deserialization process, which could potentially interfere with the default behavior. However, without further context, it's difficult to pinpoint exactly why it's failing in this specific scenario.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)",
+            "method_code": "```java\n    protected DefaultDeserializationContext createDeserializationContext(JsonParser p,\n            DeserializationConfig cfg) {\n        return _deserializationContext.createInstance(cfg, p, _injectableValues);\n    }\n\n```",
+            "method_doc": " Internal helper method called to create an instance of {@link DeserializationContext} for deserializing a single root value. Can be overridden if a custom context is needed. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves creating a deserialization context, which could potentially interact with problem handlers. However, the issue seems to stem from the handling of specific data types rather than the creation of the context itself.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()",
+            "method_code": "```java\n    @Override\n    public Class<?> handledType() { return _valueClass; }\n\n```",
+            "method_doc": "  Accessors  ",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+            "class_doc": " Base class for common deserializers. Contains shared base functionality for dealing with primitive values, such as (re)parsing from String. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it returns the class type that the deserializer handles, which could potentially interfere with custom handlers if not properly managed.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+            "method_code": "```java\n    protected StdDeserializer(Class<?> vc) {\n        _valueClass = vc;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `StdDeserializer` with the specified value class. This method does not call any other methods in the Covered Methods List.",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+            "class_doc": " Base class for common deserializers. Contains shared base functionality for dealing with primitive values, such as (re)parsing from String. ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes a new instance of `StdDeserializer` with the specified value class. However, the issue seems to be related to the specific handling of string values during deserialization, which is not directly handled by this constructor.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(ctxt, propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the creation and caching of deserializers, which could potentially interfere with custom handlers like `WeirdStringHandler`. However, the issue seems to stem from the specific handling of the `UUID` type rather than a general problem with deserializer caching.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves creating and caching deserializers, which could potentially interact with custom handlers like `WeirdStringHandler`. However, the issue seems to stem from the specific handling of string values rather than the general deserializer creation process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            // We better only expose checked exceptions, since those\n            // are what caller is expected to handle\n            throw JsonMappingException.from(ctxt, iae.getMessage(), iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (deser instanceof ResolvableDeserializer) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves the creation and caching of deserializers, which could potentially affect the behavior of the deserialization process when encountering unexpected input types like 'not a uuid!'.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc = config.introspect(type);\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [databind#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "test_failure_causes": "Custom Deserializer Conflict\n**Description:** There might be a conflict between the custom `WeirdStringHandler` and another custom deserializer, causing the exception.\n\n**Location:** Potentially within the `ObjectMapper` configuration or in the `WeirdStringHandler` itself.\n\n**Observation Support:** The test setup involves adding a custom handler, and the failure might suggest that this handler is interacting unexpectedly with other serializers.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the creation of deserializers, which could potentially interact with custom handlers like `WeirdStringHandler`. However, the issue seems to be related to the specific handling of `UUID` types rather than a general problem with deserializer creation.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+            "method_code": "```java\n    @Override\n    protected UUID _deserialize(String id, DeserializationContext ctxt) throws IOException\n    {\n        // Adapted from java-uuid-generator (https://github.com/cowtowncoder/java-uuid-generator)\n        // which is 5x faster than UUID.fromString(value), as oper \"ManualReadPerfWithUUID\"\n        if (id.length() != 36) {\n            /* 14-Sep-2013, tatu: One trick we do allow, Base64-encoding, since we know\n             *   length it must have...\n             */\n            if (id.length() == 24) {\n                byte[] stuff = Base64Variants.getDefaultVariant().decode(id);\n                return _fromBytes(stuff, ctxt);\n            }\n            return _badFormat(id, ctxt);\n        }\n\n        // verify hyphens first:\n        if ((id.charAt(8) != '-') || (id.charAt(13) != '-')\n                || (id.charAt(18) != '-') || (id.charAt(23) != '-')) {\n            _badFormat(id, ctxt);\n        }\n        long l1 = intFromChars(id, 0, ctxt);\n        l1 <<= 32;\n        long l2 = ((long) shortFromChars(id, 9, ctxt)) << 16;\n        l2 |= shortFromChars(id, 14, ctxt);\n        long hi = l1 + l2;\n\n        int i1 = (shortFromChars(id, 19, ctxt) << 16) | shortFromChars(id, 24, ctxt);\n        l1 = i1;\n        l1 <<= 32;\n        l2 = intFromChars(id, 28, ctxt);\n        l2 = (l2 << 32) >>> 32; // sign removal, Java-style. Ugh.\n        long lo = l1 | l2;\n\n        return new UUID(hi, lo);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)",
+            "method_code": "```java\n    private UUID _badFormat(String uuidStr, DeserializationContext ctxt)\n        throws IOException\n    {\n        return (UUID) ctxt.handleWeirdStringValue(handledType(), uuidStr,\n                \"UUID has to be represented by standard 36-char representation\");\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    @Override\n    public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException\n    {\n        // 22-Sep-2012, tatu: For 2.1, use this new method, may force coercion:\n        String text = p.getValueAsString();\n        if (text != null) { // has String representation\n            if (text.length() == 0 || (text = text.trim()).length() == 0) {\n                // 04-Feb-2013, tatu: Usually should become null; but not always\n                return _deserializeFromEmptyString();\n            }\n            Exception cause = null;\n            try {\n                // 19-May-2017, tatu: Used to require non-null result (assuming `null`\n                //    indicated error; but that seems wrong. Should be able to return\n                //    `null` as value.\n                if (_deserialize(text, ctxt) != null) {\n                return _deserialize(text, ctxt);\n                }\n            } catch (IllegalArgumentException iae) {\n                cause = iae;\n            } catch (MalformedURLException me) {\n                cause = me;\n            }\n            String msg = \"not a valid textual representation\";\n            if (cause != null) {\n                String m2 = cause.getMessage();\n                if (m2 != null) {\n                    msg = msg + \", problem: \"+m2;\n                }\n            }\n            // 05-May-2016, tatu: Unlike most usage, this seems legit, so...\n            JsonMappingException e = ctxt.weirdStringException(text, _valueClass, msg);\n            if (cause != null) {\n                e.initCause(cause);\n            }\n            throw e;\n            // nothing to do here, yet? We'll fail anyway\n        }\n        JsonToken t = p.getCurrentToken();\n        // [databind#381]\n        if (t == JsonToken.START_ARRAY) {\n            return _deserializeFromArray(p, ctxt);\n        }\n        if (t == JsonToken.VALUE_EMBEDDED_OBJECT) {\n            // Trivial cases; null to null, instance of type itself returned as is\n            Object ob = p.getEmbeddedObject();\n            if (ob == null) {\n                return null;\n            }\n            if (_valueClass.isAssignableFrom(ob.getClass())) {\n                return (T) ob;\n            }\n            return _deserializeEmbedded(ob, ctxt);\n        }\n        return (T) ctxt.handleUnexpectedToken(_valueClass, p);\n    }\n\n```",
+            "method_doc": "  Deserializer implementations  "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) "
+        },
+        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()",
+            "method_code": "```java\n    public UUIDDeserializer() { super(UUID.class); }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::FromStringDeserializer(Class)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::FromStringDeserializer(Class)",
+            "method_code": "```java\n    protected FromStringDeserializer(Class<?> vc) {\n        super(vc);\n    }\n\n```",
+            "method_doc": "  Deserializer implementations  "
+        },
+        "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)": {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)",
+            "method_code": "```java\n    protected String _quotedString(String desc) {\n        if (desc == null) {\n            return \"[N/A]\";\n        }\n        // !!! should we quote it? (in case there are control chars, linefeeds)\n        if (desc.length() > MAX_ERROR_STR_LEN) {\n            return String.format(\"\\\"%s]...[%s\\\"\",\n                    desc.substring(0, MAX_ERROR_STR_LEN),\n                    desc.substring(desc.length() - MAX_ERROR_STR_LEN));\n        }\n        return \"\\\"\" + desc + \"\\\"\";\n    }\n\n```",
+            "method_doc": "@since 2.7"
+        },
+        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)": {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n    protected DeserializationContext(DeserializationContext src,\n            DeserializationConfig config, JsonParser p,\n            InjectableValues injectableValues)\n    {\n        _cache = src._cache;\n        _factory = src._factory;\n        \n        _config = config;\n        _featureFlags = config.getDeserializationFeatures();\n        _view = config.getActiveView();\n        _parser = p;\n        _injectableValues = injectableValues;\n        _attributes = config.getAttributes();\n    }\n\n```",
+            "method_doc": " Constructor used for creating actual per-call instances. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw JsonMappingException.from(ctxt,\n                    \"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. "
+        },
+        "com.fasterxml.jackson.databind.exc.InvalidFormatException::from(JsonParser,String,Object,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException::from(JsonParser,String,Object,Class)",
+            "method_code": "```java\n    public static InvalidFormatException from(JsonParser p, String msg,\n            Object value, Class<?> targetType)\n    {\n        return new InvalidFormatException(p, msg, value, targetType);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.exc.InvalidFormatException::InvalidFormatException(JsonParser,String,Object,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.exc.InvalidFormatException::InvalidFormatException(JsonParser,String,Object,Class)",
+            "method_code": "```java\n    public InvalidFormatException(JsonParser p,\n            String msg, Object value, Class<?> targetType)\n    {\n        super(p, msg);\n        _value = value;\n        _targetType = targetType;\n    }\n\n```",
+            "method_doc": " @since 2.7 "
+        },
+        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializerFactory,DeserializerCache)": {
+            "method_name": "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializerFactory,DeserializerCache)",
+            "method_code": "```java\n    protected DeserializationContext(DeserializerFactory df,\n            DeserializerCache cache)\n    {\n        if (df == null) {\n            throw new IllegalArgumentException(\"Can not pass null DeserializerFactory\");\n        }\n        _factory = df;\n        _cache = (cache == null) ? new DeserializerCache() : cache;\n        \n        _featureFlags = 0;\n        _config = null;\n        _injectableValues = null;\n        _view = null;\n        _attributes = null;\n    }\n\n```",
+            "method_doc": "Initializes a new deserialization context with a factory and cache."
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+            "method_code": "```java\n    public ObjectMapper addHandler(DeserializationProblemHandler h) {\n        _deserializationConfig = _deserializationConfig.withHandler(h);\n        return this;\n    }\n\n```",
+            "method_doc": " Method for adding specified {@link DeserializationProblemHandler} to be used for handling specific problems during deserialization. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)",
+            "method_code": "```java\n    protected DefaultDeserializationContext createDeserializationContext(JsonParser p,\n            DeserializationConfig cfg) {\n        return _deserializationContext.createInstance(cfg, p, _injectableValues);\n    }\n\n```",
+            "method_doc": " Internal helper method called to create an instance of {@link DeserializationContext} for deserializing a single root value. Can be overridden if a custom context is needed. "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()",
+            "method_code": "```java\n    @Override\n    public Class<?> handledType() { return _valueClass; }\n\n```",
+            "method_doc": "  Accessors  "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+            "method_code": "```java\n    protected StdDeserializer(Class<?> vc) {\n        _valueClass = vc;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `StdDeserializer` with the specified value class. This method does not call any other methods in the Covered Methods List."
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(ctxt, propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            // We better only expose checked exceptions, since those\n            // are what caller is expected to handle\n            throw JsonMappingException.from(ctxt, iae.getMessage(), iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (deser instanceof ResolvableDeserializer) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc = config.introspect(type);\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [databind#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.databind.filter.ProblemHandlerTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Default Deserialization Behavior Issue\n**Description:** The `ObjectMapper` might have a default deserialization behavior that does not handle unexpected string values gracefully, leading to exceptions instead of returning `null`.\n\n**Location:** Likely in the `ObjectMapper` or its associated deserializer classes.\n\n**Observation Support:** The stack trace indicates that an `InvalidFormatException` was thrown, suggesting that the default deserialization logic encountered an issue with the input string.",
+                "Handler Configuration Overwrite\n**Description:** The `WeirdStringHandler` might be overwriting or interfering with the default deserialization behavior, causing the exception.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The fact that Scenario 1 passes but Scenario 2 fails suggests that the handler's configuration or behavior might be affecting the outcome differently.",
+                "Null Handling in Handler\n**Description:** The `WeirdStringHandler` might not correctly handle cases where the input is `null`, leading to unexpected behavior.\n\n**Location:** Within the `WeirdStringHandler` implementation.\n\n**Observation Support:** The test setup for Scenario 2 uses `null` as a parameter, and the failure might indicate that the handler does not properly manage null inputs.",
+                "Custom Deserializer Conflict\n**Description:** There might be a conflict between the custom `WeirdStringHandler` and another custom deserializer, causing the exception.\n\n**Location:** Potentially within the `ObjectMapper` configuration or in the `WeirdStringHandler` itself.\n\n**Observation Support:** The test setup involves adding a custom handler, and the failure might suggest that this handler is interacting unexpectedly with other serializers.",
+                "Jackson Version Compatibility\n**Description:** The version of Jackson being used might have a known bug or incompatibility that affects the deserialization process.\n\n**Location:** The specific version of Jackson library being used.\n\n**Observation Support:** The stack trace includes a reference to a specific Jackson issue (`databind#1629`), indicating that the problem might be related to a known bug in the library."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+                    "com.fasterxml.jackson.databind.DeserializationContext",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.exc.InvalidFormatException"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.DeserializationContext"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.DeserializationContext"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::FromStringDeserializer(Class)"
+                    ],
+                    "com.fasterxml.jackson.databind.DeserializationContext": [
+                        "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)",
+                        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializerFactory,DeserializerCache)",
+                        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.exc.InvalidFormatException": [
+                        "com.fasterxml.jackson.databind.exc.InvalidFormatException::from(JsonParser,String,Object,Class)",
+                        "com.fasterxml.jackson.databind.exc.InvalidFormatException::InvalidFormatException(JsonParser,String,Object,Class)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::UUIDDeserializer()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.DeserializationContext": [
+                        "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)",
+                        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializerFactory,DeserializerCache)",
+                        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_deserialize(String,DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.std.UUIDDeserializer::_badFormat(String,DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.FromStringDeserializer::deserialize(JsonParser,DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::handledType()",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::addHandler(DeserializationProblemHandler)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.DeserializationContext": [
+                        "com.fasterxml.jackson.databind.DeserializationContext::_quotedString(String)",
+                        "com.fasterxml.jackson.databind.DeserializationContext::DeserializationContext(DeserializationContext,DeserializationConfig,JsonParser,InjectableValues)"
+                    ]
+                }
+            }
+        }
+    ]
+}

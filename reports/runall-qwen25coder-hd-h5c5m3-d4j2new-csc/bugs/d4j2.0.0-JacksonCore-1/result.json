@@ -1,0 +1,956 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.core.JsonFactory",
+        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser",
+        "com.fasterxml.jackson.core.JsonParser",
+        "com.fasterxml.jackson.core.JsonParseException",
+        "com.fasterxml.jackson.core.io.NumberInput",
+        "com.fasterxml.jackson.core.JsonToken",
+        "com.fasterxml.jackson.core.JsonProcessingException",
+        "com.fasterxml.jackson.core.io.SerializedString",
+        "com.fasterxml.jackson.core.io.IOContext",
+        "com.fasterxml.jackson.core.util.TextBuffer",
+        "com.fasterxml.jackson.core.base.ParserBase"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken()\n        throws IOException, JsonParseException\n    {\n        _numTypesValid = NR_UNKNOWN;\n\n        /* First: field names are special -- we will always tokenize\n         * (part of) value along with field name to simplify\n         * state handling. If so, can and need to use secondary token:\n         */\n        if (_currToken == JsonToken.FIELD_NAME) {\n            return _nextAfterName();\n        }\n        if (_tokenIncomplete) {\n            _skipString(); // only strings can be partial\n        }\n        int i = _skipWSOrEnd();\n        if (i < 0) { // end-of-input\n            /* 19-Feb-2009, tatu: Should actually close/release things\n             *    like input source, symbol table and recyclable buffers now.\n             */\n            close();\n            return (_currToken = null);\n        }\n\n        /* First, need to ensure we know the starting location of token\n         * after skipping leading white space\n         */\n        _tokenInputTotal = _currInputProcessed + _inputPtr - 1;\n        _tokenInputRow = _currInputRow;\n        _tokenInputCol = _inputPtr - _currInputRowStart - 1;\n\n        // finally: clear any data retained so far\n        _binaryValue = null;\n\n        // Closing scope?\n        if (i == INT_RBRACKET) {\n            if (!_parsingContext.inArray()) {\n                _reportMismatchedEndMarker(i, '}');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_ARRAY);\n        }\n        if (i == INT_RCURLY) {\n            if (!_parsingContext.inObject()) {\n                _reportMismatchedEndMarker(i, ']');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_OBJECT);\n        }\n\n        // Nope: do we then expect a comma?\n        if (_parsingContext.expectComma()) {\n            if (i != INT_COMMA) {\n                _reportUnexpectedChar(i, \"was expecting comma to separate \"+_parsingContext.getTypeDesc()+\" entries\");\n            }\n            i = _skipWS();\n        }\n\n        /* And should we now have a name? Always true for\n         * Object contexts, since the intermediate 'expect-value'\n         * state is never retained.\n         */\n        boolean inObject = _parsingContext.inObject();\n        if (inObject) {\n           // First, field name itself:\n            String name = _parseFieldName(i);\n            _parsingContext.setCurrentName(name);\n            _currToken = JsonToken.FIELD_NAME;\n            i = _skipWS();\n            if (i != INT_COLON) {\n                _reportUnexpectedChar(i, \"was expecting a colon to separate field name and value\");\n            }\n            i = _skipWS();\n        }\n\n        // Ok: we must have a value... what is it?\n\n        JsonToken t;\n\n        switch (i) {\n        case INT_QUOTE:\n            _tokenIncomplete = true;\n            t = JsonToken.VALUE_STRING;\n            break;\n        case INT_LBRACKET:\n            if (!inObject) {\n                _parsingContext = _parsingContext.createChildArrayContext(_tokenInputRow, _tokenInputCol);\n            }\n            t = JsonToken.START_ARRAY;\n            break;\n        case INT_LCURLY:\n            if (!inObject) {\n                _parsingContext = _parsingContext.createChildObjectContext(_tokenInputRow, _tokenInputCol);\n            }\n            t = JsonToken.START_OBJECT;\n            break;\n        case INT_RBRACKET:\n        case INT_RCURLY:\n            // Error: neither is valid at this point; valid closers have\n            // been handled earlier\n            _reportUnexpectedChar(i, \"expected a value\");\n        case INT_t:\n            _matchToken(\"true\", 1);\n            t = JsonToken.VALUE_TRUE;\n            break;\n        case INT_f:\n            _matchToken(\"false\", 1);\n            t = JsonToken.VALUE_FALSE;\n            break;\n        case INT_n:\n            _matchToken(\"null\", 1);\n            t = JsonToken.VALUE_NULL;\n            break;\n\n        case INT_MINUS:\n            /* Should we have separate handling for plus? Although\n             * it is not allowed per se, it may be erroneously used,\n             * and could be indicate by a more specific error message.\n             */\n        case INT_0:\n        case INT_1:\n        case INT_2:\n        case INT_3:\n        case INT_4:\n        case INT_5:\n        case INT_6:\n        case INT_7:\n        case INT_8:\n        case INT_9:\n            t = parseNumberText(i);\n            break;\n        default:\n            t = _handleUnexpectedValue(i);\n            break;\n        }\n\n        if (inObject) {\n            _nextToken = t;\n            return _currToken;\n        }\n        _currToken = t;\n        return t;\n    }\n\n```",
+            "method_doc": " @return Next token from the stream, if any found, or null to indicate end-of-input ",
+            "class_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.Reader} to handle low-level character conversion tasks. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the parsing of tokens from the JSON input, including numeric values. The issue described involves allowing NaN (Not-a-Number), which is a numeric value but not representable as a standard number type. The `nextToken()` method is responsible for identifying and processing these numeric values, making it a prime candidate for fixing the bug related to NaN handling.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::configure(Feature,boolean)",
+            "method_code": "```java\n    public final JsonFactory configure(JsonGenerator.Feature f, boolean state) {\n        return state ? enable(f) : disable(f);\n    }\n\n```",
+            "method_doc": " Method for enabling or disabling specified generator feature (check {@link JsonGenerator.Feature} for list of features) ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly configures features, but the issue seems to stem from how these configurations are being applied or checked in the `_testAllowNaN` method rather than the configuration itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::createParser(Reader)",
+            "method_code": "```java\n    public JsonParser createParser(Reader r)\n        throws IOException, JsonParseException\n    {\n        // false -> we do NOT own Reader (did not create it)\n        IOContext ctxt = _createContext(r, false);\n        // [JACKSON-512]: allow wrapping with InputDecorator\n        if (_inputDecorator != null) {\n            r = _inputDecorator.decorate(ctxt, r);\n        }\n        return _createParser(r, ctxt);\n    }\n\n```",
+            "method_doc": " Method for constructing parser for parsing the contents accessed via specified Reader. <p> The read stream will <b>not be owned</b> by the parser, it will still be managed (i.e. closed if end-of-stream is reacher, or parser close method called) if (and only if) {@link com.fasterxml.jackson.core.JsonParser.Feature#AUTO_CLOSE_SOURCE} is enabled.  @param r Reader to use for reading JSON content to parse  @since 2.1 ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it constructs the parser which could potentially misinterpret the input if the parser's configuration is incorrect.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "4": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createParser(Reader,IOContext)",
+            "method_code": "```java\n    protected JsonParser _createParser(Reader r, IOContext ctxt)\n        throws IOException, JsonParseException\n    {\n        return new ReaderBasedJsonParser(ctxt, _parserFeatures, r, _objectCodec,\n                _rootCharSymbols.makeChild(isEnabled(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES),\n                        isEnabled(JsonFactory.Feature.INTERN_FIELD_NAMES)));\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates parser using given {@link Reader} object for reading content. <p> This method is specifically designed to remain compatible between minor versions so that sub-classes can count on it being called as expected. That is, it is part of official interface from sub-class perspective, although not a public method available to users of factory implementations.  @since 2.1 ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it is responsible for creating parsers which could potentially misinterpret or handle non-standard numeric values incorrectly. Given the failure in allowing NaN, it's plausible that the parser creation process might not be correctly handling these cases.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "4": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::loadMore()",
+            "method_code": "```java\n    @Override\n    protected boolean loadMore() throws IOException\n    {\n        _currInputProcessed += _inputEnd;\n        _currInputRowStart -= _inputEnd;\n\n        if (_reader != null) {\n            int count = _reader.read(_inputBuffer, 0, _inputBuffer.length);\n            if (count > 0) {\n                _inputPtr = 0;\n                _inputEnd = count;\n                return true;\n            }\n            // End of input\n            _closeInput();\n            // Should never return 0, so let's fail\n            if (count == 0) {\n                throw new IOException(\"Reader returned 0 characters when trying to read \"+_inputEnd);\n            }\n        }\n        return false;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.Reader} to handle low-level character conversion tasks. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious as it handles reading from the input source, but the issue seems to stem from the parser's configuration rather than the loading mechanism itself. The problem might lie in how the parser checks and applies its features.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::_handleUnexpectedValue(int)",
+            "method_code": "```java\n    protected JsonToken _handleUnexpectedValue(int i)\n        throws IOException, JsonParseException\n    {\n        // Most likely an error, unless we are to allow single-quote-strings\n        switch (i) {\n        case '\\'':\n            /* [JACKSON-173]: allow single quotes. Unlike with regular\n             * Strings, we'll eagerly parse contents; this so that there's\n             * no need to store information on quote char used.\n             *\n             * Also, no separation to fast/slow parsing; we'll just do\n             * one regular (~= slowish) parsing, to keep code simple\n             */\n            if (isEnabled(Feature.ALLOW_SINGLE_QUOTES)) {\n                return _handleApostropheValue();\n            }\n            break;\n        case 'N':\n            _matchToken(\"NaN\", 1);\n            if (isEnabled(Feature.ALLOW_NON_NUMERIC_NUMBERS)) {\n                return resetAsNaN(\"NaN\", Double.NaN);\n            }\n            _reportError(\"Non-standard token 'NaN': enable JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS to allow\");\n            break;\n        case 'I':\n            _matchToken(\"Infinity\", 1);\n            if (isEnabled(Feature.ALLOW_NON_NUMERIC_NUMBERS)) {\n                return resetAsNaN(\"Infinity\", Double.POSITIVE_INFINITY);\n            }\n            _reportError(\"Non-standard token 'Infinity': enable JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS to allow\");\n            break;\n        case '+': // note: '-' is taken as number\n            if (_inputPtr >= _inputEnd) {\n                if (!loadMore()) {\n                    _reportInvalidEOFInValue();\n                }\n            }\n            return _handleInvalidNumberStart(_inputBuffer[_inputPtr++], false);\n        }\n        // [Issue#77] Try to decode most likely token\n        if (Character.isJavaIdentifierStart(i)) {\n            _reportInvalidToken(\"\"+((char) i), \"('true', 'false' or 'null')\");\n        }\n        // but if it doesn't look like a token:\n        _reportUnexpectedChar(i, \"expected a valid value (number, String, array, object, 'true', 'false' or 'null')\");\n        return null;\n    }\n\n```",
+            "method_doc": " Method for handling cases where first non-space character of an expected value token is not legal for standard JSON content. ",
+            "class_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.Reader} to handle low-level character conversion tasks. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles unexpected values and checks for specific tokens like 'NaN' and 'Infinity'. Given that the test failure involves allowing NaN, it is plausible that the issue lies in how this method processes these special numeric values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+            "method_code": "```java\n    public boolean isEnabled(Feature f) {\n        return (_features & f.getMask()) != 0;\n    }\n\n```",
+            "method_doc": " Method for checking whether specified {@link Feature} is enabled. ",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it only checks if a feature is enabled without ensuring that the parser is configured correctly. It's possible that the issue lies elsewhere in the parser's configuration or setup rather than in this method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 0,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. ",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it collects default feature settings, but it does not directly handle the parsing logic. The issue seems to be related to the configuration of the parser features rather than the collection of defaults.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "3": 0,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)",
+            "method_code": "```java\n    public JsonParseException(String msg, JsonLocation loc)\n    {\n        super(msg, loc);\n    }\n\n```",
+            "method_doc": "This constructor initializes a new instance of `JsonParseException` with a message and a location. It calls the superclass constructor `Throwable::Throwable(String, Throwable)` implicitly.",
+            "class_name": "com.fasterxml.jackson.core.JsonParseException",
+            "class_doc": " Exception type for parsing problems, used when non-well-formed content (content that does not conform to JSON syntax as per specification) is encountered. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it is responsible for creating exceptions related to JSON parsing errors. However, the issue described seems to stem from a misconfiguration of parser features rather than a problem with how exceptions are thrown.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::enabledByDefault()",
+            "method_code": "```java\n        public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "This method returns whether the feature is enabled by default.",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the configuration of the parser features rather than the default state of individual features.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation,Throwable)",
+            "method_code": "```java\n    protected JsonProcessingException(String msg, JsonLocation loc, Throwable rootCause)\n    {\n        /* Argh. IOException(Throwable,String) is only available starting\n         * with JDK 1.6...\n         */\n        super(msg);\n        if (rootCause != null) {\n            initCause(rootCause);\n        }\n        _location = loc;\n    }\n\n```",
+            "method_doc": "Constructs a `JsonProcessingException` with a message, location, and root cause. Calls `super(msg)` to set the message and `initCause(rootCause)` to initialize the cause if provided. Sets the location using `_location`.",
+            "class_name": "com.fasterxml.jackson.core.JsonProcessingException",
+            "class_doc": " Intermediate base class for all problems encountered when processing (parsing, generating) JSON content that are not pure I/O problems. Regular {@link java.io.IOException}s will be passed through as is. Sub-class of {@link java.io.IOException} for convenience. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly constructs instances of `JsonProcessingException`, which is the exception being tested. The issue described in the test suggests that the exception handling might not be working as intended, and fixing the constructor could address the root cause of the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::convertNumberToBigDecimal()",
+            "method_code": "```java\n    protected void convertNumberToBigDecimal()\n        throws IOException, JsonParseException\n    {\n        /* 05-Aug-2008, tatus: Important note: this MUST start with\n         *   more accurate representations, since we don't know which\n         *   value is the original one (others get generated when\n         *   requested)\n         */\n    \n        if ((_numTypesValid & NR_DOUBLE) != 0) {\n            /* Let's actually parse from String representation,\n             * to avoid rounding errors that non-decimal floating operations\n             * would incur\n             */\n            _numberBigDecimal = NumberInput.parseBigDecimal(getText());\n        } else if ((_numTypesValid & NR_BIGINT) != 0) {\n            _numberBigDecimal = new BigDecimal(_numberBigInt);\n        } else if ((_numTypesValid & NR_LONG) != 0) {\n            _numberBigDecimal = BigDecimal.valueOf(_numberLong);\n        } else if ((_numTypesValid & NR_INT) != 0) {\n            _numberBigDecimal = BigDecimal.valueOf(_numberInt);\n        } else {\n            _throwInternal();\n        }\n        _numTypesValid |= NR_BIGDECIMAL;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.base.ParserBase",
+            "class_doc": " Intermediate base class used by all Jackson {@link JsonParser} implementations. Contains most common things that are independent of actual underlying input source  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Incomplete or Incorrect Implementation of NaN Handling\n**Description:** The parser might not fully support or handle NaN values according to the JSON specification, leading to inconsistent behavior across different parsing methods.\n\n**Location:** Likely in the implementation of NaN handling within the parser.\n\n**Observation Support:** The assertion failure indicates that the parser did not behave as expected when encountering NaN values, suggesting that the implementation might be incomplete or incorrect. This could involve issues with how NaN values are recognized, processed, or reported by the parser.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the conversion of numeric values to `BigDecimal`, which is crucial for accurately representing special floating-point values like NaN.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+            "method_code": "```java\n    public BufferRecycler _getBufferRecycler()\n    {\n        SoftReference<BufferRecycler> ref = _recyclerRef.get();\n        BufferRecycler br = (ref == null) ? null : ref.get();\n\n        if (br == null) {\n            br = new BufferRecycler();\n            _recyclerRef.set(new SoftReference<BufferRecycler>(br));\n        }\n        return br;\n    }\n\n```",
+            "method_doc": " Method used by factory to create buffer recycler instances for parsers and generators. <p> Note: only public to give access for <code>ObjectMapper</code> ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Memory Corruption or Race Condition\n**Description:** There might be a memory corruption issue or race condition in the parser, leading to unpredictable behavior during the parsing process.\n\n**Location:** Potentially anywhere in the parser's internal state management or concurrency handling.\n\n**Observation Support:** The fact that the parser skipped over the NaN value and reached the end of the array despite failing earlier suggests that there might be some underlying issue affecting the parser's state or execution flow.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves creating and managing a `BufferRecycler` instance, which could potentially lead to issues related to memory management or resource leaks. However, given the context of the failure, it seems unlikely that the problem lies within the creation of the `BufferRecycler` itself but rather in its usage or interaction with other parts of the parser.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+            "method_code": "```java\n    protected JsonParseException _constructError(String msg)\n    {\n        return new JsonParseException(msg, getCurrentLocation());\n    }\n\n```",
+            "method_doc": " Helper method for constructing {@link JsonParseException}s based on current state of the parser ",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parsing Logic Error\n**Description:** There might be a logical error in how the parser handles NaN values, causing it to incorrectly identify or process them.\n\n**Location:** Potentially in the logic that determines the type of numeric value being parsed.\n\n**Observation Support:** The fact that the parser identified the NaN value as a floating-point number (`VALUE_NUMBER_FLOAT`) but still threw an exception when converting it to a `BigDecimal` implies that there might be a misinterpretation or incorrect handling of NaN values.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it constructs exceptions based on the current state of the parser. However, the issue described seems to stem from how NaN values are handled during parsing rather than how errors are constructed.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 6,
+                "3": 6,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.NumberInput::parseBigDecimal(String)",
+            "method_code": "```java\n    public static BigDecimal parseBigDecimal(String numStr) throws NumberFormatException\n    {\n            return new BigDecimal(numStr);\n    }\n\n```",
+            "method_doc": "This method parses a string into a `BigDecimal` using the constructor of `BigDecimal`. It does not call any other methods from the covered methods list.",
+            "class_name": "com.fasterxml.jackson.core.io.NumberInput",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parsing Logic Error\n**Description:** There might be a logical error in how the parser handles NaN values, causing it to incorrectly identify or process them.\n\n**Location:** Potentially in the logic that determines the type of numeric value being parsed.\n\n**Observation Support:** The fact that the parser identified the NaN value as a floating-point number (`VALUE_NUMBER_FLOAT`) but still threw an exception when converting it to a `BigDecimal` implies that there might be a misinterpretation or incorrect handling of NaN values.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly uses the `BigDecimal` constructor to parse the string, which could potentially handle NaN values incorrectly. Given the observed behavior, it's plausible that the issue lies here.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::getMessage()",
+            "method_code": "```java\n    @Override\n    public String getMessage()\n    {\n        String msg = super.getMessage();\n        if (msg == null) {\n            msg = \"N/A\";\n        }\n        JsonLocation loc = getLocation();\n        String suffix = getMessageSuffix();\n        // mild optimization, if nothing extra is needed:\n        if (loc != null || suffix != null) {\n            StringBuilder sb = new StringBuilder(100);\n            sb.append(msg);\n            if (suffix != null) {\n                sb.append(suffix);\n            }\n            if (loc != null) {\n                sb.append('\\n');\n                sb.append(\" at \");\n                sb.append(loc.toString());\n            }\n            msg = sb.toString();\n        }\n        return msg;\n    }\n\n```",
+            "method_doc": " Default method overridden so that we can add location information ",
+            "class_name": "com.fasterxml.jackson.core.JsonProcessingException",
+            "class_doc": " Intermediate base class for all problems encountered when processing (parsing, generating) JSON content that are not pure I/O problems. Regular {@link java.io.IOException}s will be passed through as is. Sub-class of {@link java.io.IOException} for convenience. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parsing Logic Error\n**Description:** There might be a logical error in how the parser handles NaN values, causing it to incorrectly identify or process them.\n\n**Location:** Potentially in the logic that determines the type of numeric value being parsed.\n\n**Observation Support:** The fact that the parser identified the NaN value as a floating-point number (`VALUE_NUMBER_FLOAT`) but still threw an exception when converting it to a `BigDecimal` implies that there might be a misinterpretation or incorrect handling of NaN values.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves modifying the error message, which could potentially affect other parts of the system that rely on the exception messages. However, since the issue seems to be related to parsing logic rather than message formatting, fixing the parsing logic itself might be more effective.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation)",
+            "method_code": "```java\n    protected JsonProcessingException(String msg, JsonLocation loc)\n    {\n        this(msg, loc, null);\n    }\n\n```",
+            "method_doc": "Constructs a `JsonProcessingException` with a message and location. Calls the constructor `JsonProcessingException(String,JsonLocation,Throwable)` with a `null` root cause.",
+            "class_name": "com.fasterxml.jackson.core.JsonProcessingException",
+            "class_doc": " Intermediate base class for all problems encountered when processing (parsing, generating) JSON content that are not pure I/O problems. Regular {@link java.io.IOException}s will be passed through as is. Sub-class of {@link java.io.IOException} for convenience. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Parsing Logic Error\n**Description:** There might be a logical error in how the parser handles NaN values, causing it to incorrectly identify or process them.\n\n**Location:** Potentially in the logic that determines the type of numeric value being parsed.\n\n**Observation Support:** The fact that the parser identified the NaN value as a floating-point number (`VALUE_NUMBER_FLOAT`) but still threw an exception when converting it to a `BigDecimal` implies that there might be a misinterpretation or incorrect handling of NaN values.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it constructs exceptions without providing a root cause, which can make debugging harder. However, it's unlikely to directly cause the parsing issue described in the test failure.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 6,
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)",
+            "method_code": "```java\n    public SerializedString(String v) {\n        if (v == null) {\n            throw new IllegalStateException(\"Null String illegal for SerializedString\");\n        }\n        _value = v;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `SerializedString` with the provided string value. If the input string is `null`, it throws an `IllegalStateException`. This constructor does not call any other methods from the Covered Methods List.",
+            "class_name": "com.fasterxml.jackson.core.io.SerializedString",
+            "class_doc": " String token that can lazily serialize String contained and then reuse that serialization later on. This is similar to JDBC prepared statements, for example, in that instances should only be created when they are used more than use; prime candidates are various serializers. <p> Class is final for performance reasons and since this is not designed to be extensible or customizable (customizations would occur in calling code) ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly handles the creation of `SerializedString` instances and throws an exception if the input string is `null`. However, the issue described in the test failure seems to be related to exception handling rather than the initialization of `SerializedString` itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 6,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+            "method_code": "```java\n    public void releaseBuffers()\n    {\n        if (_allocator == null) {\n            resetWithEmpty();\n        } else {\n            if (_currentSegment != null) {\n                // First, let's get rid of all but the largest char array\n                resetWithEmpty();\n                // And then return that array\n                char[] buf = _currentSegment;\n                _currentSegment = null;\n                _allocator.releaseCharBuffer(BufferRecycler.CharBufferType.TEXT_BUFFER, buf);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to indicate that the underlying buffers should now be recycled if they haven't yet been recycled. Although caller can still use this text buffer, it is not advisable to call this method if that is likely, since next time a buffer is needed, buffers need to reallocated. Note: calling this method automatically also clears contents of the buffer. ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Memory Corruption or Race Condition\n**Description:** There might be a memory corruption issue or race condition in the parser, leading to unpredictable behavior during the parsing process.\n\n**Location:** Potentially anywhere in the parser's internal state management or concurrency handling.\n\n**Observation Support:** The fact that the parser skipped over the NaN value and reached the end of the array despite failing earlier suggests that there might be some underlying issue affecting the parser's state or execution flow.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves releasing buffers, which could potentially affect the state of the parser. However, the failure seems to be related to NaN values rather than buffer management issues.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::contentsAsString()",
+            "method_code": "```java\n    public String contentsAsString()\n    {\n        if (_resultString == null) {\n            // Has array been requested? Can make a shortcut, if so:\n            if (_resultArray != null) {\n                _resultString = new String(_resultArray);\n            } else {\n                // Do we use shared array?\n                if (_inputStart >= 0) {\n                    if (_inputLen < 1) {\n                        return (_resultString = \"\");\n                    }\n                    _resultString = new String(_inputBuffer, _inputStart, _inputLen);\n                } else { // nope... need to copy\n                    // But first, let's see if we have just one buffer\n                    int segLen = _segmentSize;\n                    int currLen = _currentSize;\n                    \n                    if (segLen == 0) { // yup\n                        _resultString = (currLen == 0) ? \"\" : new String(_currentSegment, 0, currLen);\n                    } else { // no, need to combine\n                        StringBuilder sb = new StringBuilder(segLen + currLen);\n                        // First stored segments\n                        if (_segments != null) {\n                            for (int i = 0, len = _segments.size(); i < len; ++i) {\n                                char[] curr = _segments.get(i);\n                                sb.append(curr, 0, curr.length);\n                            }\n                        }\n                        // And finally, current segment:\n                        sb.append(_currentSegment, 0, _currentSize);\n                        _resultString = sb.toString();\n                    }\n                }\n            }\n        }\n        return _resultString;\n    }\n\n```",
+            "method_doc": "  Other accessors:  ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Memory Corruption or Race Condition\n**Description:** There might be a memory corruption issue or race condition in the parser, leading to unpredictable behavior during the parsing process.\n\n**Location:** Potentially anywhere in the parser's internal state management or concurrency handling.\n\n**Observation Support:** The fact that the parser skipped over the NaN value and reached the end of the array despite failing earlier suggests that there might be some underlying issue affecting the parser's state or execution flow.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves converting the content of the `TextBuffer` into a `String`, which could potentially lead to issues if the buffer's state is inconsistent or corrupted. Given the context of the failure, it's plausible that the problem lies in how the buffer handles its data or transitions between different states.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::getDecimalValue()",
+            "method_code": "```java\n    @Override\n    public BigDecimal getDecimalValue() throws IOException, JsonParseException\n    {\n        if ((_numTypesValid & NR_BIGDECIMAL) == 0) {\n            if (_numTypesValid == NR_UNKNOWN) {\n                _parseNumericValue(NR_BIGDECIMAL);\n            }\n            if ((_numTypesValid & NR_BIGDECIMAL) == 0) {\n                convertNumberToBigDecimal();\n            }\n        }\n        return _numberBigDecimal;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.base.ParserBase",
+            "class_doc": " Intermediate base class used by all Jackson {@link JsonParser} implementations. Contains most common things that are independent of actual underlying input source  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Incomplete or Incorrect Implementation of NaN Handling\n**Description:** The parser might not fully support or handle NaN values according to the JSON specification, leading to inconsistent behavior across different parsing methods.\n\n**Location:** Likely in the implementation of NaN handling within the parser.\n\n**Observation Support:** The assertion failure indicates that the parser did not behave as expected when encountering NaN values, suggesting that the implementation might be incomplete or incorrect. This could involve issues with how NaN values are recognized, processed, or reported by the parser.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles numeric values, including decimals, which could be related to NaN handling. However, the specific issue with NaN values is not directly addressed here.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::ParserBase(IOContext,int)",
+            "method_code": "```java\n    protected ParserBase(IOContext ctxt, int features)\n    {\n        super();\n        _features = features;\n        _ioContext = ctxt;\n        _textBuffer = ctxt.constructTextBuffer();\n        _parsingContext = JsonReadContext.createRootContext();\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.core.base.ParserBase",
+            "class_doc": " Intermediate base class used by all Jackson {@link JsonParser} implementations. Contains most common things that are independent of actual underlying input source  ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Incomplete or Incorrect Implementation of NaN Handling\n**Description:** The parser might not fully support or handle NaN values according to the JSON specification, leading to inconsistent behavior across different parsing methods.\n\n**Location:** Likely in the implementation of NaN handling within the parser.\n\n**Observation Support:** The assertion failure indicates that the parser did not behave as expected when encountering NaN values, suggesting that the implementation might be incomplete or incorrect. This could involve issues with how NaN values are recognized, processed, or reported by the parser.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it initializes the parser's state but does not directly handle NaN values. Given that the issue seems related to NaN handling, further investigation into how NaN values are managed within the parser would be necessary.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::getSourceReference()",
+            "method_code": "```java\n    public Object getSourceReference() { return _sourceRef; }\n\n```",
+            "method_doc": "  Public API, accessors  ",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to exception handling within the `_testAllowNaN` method, rather than the `getSourceReference()` method itself. The `getSourceReference()` method simply returns a reference to the source, which does not appear to be involved in the exception handling logic.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::isResourceManaged()",
+            "method_code": "```java\n    public boolean isResourceManaged() { return _managedResource; }\n\n```",
+            "method_doc": "Checks if the resource associated with this context is managed. This method does not call any other methods from the covered list.",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to exception handling within the `_testAllowNaN` method, rather than the `isResourceManaged()` method itself. The `isResourceManaged()` method simply checks whether a resource is managed, which does not directly impact the exception handling logic.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+            "method_code": "```java\n    public TextBuffer constructTextBuffer() {\n        return new TextBuffer(_bufferRecycler);\n    }\n\n```",
+            "method_doc": "  Public API, buffer management  ",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to exception handling within the `_testAllowNaN` method, rather than the `constructTextBuffer` method itself. The `constructTextBuffer` method simply creates a new `TextBuffer` instance, which does not directly involve exception handling.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::TextBuffer(BufferRecycler)",
+            "method_code": "```java\n    public TextBuffer(BufferRecycler allocator)\n    {\n        _allocator = allocator;\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "test_failure_causes": "Memory Corruption or Race Condition\n**Description:** There might be a memory corruption issue or race condition in the parser, leading to unpredictable behavior during the parsing process.\n\n**Location:** Potentially anywhere in the parser's internal state management or concurrency handling.\n\n**Observation Support:** The fact that the parser skipped over the NaN value and reached the end of the array despite failing earlier suggests that there might be some underlying issue affecting the parser's state or execution flow.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The provided stack trace indicates that the failure occurred in the `_testAllowNaN` method, specifically at line 394. The `TextBuffer` constructor does not appear to be directly involved in the parsing logic that caused the failure. Therefore, fixing the `TextBuffer` constructor is unlikely to resolve the issue.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::nextToken()": {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken()\n        throws IOException, JsonParseException\n    {\n        _numTypesValid = NR_UNKNOWN;\n\n        /* First: field names are special -- we will always tokenize\n         * (part of) value along with field name to simplify\n         * state handling. If so, can and need to use secondary token:\n         */\n        if (_currToken == JsonToken.FIELD_NAME) {\n            return _nextAfterName();\n        }\n        if (_tokenIncomplete) {\n            _skipString(); // only strings can be partial\n        }\n        int i = _skipWSOrEnd();\n        if (i < 0) { // end-of-input\n            /* 19-Feb-2009, tatu: Should actually close/release things\n             *    like input source, symbol table and recyclable buffers now.\n             */\n            close();\n            return (_currToken = null);\n        }\n\n        /* First, need to ensure we know the starting location of token\n         * after skipping leading white space\n         */\n        _tokenInputTotal = _currInputProcessed + _inputPtr - 1;\n        _tokenInputRow = _currInputRow;\n        _tokenInputCol = _inputPtr - _currInputRowStart - 1;\n\n        // finally: clear any data retained so far\n        _binaryValue = null;\n\n        // Closing scope?\n        if (i == INT_RBRACKET) {\n            if (!_parsingContext.inArray()) {\n                _reportMismatchedEndMarker(i, '}');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_ARRAY);\n        }\n        if (i == INT_RCURLY) {\n            if (!_parsingContext.inObject()) {\n                _reportMismatchedEndMarker(i, ']');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_OBJECT);\n        }\n\n        // Nope: do we then expect a comma?\n        if (_parsingContext.expectComma()) {\n            if (i != INT_COMMA) {\n                _reportUnexpectedChar(i, \"was expecting comma to separate \"+_parsingContext.getTypeDesc()+\" entries\");\n            }\n            i = _skipWS();\n        }\n\n        /* And should we now have a name? Always true for\n         * Object contexts, since the intermediate 'expect-value'\n         * state is never retained.\n         */\n        boolean inObject = _parsingContext.inObject();\n        if (inObject) {\n           // First, field name itself:\n            String name = _parseFieldName(i);\n            _parsingContext.setCurrentName(name);\n            _currToken = JsonToken.FIELD_NAME;\n            i = _skipWS();\n            if (i != INT_COLON) {\n                _reportUnexpectedChar(i, \"was expecting a colon to separate field name and value\");\n            }\n            i = _skipWS();\n        }\n\n        // Ok: we must have a value... what is it?\n\n        JsonToken t;\n\n        switch (i) {\n        case INT_QUOTE:\n            _tokenIncomplete = true;\n            t = JsonToken.VALUE_STRING;\n            break;\n        case INT_LBRACKET:\n            if (!inObject) {\n                _parsingContext = _parsingContext.createChildArrayContext(_tokenInputRow, _tokenInputCol);\n            }\n            t = JsonToken.START_ARRAY;\n            break;\n        case INT_LCURLY:\n            if (!inObject) {\n                _parsingContext = _parsingContext.createChildObjectContext(_tokenInputRow, _tokenInputCol);\n            }\n            t = JsonToken.START_OBJECT;\n            break;\n        case INT_RBRACKET:\n        case INT_RCURLY:\n            // Error: neither is valid at this point; valid closers have\n            // been handled earlier\n            _reportUnexpectedChar(i, \"expected a value\");\n        case INT_t:\n            _matchToken(\"true\", 1);\n            t = JsonToken.VALUE_TRUE;\n            break;\n        case INT_f:\n            _matchToken(\"false\", 1);\n            t = JsonToken.VALUE_FALSE;\n            break;\n        case INT_n:\n            _matchToken(\"null\", 1);\n            t = JsonToken.VALUE_NULL;\n            break;\n\n        case INT_MINUS:\n            /* Should we have separate handling for plus? Although\n             * it is not allowed per se, it may be erroneously used,\n             * and could be indicate by a more specific error message.\n             */\n        case INT_0:\n        case INT_1:\n        case INT_2:\n        case INT_3:\n        case INT_4:\n        case INT_5:\n        case INT_6:\n        case INT_7:\n        case INT_8:\n        case INT_9:\n            t = parseNumberText(i);\n            break;\n        default:\n            t = _handleUnexpectedValue(i);\n            break;\n        }\n\n        if (inObject) {\n            _nextToken = t;\n            return _currToken;\n        }\n        _currToken = t;\n        return t;\n    }\n\n```",
+            "method_doc": " @return Next token from the stream, if any found, or null to indicate end-of-input "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::configure(Feature,boolean)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::configure(Feature,boolean)",
+            "method_code": "```java\n    public final JsonFactory configure(JsonGenerator.Feature f, boolean state) {\n        return state ? enable(f) : disable(f);\n    }\n\n```",
+            "method_doc": " Method for enabling or disabling specified generator feature (check {@link JsonGenerator.Feature} for list of features) "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::createParser(Reader)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::createParser(Reader)",
+            "method_code": "```java\n    public JsonParser createParser(Reader r)\n        throws IOException, JsonParseException\n    {\n        // false -> we do NOT own Reader (did not create it)\n        IOContext ctxt = _createContext(r, false);\n        // [JACKSON-512]: allow wrapping with InputDecorator\n        if (_inputDecorator != null) {\n            r = _inputDecorator.decorate(ctxt, r);\n        }\n        return _createParser(r, ctxt);\n    }\n\n```",
+            "method_doc": " Method for constructing parser for parsing the contents accessed via specified Reader. <p> The read stream will <b>not be owned</b> by the parser, it will still be managed (i.e. closed if end-of-stream is reacher, or parser close method called) if (and only if) {@link com.fasterxml.jackson.core.JsonParser.Feature#AUTO_CLOSE_SOURCE} is enabled.  @param r Reader to use for reading JSON content to parse  @since 2.1 "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::_createParser(Reader,IOContext)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createParser(Reader,IOContext)",
+            "method_code": "```java\n    protected JsonParser _createParser(Reader r, IOContext ctxt)\n        throws IOException, JsonParseException\n    {\n        return new ReaderBasedJsonParser(ctxt, _parserFeatures, r, _objectCodec,\n                _rootCharSymbols.makeChild(isEnabled(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES),\n                        isEnabled(JsonFactory.Feature.INTERN_FIELD_NAMES)));\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates parser using given {@link Reader} object for reading content. <p> This method is specifically designed to remain compatible between minor versions so that sub-classes can count on it being called as expected. That is, it is part of official interface from sub-class perspective, although not a public method available to users of factory implementations.  @since 2.1 "
+        },
+        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::loadMore()": {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::loadMore()",
+            "method_code": "```java\n    @Override\n    protected boolean loadMore() throws IOException\n    {\n        _currInputProcessed += _inputEnd;\n        _currInputRowStart -= _inputEnd;\n\n        if (_reader != null) {\n            int count = _reader.read(_inputBuffer, 0, _inputBuffer.length);\n            if (count > 0) {\n                _inputPtr = 0;\n                _inputEnd = count;\n                return true;\n            }\n            // End of input\n            _closeInput();\n            // Should never return 0, so let's fail\n            if (count == 0) {\n                throw new IOException(\"Reader returned 0 characters when trying to read \"+_inputEnd);\n            }\n        }\n        return false;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::_handleUnexpectedValue(int)": {
+            "method_name": "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::_handleUnexpectedValue(int)",
+            "method_code": "```java\n    protected JsonToken _handleUnexpectedValue(int i)\n        throws IOException, JsonParseException\n    {\n        // Most likely an error, unless we are to allow single-quote-strings\n        switch (i) {\n        case '\\'':\n            /* [JACKSON-173]: allow single quotes. Unlike with regular\n             * Strings, we'll eagerly parse contents; this so that there's\n             * no need to store information on quote char used.\n             *\n             * Also, no separation to fast/slow parsing; we'll just do\n             * one regular (~= slowish) parsing, to keep code simple\n             */\n            if (isEnabled(Feature.ALLOW_SINGLE_QUOTES)) {\n                return _handleApostropheValue();\n            }\n            break;\n        case 'N':\n            _matchToken(\"NaN\", 1);\n            if (isEnabled(Feature.ALLOW_NON_NUMERIC_NUMBERS)) {\n                return resetAsNaN(\"NaN\", Double.NaN);\n            }\n            _reportError(\"Non-standard token 'NaN': enable JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS to allow\");\n            break;\n        case 'I':\n            _matchToken(\"Infinity\", 1);\n            if (isEnabled(Feature.ALLOW_NON_NUMERIC_NUMBERS)) {\n                return resetAsNaN(\"Infinity\", Double.POSITIVE_INFINITY);\n            }\n            _reportError(\"Non-standard token 'Infinity': enable JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS to allow\");\n            break;\n        case '+': // note: '-' is taken as number\n            if (_inputPtr >= _inputEnd) {\n                if (!loadMore()) {\n                    _reportInvalidEOFInValue();\n                }\n            }\n            return _handleInvalidNumberStart(_inputBuffer[_inputPtr++], false);\n        }\n        // [Issue#77] Try to decode most likely token\n        if (Character.isJavaIdentifierStart(i)) {\n            _reportInvalidToken(\"\"+((char) i), \"('true', 'false' or 'null')\");\n        }\n        // but if it doesn't look like a token:\n        _reportUnexpectedChar(i, \"expected a valid value (number, String, array, object, 'true', 'false' or 'null')\");\n        return null;\n    }\n\n```",
+            "method_doc": " Method for handling cases where first non-space character of an expected value token is not legal for standard JSON content. "
+        },
+        "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+            "method_code": "```java\n    public boolean isEnabled(Feature f) {\n        return (_features & f.getMask()) != 0;\n    }\n\n```",
+            "method_doc": " Method for checking whether specified {@link Feature} is enabled. "
+        },
+        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. "
+        },
+        "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)": {
+            "method_name": "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)",
+            "method_code": "```java\n    public JsonParseException(String msg, JsonLocation loc)\n    {\n        super(msg, loc);\n    }\n\n```",
+            "method_doc": "This constructor initializes a new instance of `JsonParseException` with a message and a location. It calls the superclass constructor `Throwable::Throwable(String, Throwable)` implicitly."
+        },
+        "com.fasterxml.jackson.core.JsonParser$Feature::enabledByDefault()": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::enabledByDefault()",
+            "method_code": "```java\n        public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "This method returns whether the feature is enabled by default."
+        },
+        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation,Throwable)": {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation,Throwable)",
+            "method_code": "```java\n    protected JsonProcessingException(String msg, JsonLocation loc, Throwable rootCause)\n    {\n        /* Argh. IOException(Throwable,String) is only available starting\n         * with JDK 1.6...\n         */\n        super(msg);\n        if (rootCause != null) {\n            initCause(rootCause);\n        }\n        _location = loc;\n    }\n\n```",
+            "method_doc": "Constructs a `JsonProcessingException` with a message, location, and root cause. Calls `super(msg)` to set the message and `initCause(rootCause)` to initialize the cause if provided. Sets the location using `_location`."
+        },
+        "com.fasterxml.jackson.core.base.ParserBase::convertNumberToBigDecimal()": {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::convertNumberToBigDecimal()",
+            "method_code": "```java\n    protected void convertNumberToBigDecimal()\n        throws IOException, JsonParseException\n    {\n        /* 05-Aug-2008, tatus: Important note: this MUST start with\n         *   more accurate representations, since we don't know which\n         *   value is the original one (others get generated when\n         *   requested)\n         */\n    \n        if ((_numTypesValid & NR_DOUBLE) != 0) {\n            /* Let's actually parse from String representation,\n             * to avoid rounding errors that non-decimal floating operations\n             * would incur\n             */\n            _numberBigDecimal = NumberInput.parseBigDecimal(getText());\n        } else if ((_numTypesValid & NR_BIGINT) != 0) {\n            _numberBigDecimal = new BigDecimal(_numberBigInt);\n        } else if ((_numTypesValid & NR_LONG) != 0) {\n            _numberBigDecimal = BigDecimal.valueOf(_numberLong);\n        } else if ((_numTypesValid & NR_INT) != 0) {\n            _numberBigDecimal = BigDecimal.valueOf(_numberInt);\n        } else {\n            _throwInternal();\n        }\n        _numTypesValid |= NR_BIGDECIMAL;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+            "method_code": "```java\n    public BufferRecycler _getBufferRecycler()\n    {\n        SoftReference<BufferRecycler> ref = _recyclerRef.get();\n        BufferRecycler br = (ref == null) ? null : ref.get();\n\n        if (br == null) {\n            br = new BufferRecycler();\n            _recyclerRef.set(new SoftReference<BufferRecycler>(br));\n        }\n        return br;\n    }\n\n```",
+            "method_doc": " Method used by factory to create buffer recycler instances for parsers and generators. <p> Note: only public to give access for <code>ObjectMapper</code> "
+        },
+        "com.fasterxml.jackson.core.JsonParser::_constructError(String)": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+            "method_code": "```java\n    protected JsonParseException _constructError(String msg)\n    {\n        return new JsonParseException(msg, getCurrentLocation());\n    }\n\n```",
+            "method_doc": " Helper method for constructing {@link JsonParseException}s based on current state of the parser "
+        },
+        "com.fasterxml.jackson.core.io.NumberInput::parseBigDecimal(String)": {
+            "method_name": "com.fasterxml.jackson.core.io.NumberInput::parseBigDecimal(String)",
+            "method_code": "```java\n    public static BigDecimal parseBigDecimal(String numStr) throws NumberFormatException\n    {\n            return new BigDecimal(numStr);\n    }\n\n```",
+            "method_doc": "This method parses a string into a `BigDecimal` using the constructor of `BigDecimal`. It does not call any other methods from the covered methods list."
+        },
+        "com.fasterxml.jackson.core.JsonProcessingException::getMessage()": {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::getMessage()",
+            "method_code": "```java\n    @Override\n    public String getMessage()\n    {\n        String msg = super.getMessage();\n        if (msg == null) {\n            msg = \"N/A\";\n        }\n        JsonLocation loc = getLocation();\n        String suffix = getMessageSuffix();\n        // mild optimization, if nothing extra is needed:\n        if (loc != null || suffix != null) {\n            StringBuilder sb = new StringBuilder(100);\n            sb.append(msg);\n            if (suffix != null) {\n                sb.append(suffix);\n            }\n            if (loc != null) {\n                sb.append('\\n');\n                sb.append(\" at \");\n                sb.append(loc.toString());\n            }\n            msg = sb.toString();\n        }\n        return msg;\n    }\n\n```",
+            "method_doc": " Default method overridden so that we can add location information "
+        },
+        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation)": {
+            "method_name": "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation)",
+            "method_code": "```java\n    protected JsonProcessingException(String msg, JsonLocation loc)\n    {\n        this(msg, loc, null);\n    }\n\n```",
+            "method_doc": "Constructs a `JsonProcessingException` with a message and location. Calls the constructor `JsonProcessingException(String,JsonLocation,Throwable)` with a `null` root cause."
+        },
+        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)": {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)",
+            "method_code": "```java\n    public SerializedString(String v) {\n        if (v == null) {\n            throw new IllegalStateException(\"Null String illegal for SerializedString\");\n        }\n        _value = v;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `SerializedString` with the provided string value. If the input string is `null`, it throws an `IllegalStateException`. This constructor does not call any other methods from the Covered Methods List."
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+            "method_code": "```java\n    public void releaseBuffers()\n    {\n        if (_allocator == null) {\n            resetWithEmpty();\n        } else {\n            if (_currentSegment != null) {\n                // First, let's get rid of all but the largest char array\n                resetWithEmpty();\n                // And then return that array\n                char[] buf = _currentSegment;\n                _currentSegment = null;\n                _allocator.releaseCharBuffer(BufferRecycler.CharBufferType.TEXT_BUFFER, buf);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to indicate that the underlying buffers should now be recycled if they haven't yet been recycled. Although caller can still use this text buffer, it is not advisable to call this method if that is likely, since next time a buffer is needed, buffers need to reallocated. Note: calling this method automatically also clears contents of the buffer. "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::contentsAsString()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::contentsAsString()",
+            "method_code": "```java\n    public String contentsAsString()\n    {\n        if (_resultString == null) {\n            // Has array been requested? Can make a shortcut, if so:\n            if (_resultArray != null) {\n                _resultString = new String(_resultArray);\n            } else {\n                // Do we use shared array?\n                if (_inputStart >= 0) {\n                    if (_inputLen < 1) {\n                        return (_resultString = \"\");\n                    }\n                    _resultString = new String(_inputBuffer, _inputStart, _inputLen);\n                } else { // nope... need to copy\n                    // But first, let's see if we have just one buffer\n                    int segLen = _segmentSize;\n                    int currLen = _currentSize;\n                    \n                    if (segLen == 0) { // yup\n                        _resultString = (currLen == 0) ? \"\" : new String(_currentSegment, 0, currLen);\n                    } else { // no, need to combine\n                        StringBuilder sb = new StringBuilder(segLen + currLen);\n                        // First stored segments\n                        if (_segments != null) {\n                            for (int i = 0, len = _segments.size(); i < len; ++i) {\n                                char[] curr = _segments.get(i);\n                                sb.append(curr, 0, curr.length);\n                            }\n                        }\n                        // And finally, current segment:\n                        sb.append(_currentSegment, 0, _currentSize);\n                        _resultString = sb.toString();\n                    }\n                }\n            }\n        }\n        return _resultString;\n    }\n\n```",
+            "method_doc": "  Other accessors:  "
+        },
+        "com.fasterxml.jackson.core.base.ParserBase::getDecimalValue()": {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::getDecimalValue()",
+            "method_code": "```java\n    @Override\n    public BigDecimal getDecimalValue() throws IOException, JsonParseException\n    {\n        if ((_numTypesValid & NR_BIGDECIMAL) == 0) {\n            if (_numTypesValid == NR_UNKNOWN) {\n                _parseNumericValue(NR_BIGDECIMAL);\n            }\n            if ((_numTypesValid & NR_BIGDECIMAL) == 0) {\n                convertNumberToBigDecimal();\n            }\n        }\n        return _numberBigDecimal;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.base.ParserBase::ParserBase(IOContext,int)": {
+            "method_name": "com.fasterxml.jackson.core.base.ParserBase::ParserBase(IOContext,int)",
+            "method_code": "```java\n    protected ParserBase(IOContext ctxt, int features)\n    {\n        super();\n        _features = features;\n        _ioContext = ctxt;\n        _textBuffer = ctxt.constructTextBuffer();\n        _parsingContext = JsonReadContext.createRootContext();\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.core.io.IOContext::getSourceReference()": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::getSourceReference()",
+            "method_code": "```java\n    public Object getSourceReference() { return _sourceRef; }\n\n```",
+            "method_doc": "  Public API, accessors  "
+        },
+        "com.fasterxml.jackson.core.io.IOContext::isResourceManaged()": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::isResourceManaged()",
+            "method_code": "```java\n    public boolean isResourceManaged() { return _managedResource; }\n\n```",
+            "method_doc": "Checks if the resource associated with this context is managed. This method does not call any other methods from the covered list."
+        },
+        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+            "method_code": "```java\n    public TextBuffer constructTextBuffer() {\n        return new TextBuffer(_bufferRecycler);\n    }\n\n```",
+            "method_doc": "  Public API, buffer management  "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::TextBuffer(BufferRecycler)": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::TextBuffer(BufferRecycler)",
+            "method_code": "```java\n    public TextBuffer(BufferRecycler allocator)\n    {\n        _allocator = allocator;\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.core.json.TestParserNonStandard",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Parser Feature Configuration Issue\n**Description:** The parser might not be correctly configuring its features, leading to unexpected behavior when trying to allow non-numeric numbers like NaN.\n\n**Location:** Likely in the `JsonFactory` configuration within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure indicates that the parser did not throw the expected exception when `ALLOW_NON_NUMERIC_NUMBERS` was disabled. This suggests that the feature might not have been properly set or checked before attempting to parse the JSON string.",
+                "Parsing Logic Error\n**Description:** There might be a logical error in how the parser handles NaN values, causing it to incorrectly identify or process them.\n\n**Location:** Potentially in the logic that determines the type of numeric value being parsed.\n\n**Observation Support:** The fact that the parser identified the NaN value as a floating-point number (`VALUE_NUMBER_FLOAT`) but still threw an exception when converting it to a `BigDecimal` implies that there might be a misinterpretation or incorrect handling of NaN values.",
+                "Exception Handling Bug\n**Description:** The exception handling mechanism might not be functioning correctly, leading to unexpected outcomes when an exception is thrown.\n\n**Location:** Likely in the exception handling blocks within the `_testAllowNaN` method.\n\n**Observation Support:** The assertion failure mentions that the parser did not throw the expected exception, suggesting that the exception handling might not be working as intended. This could indicate a bug in how exceptions are caught and handled.",
+                "Memory Corruption or Race Condition\n**Description:** There might be a memory corruption issue or race condition in the parser, leading to unpredictable behavior during the parsing process.\n\n**Location:** Potentially anywhere in the parser's internal state management or concurrency handling.\n\n**Observation Support:** The fact that the parser skipped over the NaN value and reached the end of the array despite failing earlier suggests that there might be some underlying issue affecting the parser's state or execution flow.",
+                "Incomplete or Incorrect Implementation of NaN Handling\n**Description:** The parser might not fully support or handle NaN values according to the JSON specification, leading to inconsistent behavior across different parsing methods.\n\n**Location:** Likely in the implementation of NaN handling within the parser.\n\n**Observation Support:** The assertion failure indicates that the parser did not behave as expected when encountering NaN values, suggesting that the implementation might be incomplete or incorrect. This could involve issues with how NaN values are recognized, processed, or reported by the parser."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    6.666666666666667
+                ],
+                "2": [
+                    6,
+                    6.0
+                ],
+                "3": [
+                    8,
+                    6.666666666666667
+                ],
+                "4": [
+                    6,
+                    6.0
+                ],
+                "5": [
+                    8,
+                    6.666666666666667
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.json.ReaderBasedJsonParser",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.JsonParseException"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.NumberInput",
+                    "com.fasterxml.jackson.core.JsonToken",
+                    "com.fasterxml.jackson.core.JsonParseException",
+                    "com.fasterxml.jackson.core.JsonProcessingException"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.JsonProcessingException",
+                    "com.fasterxml.jackson.core.io.SerializedString",
+                    "com.fasterxml.jackson.core.io.IOContext"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.SerializedString",
+                    "com.fasterxml.jackson.core.util.TextBuffer",
+                    "com.fasterxml.jackson.core.JsonFactory"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.NumberInput",
+                    "com.fasterxml.jackson.core.base.ParserBase",
+                    "com.fasterxml.jackson.core.JsonParseException"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::configure(Feature,boolean)",
+                        "com.fasterxml.jackson.core.JsonFactory::createParser(Reader)",
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(Reader,IOContext)"
+                    ],
+                    "com.fasterxml.jackson.core.json.ReaderBasedJsonParser": [
+                        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::loadMore()",
+                        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.ReaderBasedJsonParser::_handleUnexpectedValue(int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::enabledByDefault()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParseException": [
+                        "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+                        "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.NumberInput": [
+                        "com.fasterxml.jackson.core.io.NumberInput::parseBigDecimal(String)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParseException": [
+                        "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonProcessingException": [
+                        "com.fasterxml.jackson.core.JsonProcessingException::getMessage()",
+                        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation,Throwable)",
+                        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::enabledByDefault()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonProcessingException": [
+                        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation,Throwable)",
+                        "com.fasterxml.jackson.core.JsonProcessingException::JsonProcessingException(String,JsonLocation)"
+                    ],
+                    "com.fasterxml.jackson.core.io.SerializedString": [
+                        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)"
+                    ],
+                    "com.fasterxml.jackson.core.io.IOContext": [
+                        "com.fasterxml.jackson.core.io.IOContext::getSourceReference()",
+                        "com.fasterxml.jackson.core.io.IOContext::isResourceManaged()",
+                        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+                        "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.SerializedString": [
+                        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)"
+                    ],
+                    "com.fasterxml.jackson.core.util.TextBuffer": [
+                        "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+                        "com.fasterxml.jackson.core.util.TextBuffer::contentsAsString()",
+                        "com.fasterxml.jackson.core.util.TextBuffer::TextBuffer(BufferRecycler)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::createParser(Reader)",
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::isEnabled(Feature)",
+                        "com.fasterxml.jackson.core.JsonParser::_constructError(String)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.NumberInput": [
+                        "com.fasterxml.jackson.core.io.NumberInput::parseBigDecimal(String)"
+                    ],
+                    "com.fasterxml.jackson.core.base.ParserBase": [
+                        "com.fasterxml.jackson.core.base.ParserBase::getDecimalValue()",
+                        "com.fasterxml.jackson.core.base.ParserBase::convertNumberToBigDecimal()",
+                        "com.fasterxml.jackson.core.base.ParserBase::ParserBase(IOContext,int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParseException": [
+                        "com.fasterxml.jackson.core.JsonParseException::JsonParseException(String,JsonLocation)"
+                    ]
+                }
+            }
+        }
+    ]
+}

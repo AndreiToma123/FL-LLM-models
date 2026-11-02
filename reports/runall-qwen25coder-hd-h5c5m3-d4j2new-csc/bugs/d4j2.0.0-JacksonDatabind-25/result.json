@@ -1,0 +1,1001 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase",
+        "com.fasterxml.jackson.databind.deser.DeserializerCache",
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+        "com.fasterxml.jackson.databind.ObjectMapper",
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator",
+        "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)",
+            "method_code": "```java\n    @Override\n    public void resolve(DeserializationContext ctxt)\n        throws JsonMappingException\n    {\n        ExternalTypeHandler.Builder extTypes = null;\n        // if ValueInstantiator can use \"creator\" approach, need to resolve it here...\n        SettableBeanProperty[] creatorProps;\n        if (_valueInstantiator.canCreateFromObjectWith()) {\n            creatorProps = _valueInstantiator.getFromObjectArguments(ctxt.getConfig());\n            // also: need to try to resolve 'external' type ids...\n            for (SettableBeanProperty prop : creatorProps) {\n                if (prop.hasValueTypeDeserializer()) {\n                    TypeDeserializer typeDeser = prop.getValueTypeDeserializer();\n                    if (typeDeser.getTypeInclusion() == JsonTypeInfo.As.EXTERNAL_PROPERTY) {\n                        if (extTypes == null) {\n                            extTypes = new ExternalTypeHandler.Builder();\n                        }\n                        extTypes.addExternal(prop, typeDeser);\n                    }\n                }\n            }\n        } else {\n            creatorProps = null;\n        }\n\n        UnwrappedPropertyHandler unwrapped = null;\n\n        for (SettableBeanProperty origProp : _beanProperties) {\n            SettableBeanProperty prop = origProp;\n\n            // May already have deserializer from annotations, if so, skip:\n            if (!prop.hasValueDeserializer()) {\n                // [Issue#125]: allow use of converters\n                JsonDeserializer<?> deser = findConvertingDeserializer(ctxt, prop);\n                if (deser == null) {\n                    deser = findDeserializer(ctxt, prop.getType(), prop);\n                }\n                prop = prop.withValueDeserializer(deser);\n            } else { // may need contextual version\n                JsonDeserializer<Object> deser = prop.getValueDeserializer();\n                /* Important! This is the only place where actually handle \"primary\"\n                 * property deserializers -- call is different from other places.\n                 */\n                JsonDeserializer<?> cd = ctxt.handlePrimaryContextualization(deser, prop,\n                        prop.getType());\n                if (cd != deser) {\n                    prop = prop.withValueDeserializer(cd);\n                }\n            }\n\n            // [JACKSON-235]: need to link managed references with matching back references\n            prop = _resolveManagedReferenceProperty(ctxt, prop);\n\n            // issue #351: need to wrap properties that require object id resolution.\n            if (!(prop instanceof ManagedReferenceProperty)) {\n                prop = _resolvedObjectIdProperty(ctxt, prop);\n            }\n            // [JACKSON-132]: support unwrapped values (via @JsonUnwrapped)\n            SettableBeanProperty u = _resolveUnwrappedProperty(ctxt, prop);\n            if (u != null) {\n                prop = u;\n                if (unwrapped == null) {\n                    unwrapped = new UnwrappedPropertyHandler();\n                }\n                unwrapped.addProperty(prop);\n                /* 12-Dec-2014, tatu: As per [databind#647], we will have problems if\n                 *    the original property is left in place. So let's remove it now.\n                 */\n                _beanProperties.remove(prop);\n                continue;\n            }\n            // [JACKSON-594]: non-static inner classes too:\n            prop = _resolveInnerClassValuedProperty(ctxt, prop);\n            if (prop != origProp) {\n                _beanProperties.replace(prop);\n                // [databind#795]: Make sure PropertyBasedCreator's properties stay in sync\n                if (creatorProps != null) {\n                    // 18-May-2015, tatu: _Should_ start with consistent set. But can we really\n                    //   fully count on this? May need to revisit in future; seems to hold for now.\n                    for (int i = 0, len = creatorProps.length; i < len; ++i) {\n                        if (creatorProps[i] == origProp) {\n                            creatorProps[i] = prop;\n                            break;\n                        }\n                        // ... as per above, it is possible we'd need to add this as fallback\n                        // if (but only if) identity check fails?\n                        /*\n                        if (creatorProps[i].getName().equals(prop.getName())) {\n                            creatorProps[i] = prop;\n                            break;\n                        }\n                        */\n                    }\n                }\n            }\n            // one more thing: if this property uses \"external property\" type inclusion,\n            // it needs different handling altogether\n            if (prop.hasValueTypeDeserializer()) {\n                TypeDeserializer typeDeser = prop.getValueTypeDeserializer();\n                if (typeDeser.getTypeInclusion() == JsonTypeInfo.As.EXTERNAL_PROPERTY) {\n                    if (extTypes == null) {\n                        extTypes = new ExternalTypeHandler.Builder();\n                    }\n                    extTypes.addExternal(prop, typeDeser);\n                    // In fact, remove from list of known properties to simplify later handling\n                    _beanProperties.remove(prop);\n                    continue;\n                }\n            }\n        }\n\n        // \"any setter\" may also need to be resolved now\n        if (_anySetter != null && !_anySetter.hasValueDeserializer()) {\n            _anySetter = _anySetter.withValueDeserializer(findDeserializer(ctxt,\n                    _anySetter.getType(), _anySetter.getProperty()));\n        }\n\n        // as well as delegate-based constructor:\n        if (_valueInstantiator.canCreateUsingDelegate()) {\n            JavaType delegateType = _valueInstantiator.getDelegateType(ctxt.getConfig());\n            if (delegateType == null) {\n                throw new IllegalArgumentException(\"Invalid delegate-creator definition for \"+_beanType\n                        +\": value instantiator (\"+_valueInstantiator.getClass().getName()\n                        +\") returned true for 'canCreateUsingDelegate()', but null for 'getDelegateType()'\");\n            }\n            AnnotatedWithParams delegateCreator = _valueInstantiator.getDelegateCreator();\n            // Need to create a temporary property to allow contextual deserializers:\n            BeanProperty.Std property = new BeanProperty.Std(TEMP_PROPERTY_NAME,\n                    delegateType, null, _classAnnotations, delegateCreator,\n                    PropertyMetadata.STD_OPTIONAL);\n\n            TypeDeserializer td = delegateType.getTypeHandler();\n            if (td == null) {\n                td = ctxt.getConfig().findTypeDeserializer(delegateType);\n            }\n            JsonDeserializer<Object> dd = findDeserializer(ctxt, delegateType, property);\n            if (td != null) {\n                td = td.forProperty(property);\n                dd = new TypeWrappedDeserializer(td, dd);\n            }\n            _delegateDeserializer = dd;\n        }\n\n        // And now that we know CreatorProperty instances are also resolved can finally create the creator:\n        if (creatorProps != null) {\n            _propertyBasedCreator = PropertyBasedCreator.construct(ctxt, _valueInstantiator, creatorProps);\n        }\n\n        if (extTypes != null) {\n            _externalTypeIdHandler = extTypes.build();\n            // we consider this non-standard, to offline handling\n            _nonStandardCreation = true;\n        }\n        \n        _unwrappedPropertyHandler = unwrapped;\n        if (unwrapped != null) { // we consider this non-standard, to offline handling\n            _nonStandardCreation = true;\n        }\n\n        // may need to disable vanilla processing, if unwrapped handling was enabled...\n        _vanillaProcessing = _vanillaProcessing && !_nonStandardCreation;\n    }\n\n```",
+            "method_doc": " Method called to finalize setup of this deserializer, after deserializer itself has been registered. This is needed to handle recursive and transitive dependencies. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase",
+            "class_doc": " Base class for <code>BeanDeserializer</code>. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the resolution of deserializers for bean properties, including those that might be byte arrays. The error message indicates that the default deserializer is being used, which is not capable of handling byte arrays directly. By fixing the logic in this method, we can ensure that the correct deserializer is used for byte array fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding and caching deserializers. The failure in the test suggests that the default deserializer for byte arrays is not being handled correctly, and fixing the logic within this method could resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw new JsonMappingException(iae.getMessage(), null, iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating and caching deserializers. The issue described involves a failure in deserializing a byte array, which could be handled more gracefully within this method. By ensuring that appropriate deserializers are created and cached correctly, this method can help resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> findDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanProperty property)\n        throws JsonMappingException\n    {\n        return ctxt.findContextualValueDeserializer(type, property);\n    }\n\n```",
+            "method_doc": " Helper method used to locate deserializers for properties the type this deserializer handles contains (usually for properties of bean types)  @param type Type of property to deserialize @param property Actual property object (field, method, constuctor parameter) used for passing deserialized values; provided so deserializer can be contextualized if necessary (since 1.7) ",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+            "class_doc": " Base class for common deserializers. Contains shared base functionality for dealing with primitive values, such as (re)parsing from String. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding and creating deserializers for properties. Since the error occurs when trying to deserialize a byte array as a bean, fixing this method could resolve the issue by ensuring that the correct deserializer is found for byte array fields.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+            "method_code": "```java\n    protected StdDeserializer(Class<?> vc) {\n        _valueClass = vc;\n    }\n\n```",
+            "method_doc": "This method initializes the `_valueClass` field with the provided value class.",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+            "class_doc": " Base class for common deserializers. Contains shared base functionality for dealing with primitive values, such as (re)parsing from String. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the `_valueClass` field with the provided value class. Since the issue arises from the default deserializer treating the byte array as a bean, modifying the constructor of `StdDeserializer` could help ensure that the correct deserializer is used for byte arrays.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately likely to be the best location that needs to be fixed, because it is responsible for creating and caching value deserializers. However, the issue seems to stem from a missing deserializer for the `someBytes` field in the `HiddenBinaryBean890` class, rather than an inherent problem with this method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 8,
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)",
+            "method_code": "```java\n    protected StdDeserializer(JavaType valueType) {\n        _valueClass = (valueType == null) ? null : valueType.getRawClass();\n    }\n\n```",
+            "method_doc": "This method initializes the `_valueClass` field with the raw class of the provided JavaType, or sets it to null if the JavaType is null.",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+            "class_doc": " Base class for common deserializers. Contains shared base functionality for dealing with primitive values, such as (re)parsing from String. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the `_valueClass` field with the raw class of the provided JavaType. However, it does not handle the specific case of byte arrays, which could lead to issues when deserializing fields annotated with `@JsonFormat(shape=JsonFormat.Shape.BINARY)`.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 8,
+                "3": 5,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::defaultClassIntrospector()",
+            "method_code": "```java\n    protected ClassIntrospector defaultClassIntrospector() {\n        return new BasicClassIntrospector();\n    }\n\n```",
+            "method_doc": " Overridable helper method used to construct default {@link ClassIntrospector} to use.  @since 2.5 ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it returns a default `BasicClassIntrospector`, which might not handle byte array fields correctly. However, it's not the primary source of the issue since the problem seems to stem from the lack of a custom deserializer for the `someBytes` field in the `HiddenBinaryBean890` class.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it is responsible for deserializing JSON content into Java objects. However, the issue described seems to be related to the handling of byte arrays within a specific bean, rather than a fundamental flaw in the deserialization process itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)",
+            "method_code": "```java\n    protected DefaultDeserializationContext createDeserializationContext(JsonParser jp,\n            DeserializationConfig cfg) {\n        return _deserializationContext.createInstance(cfg, jp, _injectableValues);\n    }\n\n```",
+            "method_doc": " Internal helper method called to create an instance of {@link DeserializationContext} for deserializing a single root value. Can be overridden if a custom context is needed. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves creating a deserialization context, which could potentially affect how deserialization processes are handled. However, it's unlikely to be the direct cause of the issue since the problem seems to stem from a missing deserializer for a byte array field.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext::DefaultDeserializationContext(DeserializerFactory,DeserializerCache)",
+            "method_code": "```java\n    protected DefaultDeserializationContext(DeserializerFactory df, DeserializerCache cache) {\n        super(df, cache);\n    }\n\n```",
+            "method_doc": " Constructor that will pass specified deserializer factory and cache: cache may be null (in which case default implementation will be used), factory can not be null ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+            "class_doc": " Complete {@link DeserializationContext} implementation that adds extended API for {@link ObjectMapper} (and {@link ObjectReader}) to call, as well as implements certain parts that base class has left abstract. The remaining abstract methods ({@link #createInstance}, {@link #with}) are left so that custom implementations will properly implement them to return intended subtype. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the deserialization of a byte array into a bean, which is handled by the deserializers associated with the fields of the bean, not by the constructor of the `DefaultDeserializationContext`. The constructor initializes the context with a deserializer factory and cache but does not directly handle the deserialization logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n        @Override\n        public DefaultDeserializationContext createInstance(DeserializationConfig config,\n                JsonParser jp, InjectableValues values) {\n            return new Impl(this, config, jp, values);\n        }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+            "class_doc": " Complete {@link DeserializationContext} implementation that adds extended API for {@link ObjectMapper} (and {@link ObjectReader}) to call, as well as implements certain parts that base class has left abstract. The remaining abstract methods ({@link #createInstance}, {@link #with}) are left so that custom implementations will properly implement them to return intended subtype. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the deserialization of a byte array into a bean, which is handled by the default deserializer. The `createInstance` method in `DefaultDeserializationContext$Impl` is responsible for creating instances of the deserialization context, but it does not directly handle the deserialization logic for specific types like byte arrays. Therefore, fixing this method alone would not resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc = config.introspect(type);\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [Issue#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.DeserializerCache",
+            "class_doc": " Class that defines caching layer between callers (like {@link ObjectMapper}, {@link com.fasterxml.jackson.databind.DeserializationContext}) and classes that construct deserializers ({@link com.fasterxml.jackson.databind.deser.DeserializerFactory}). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the creation of deserializers and is responsible for checking for per-type annotations and finding out the full type. The error message indicates that the deserializer cache cannot create a value deserializer for `Class [B`, which suggests that there might be an issue with how this method handles byte array types.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw new JsonMappingException(\"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding the root-level deserializer for a given type. The error message indicates that the deserializer cache cannot create a value deserializer for `Class [B`, which suggests that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly. By fixing this method, we can ensure that the correct deserializer is found for byte array fields.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incomplete or Misconfigured Object Mapper Initialization\n**Description:** The `ObjectMapper` instance used in the test might not be fully initialized or configured correctly, leading to issues with deserializing byte array fields.\n\n**Location:** During the initialization of the `ObjectMapper` instance in the test setup.\n\n**Observation Support:** The error message indicates problems with finding and creating deserializers. An incomplete or misconfigured `ObjectMapper` could lead to the default deserializer being invoked, which is not capable of handling byte arrays correctly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the default settings for the ObjectMapper, and the issue seems to stem from an incomplete or misconfigured ObjectMapper.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 0,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        if (type.isAbstract()) {\n            // [JACKSON-41] (v1.6): Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // Otherwise: could the class be a Bean class? If not, bail out\n        if (!isPotentialBeanType(type.getRawClass())) {\n            return null;\n        }\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }\n\n```",
+            "method_doc": " Method that {@link DeserializerCache}s call to create a new deserializer for types other than Collections, Maps, arrays and enums. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating bean deserializers, which includes handling byte array fields. The error indicates that the deserializer cache cannot create a value deserializer for `Class [B`, suggesting that there might be a misconfiguration or missing support for byte array deserialization within this method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonDeserializer<Object> buildBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // First: check what creators we can use, if any\n        ValueInstantiator valueInstantiator;\n        /* 04-Jun-2015, tatu: To work around [databind#636], need to catch the\n         *    issue, defer; this seems like a reasonable good place for now.\n         *   Note, however, that for non-Bean types (Collections, Maps) this\n         *   probably won't work and needs to be added elsewhere.\n         */\n        try {\n            valueInstantiator = findValueInstantiator(ctxt, beanDesc);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        BeanDeserializerBuilder builder = constructBeanDeserializerBuilder(ctxt, beanDesc);\n        builder.setValueInstantiator(valueInstantiator);\n         // And then setters for deserializing from JSON Object\n        addBeanProps(ctxt, beanDesc, builder);\n        addObjectIdReader(ctxt, beanDesc, builder);\n\n        // managed/back reference fields/setters need special handling... first part\n        addReferenceProperties(ctxt, beanDesc, builder);\n        addInjectables(ctxt, beanDesc, builder);\n        \n        final DeserializationConfig config = ctxt.getConfig();\n        // [JACKSON-440]: update builder now that all information is in?\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                builder = mod.updateBuilder(config, beanDesc, builder);\n            }\n        }\n        JsonDeserializer<?> deserializer;\n\n        /* 19-Mar-2012, tatu: This check used to be done earlier; but we have to defer\n         *   it a bit to collect information on ObjectIdReader, for example.\n         */\n        if (type.isAbstract() && !valueInstantiator.canInstantiate()) {\n            deserializer = builder.buildAbstract();\n        } else {\n            deserializer = builder.build();\n        }\n\n        // [JACKSON-440]: may have modifier(s) that wants to modify or replace serializer we just built:\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                deserializer = mod.modifyDeserializer(config, beanDesc, deserializer);\n            }\n        }\n        return (JsonDeserializer<Object>) deserializer;\n    }\n\n```",
+            "method_doc": " Method that is to actually build a bean deserializer instance. All basic sanity checks have been done to know that what we have may be a valid bean type, and that there are no default simple deserializers. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for building bean deserializers, which includes handling various types of fields including byte arrays. The error indicates an issue with deserializing byte arrays as beans, suggesting that the method might be incorrectly handling or misconfiguring the deserialization process for byte array fields.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::findStdDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    protected JsonDeserializer<?> findStdDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // note: we do NOT check for custom deserializers here, caller has already\n        // done that\n        JsonDeserializer<?> deser = findDefaultDeserializer(ctxt, type, beanDesc);\n        // Also: better ensure these are post-processable?\n        if (deser != null) {\n            if (_factoryConfig.hasDeserializerModifiers()) {\n                for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                    deser = mod.modifyDeserializer(ctxt.getConfig(), beanDesc, deser);\n                }\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called by {@link BeanDeserializerFactory} to see if there might be a standard deserializer registered for given type. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Custom Deserializer Conflict\n**Description:** There might be a conflict between a custom deserializer registered for another part of the application and the default deserializer for byte arrays, causing the default deserializer to be invoked instead.\n\n**Location:** In the registration of custom deserializers within the application.\n\n**Observation Support:** The stack trace points to issues with creating and caching deserializers. A conflict with a custom deserializer could lead to the default deserializer being incorrectly invoked, resulting in the observed error.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for finding standard deserializers, which could be interfering with the correct deserialization of byte arrays when a custom deserializer is expected.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::materializeAbstractType(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    protected JavaType materializeAbstractType(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final JavaType abstractType = beanDesc.getType();\n        // [JACKSON-502]: Now it is possible to have multiple resolvers too,\n        //   as they are registered via module interface.\n        for (AbstractTypeResolver r : _factoryConfig.abstractTypeResolvers()) {\n            JavaType concrete = r.resolveAbstractType(ctxt.getConfig(), abstractType);\n            if (concrete != null) {\n                return concrete;\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "This method attempts to materialize an abstract type by resolving it using registered abstract type resolvers.",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Custom Deserializer Conflict\n**Description:** There might be a conflict between a custom deserializer registered for another part of the application and the default deserializer for byte arrays, causing the default deserializer to be invoked instead.\n\n**Location:** In the registration of custom deserializers within the application.\n\n**Observation Support:** The stack trace points to issues with creating and caching deserializers. A conflict with a custom deserializer could lead to the default deserializer being incorrectly invoked, resulting in the observed error.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for materializing abstract types, which could potentially conflict with custom deserializers for byte arrays. The error message indicates that the default deserializer for byte arrays was invoked instead of the expected custom deserializer, suggesting that there might be a conflict in the resolution process.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::BeanDeserializerBase(BeanDeserializerBuilder,BeanDescription,BeanPropertyMap,Map,HashSet,boolean,boolean)",
+            "method_code": "```java\n    protected BeanDeserializerBase(BeanDeserializerBuilder builder,\n            BeanDescription beanDesc,\n            BeanPropertyMap properties, Map<String, SettableBeanProperty> backRefs,\n            HashSet<String> ignorableProps, boolean ignoreAllUnknown,\n            boolean hasViews)\n    {\n        super(beanDesc.getType());\n\n        AnnotatedClass ac = beanDesc.getClassInfo();\n        _classAnnotations = ac.getAnnotations();       \n        _beanType = beanDesc.getType();\n        _valueInstantiator = builder.getValueInstantiator();\n        \n        _beanProperties = properties;\n        _backRefs = backRefs;\n        _ignorableProps = ignorableProps;\n        _ignoreAllUnknown = ignoreAllUnknown;\n\n        _anySetter = builder.getAnySetter();\n        List<ValueInjector> injectables = builder.getInjectables();\n        _injectables = (injectables == null || injectables.isEmpty()) ? null\n                : injectables.toArray(new ValueInjector[injectables.size()]);\n        _objectIdReader = builder.getObjectIdReader();\n        _nonStandardCreation = (_unwrappedPropertyHandler != null)\n            || _valueInstantiator.canCreateUsingDelegate()\n            || _valueInstantiator.canCreateFromObjectWith()\n            || !_valueInstantiator.canCreateUsingDefault()\n            ;\n\n        // Any transformation we may need to apply?\n        JsonFormat.Value format = beanDesc.findExpectedFormat(null);\n        _serializationShape = (format == null) ? null : format.getShape();\n\n        _needViewProcesing = hasViews;\n        _vanillaProcessing = !_nonStandardCreation\n                && (_injectables == null)\n                && !_needViewProcesing\n                // also, may need to reorder stuff if we expect Object Id:\n                && (_objectIdReader == null)\n                ;\n    }\n\n```",
+            "method_doc": " Constructor used when initially building a deserializer instance, given a {@link BeanDeserializerBuilder} that contains configuration. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase",
+            "class_doc": " Base class for <code>BeanDeserializer</code>. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incomplete or Misconfigured Object Mapper Initialization\n**Description:** The `ObjectMapper` instance used in the test might not be fully initialized or configured correctly, leading to issues with deserializing byte array fields.\n\n**Location:** During the initialization of the `ObjectMapper` instance in the test setup.\n\n**Observation Support:** The error message indicates problems with finding and creating deserializers. An incomplete or misconfigured `ObjectMapper` could lead to the default deserializer being invoked, which is not capable of handling byte arrays correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it handles the construction of deserializers, but the specific issue seems to stem from how the `ObjectMapper` is configured rather than the constructor itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+            "method_code": "```java\n    protected void addBeanProps(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanDeserializerBuilder builder)\n        throws JsonMappingException\n    {\n        final SettableBeanProperty[] creatorProps =\n                builder.getValueInstantiator().getFromObjectArguments(ctxt.getConfig());\n        final boolean isConcrete = !beanDesc.getType().isAbstract();\n        \n        // Things specified as \"ok to ignore\"? [JACKSON-77]\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        boolean ignoreAny = false;\n        {\n            Boolean B = intr.findIgnoreUnknownProperties(beanDesc.getClassInfo());\n            if (B != null) {\n                ignoreAny = B.booleanValue();\n                builder.setIgnoreUnknownProperties(ignoreAny);\n            }\n        }\n        // Or explicit/implicit definitions?\n        Set<String> ignored = ArrayBuilders.arrayToSet(intr.findPropertiesToIgnore(beanDesc.getClassInfo(), false));        \n        for (String propName : ignored) {\n            builder.addIgnorable(propName);\n        }\n        // Also, do we have a fallback \"any\" setter?\n        AnnotatedMethod anySetter = beanDesc.findAnySetter();\n        if (anySetter != null) {\n            builder.setAnySetter(constructAnySetter(ctxt, beanDesc, anySetter));\n        }\n        // NOTE: we do NOT add @JsonIgnore'd properties into blocked ones if there's any-setter\n        // Implicit ones via @JsonIgnore and equivalent?\n        if (anySetter == null) {\n            Collection<String> ignored2 = beanDesc.getIgnoredPropertyNames();\n            if (ignored2 != null) {\n                for (String propName : ignored2) {\n                    // allow ignoral of similarly named JSON property, but do not force;\n                    // latter means NOT adding this to 'ignored':\n                    builder.addIgnorable(propName);\n                }\n            }\n        }\n        final boolean useGettersAsSetters = (ctxt.isEnabled(MapperFeature.USE_GETTERS_AS_SETTERS)\n                && ctxt.isEnabled(MapperFeature.AUTO_DETECT_GETTERS));\n\n        // Ok: let's then filter out property definitions\n        List<BeanPropertyDefinition> propDefs = filterBeanProps(ctxt,\n                beanDesc, builder, beanDesc.findProperties(), ignored);\n\n        // After which we can let custom code change the set\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                propDefs = mod.updateProperties(ctxt.getConfig(), beanDesc, propDefs);\n            }\n        }\n        \n        // At which point we still have all kinds of properties; not all with mutators:\n        for (BeanPropertyDefinition propDef : propDefs) {\n            SettableBeanProperty prop = null;\n            /* 18-Oct-2013, tatu: Although constructor parameters have highest precedence,\n             *   we need to do linkage (as per [Issue#318]), and so need to start with\n             *   other types, and only then create constructor parameter, if any.\n             */\n            if (propDef.hasSetter()) {\n                Type propertyType = propDef.getSetter().getGenericParameterType(0);\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (propDef.hasField()) {\n                Type propertyType = propDef.getField().getGenericType();\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (useGettersAsSetters && propDef.hasGetter()) {\n                /* As per [JACKSON-88], may also need to consider getters\n                 * for Map/Collection properties; but with lowest precedence\n                 */\n                AnnotatedMethod getter = propDef.getGetter();\n                // should only consider Collections and Maps, for now?\n                Class<?> rawPropertyType = getter.getRawType();\n                if (Collection.class.isAssignableFrom(rawPropertyType)\n                        || Map.class.isAssignableFrom(rawPropertyType)) {\n                    prop = constructSetterlessProperty(ctxt, beanDesc, propDef);\n                }\n            }\n            // 25-Sep-2014, tatu: No point in finding constructor parameters for abstract types\n            //   (since they are never used anyway)\n            if (isConcrete && propDef.hasConstructorParameter()) {\n                /* [JACKSON-700] If property is passed via constructor parameter, we must\n                 *   handle things in special way. Not sure what is the most optimal way...\n                 *   for now, let's just call a (new) method in builder, which does nothing.\n                 */\n                // but let's call a method just to allow custom builders to be aware...\n                final String name = propDef.getName();\n                CreatorProperty cprop = null;\n                if (creatorProps != null) {\n                    for (SettableBeanProperty cp : creatorProps) {\n                        if (name.equals(cp.getName()) && (cp instanceof CreatorProperty)) {\n                            cprop = (CreatorProperty) cp;\n                            break;\n                        }\n                    }\n                }\n                if (cprop == null) {\n                    throw ctxt.mappingException(\"Could not find creator property with name '%s' (in class %s)\",\n                            name, beanDesc.getBeanClass().getName());\n                }\n                if (prop != null) {\n                    cprop.setFallbackSetter(prop);\n                }\n                prop = cprop;\n                builder.addCreatorProperty(cprop);\n                continue;\n            }\n\n            if (prop != null) {\n                Class<?>[] views = propDef.findViews();\n                if (views == null) {\n                    // one more twist: if default inclusion disabled, need to force empty set of views\n                    if (!ctxt.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION)) {\n                        views = NO_VIEWS;\n                    }\n                }\n                // one more thing before adding to builder: copy any metadata\n                prop.setViews(views);\n                builder.addProperty(prop);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to figure out settable properties for the bean deserializer to use. <p> Note: designed to be overridable, and effort is made to keep interface similar between versions. ",
+            "class_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+            "class_doc": " Concrete deserializer factory class that adds full Bean deserializer construction logic using class introspection. Note that factories specifically do not implement any form of caching: aside from configuration they are stateless; caching is implemented by other components. <p> Instances of this class are fully immutable as all configuration is done by using \"fluent factories\" (methods that construct new factory instances with different configuration, instead of modifying instance). ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it involves the creation and configuration of bean deserializers, which could potentially affect how byte array fields are handled during deserialization. However, without further context or specific issues within this method, it's difficult to pinpoint exactly why it might be causing the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::configureFromObjectSettings(AnnotatedWithParams,AnnotatedWithParams,JavaType,SettableBeanProperty[],AnnotatedWithParams,SettableBeanProperty[])",
+            "method_code": "```java\n    public void configureFromObjectSettings(AnnotatedWithParams defaultCreator,\n            AnnotatedWithParams delegateCreator, JavaType delegateType, SettableBeanProperty[] delegateArgs,\n            AnnotatedWithParams withArgsCreator, SettableBeanProperty[] constructorArgs)\n    {\n        _defaultCreator = defaultCreator;\n        _delegateCreator = delegateCreator;\n        _delegateType = delegateType;\n        _delegateArguments = delegateArgs;\n        _withArgsCreator = withArgsCreator;\n        _constructorArguments = constructorArgs;\n    }\n\n```",
+            "method_doc": " Method for setting properties related to instantiating values from JSON Object. We will choose basically only one approach (out of possible three), and clear other properties ",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator",
+            "class_doc": " Default {@link ValueInstantiator} implementation, which supports Creator methods that can be indicated by standard Jackson annotations. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it handles the configuration of creators for object instantiation, but it does not directly address the handling of byte array types. The issue seems to stem from the `ObjectMapper` configuration rather than the method itself.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::canCreateFromObjectWith()",
+            "method_code": "```java\n    @Override\n    public boolean canCreateFromObjectWith() {\n        return (_withArgsCreator != null);\n    }\n\n```",
+            "method_doc": "This method checks if it can create an instance from object with parameters. It returns true if `_withArgsCreator` is not null.",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator",
+            "class_doc": " Default {@link ValueInstantiator} implementation, which supports Creator methods that can be indicated by standard Jackson annotations. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it only checks if there is a creator method available but does not consider whether the creator method can handle byte array types specifically. Given the error message indicates issues with deserializing byte arrays, further investigation into how this method interacts with byte array handling might reveal its role in the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::getFromObjectArguments(DeserializationConfig)",
+            "method_code": "```java\n    @Override\n    public SettableBeanProperty[] getFromObjectArguments(DeserializationConfig config) {\n        return _constructorArguments;\n    }\n\n```",
+            "method_doc": "This method retrieves the arguments needed for creating an instance from object with parameters. It returns `_constructorArguments`.",
+            "class_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator",
+            "class_doc": " Default {@link ValueInstantiator} implementation, which supports Creator methods that can be indicated by standard Jackson annotations. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly returns the constructor arguments without considering the specific type being deserialized. Given the error related to byte array handling, it's plausible that the method does not properly handle cases where the expected type is a byte array rather than a bean.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer::FailingDeserializer(String)",
+            "method_code": "```java\n    public FailingDeserializer(String m) {\n        super(Object.class);\n        _message = m;\n    }\n\n```",
+            "method_doc": "Initializes the `FailingDeserializer` with a custom message. This constructor does not call any other methods from the covered methods list.",
+            "class_name": "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer",
+            "class_doc": " Special bogus \"serializer\" that will throw {@link JsonMappingException} if an attempt is made to deserialize a value. This is used as placeholder to avoid NPEs for uninitialized structured serializers or handlers. ",
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "test_failure_causes": "Custom Deserializer Conflict\n**Description:** There might be a conflict between a custom deserializer registered for another part of the application and the default deserializer for byte arrays, causing the default deserializer to be invoked instead.\n\n**Location:** In the registration of custom deserializers within the application.\n\n**Observation Support:** The stack trace points to issues with creating and caching deserializers. A conflict with a custom deserializer could lead to the default deserializer being incorrectly invoked, resulting in the observed error.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message indicates a conflict between a custom deserializer and the default deserializer for byte arrays. The `FailingDeserializer` class is designed to throw an exception when attempting to deserialize a value, which is not related to the issue described in the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)",
+            "method_code": "```java\n    @Override\n    public void resolve(DeserializationContext ctxt)\n        throws JsonMappingException\n    {\n        ExternalTypeHandler.Builder extTypes = null;\n        // if ValueInstantiator can use \"creator\" approach, need to resolve it here...\n        SettableBeanProperty[] creatorProps;\n        if (_valueInstantiator.canCreateFromObjectWith()) {\n            creatorProps = _valueInstantiator.getFromObjectArguments(ctxt.getConfig());\n            // also: need to try to resolve 'external' type ids...\n            for (SettableBeanProperty prop : creatorProps) {\n                if (prop.hasValueTypeDeserializer()) {\n                    TypeDeserializer typeDeser = prop.getValueTypeDeserializer();\n                    if (typeDeser.getTypeInclusion() == JsonTypeInfo.As.EXTERNAL_PROPERTY) {\n                        if (extTypes == null) {\n                            extTypes = new ExternalTypeHandler.Builder();\n                        }\n                        extTypes.addExternal(prop, typeDeser);\n                    }\n                }\n            }\n        } else {\n            creatorProps = null;\n        }\n\n        UnwrappedPropertyHandler unwrapped = null;\n\n        for (SettableBeanProperty origProp : _beanProperties) {\n            SettableBeanProperty prop = origProp;\n\n            // May already have deserializer from annotations, if so, skip:\n            if (!prop.hasValueDeserializer()) {\n                // [Issue#125]: allow use of converters\n                JsonDeserializer<?> deser = findConvertingDeserializer(ctxt, prop);\n                if (deser == null) {\n                    deser = findDeserializer(ctxt, prop.getType(), prop);\n                }\n                prop = prop.withValueDeserializer(deser);\n            } else { // may need contextual version\n                JsonDeserializer<Object> deser = prop.getValueDeserializer();\n                /* Important! This is the only place where actually handle \"primary\"\n                 * property deserializers -- call is different from other places.\n                 */\n                JsonDeserializer<?> cd = ctxt.handlePrimaryContextualization(deser, prop,\n                        prop.getType());\n                if (cd != deser) {\n                    prop = prop.withValueDeserializer(cd);\n                }\n            }\n\n            // [JACKSON-235]: need to link managed references with matching back references\n            prop = _resolveManagedReferenceProperty(ctxt, prop);\n\n            // issue #351: need to wrap properties that require object id resolution.\n            if (!(prop instanceof ManagedReferenceProperty)) {\n                prop = _resolvedObjectIdProperty(ctxt, prop);\n            }\n            // [JACKSON-132]: support unwrapped values (via @JsonUnwrapped)\n            SettableBeanProperty u = _resolveUnwrappedProperty(ctxt, prop);\n            if (u != null) {\n                prop = u;\n                if (unwrapped == null) {\n                    unwrapped = new UnwrappedPropertyHandler();\n                }\n                unwrapped.addProperty(prop);\n                /* 12-Dec-2014, tatu: As per [databind#647], we will have problems if\n                 *    the original property is left in place. So let's remove it now.\n                 */\n                _beanProperties.remove(prop);\n                continue;\n            }\n            // [JACKSON-594]: non-static inner classes too:\n            prop = _resolveInnerClassValuedProperty(ctxt, prop);\n            if (prop != origProp) {\n                _beanProperties.replace(prop);\n                // [databind#795]: Make sure PropertyBasedCreator's properties stay in sync\n                if (creatorProps != null) {\n                    // 18-May-2015, tatu: _Should_ start with consistent set. But can we really\n                    //   fully count on this? May need to revisit in future; seems to hold for now.\n                    for (int i = 0, len = creatorProps.length; i < len; ++i) {\n                        if (creatorProps[i] == origProp) {\n                            creatorProps[i] = prop;\n                            break;\n                        }\n                        // ... as per above, it is possible we'd need to add this as fallback\n                        // if (but only if) identity check fails?\n                        /*\n                        if (creatorProps[i].getName().equals(prop.getName())) {\n                            creatorProps[i] = prop;\n                            break;\n                        }\n                        */\n                    }\n                }\n            }\n            // one more thing: if this property uses \"external property\" type inclusion,\n            // it needs different handling altogether\n            if (prop.hasValueTypeDeserializer()) {\n                TypeDeserializer typeDeser = prop.getValueTypeDeserializer();\n                if (typeDeser.getTypeInclusion() == JsonTypeInfo.As.EXTERNAL_PROPERTY) {\n                    if (extTypes == null) {\n                        extTypes = new ExternalTypeHandler.Builder();\n                    }\n                    extTypes.addExternal(prop, typeDeser);\n                    // In fact, remove from list of known properties to simplify later handling\n                    _beanProperties.remove(prop);\n                    continue;\n                }\n            }\n        }\n\n        // \"any setter\" may also need to be resolved now\n        if (_anySetter != null && !_anySetter.hasValueDeserializer()) {\n            _anySetter = _anySetter.withValueDeserializer(findDeserializer(ctxt,\n                    _anySetter.getType(), _anySetter.getProperty()));\n        }\n\n        // as well as delegate-based constructor:\n        if (_valueInstantiator.canCreateUsingDelegate()) {\n            JavaType delegateType = _valueInstantiator.getDelegateType(ctxt.getConfig());\n            if (delegateType == null) {\n                throw new IllegalArgumentException(\"Invalid delegate-creator definition for \"+_beanType\n                        +\": value instantiator (\"+_valueInstantiator.getClass().getName()\n                        +\") returned true for 'canCreateUsingDelegate()', but null for 'getDelegateType()'\");\n            }\n            AnnotatedWithParams delegateCreator = _valueInstantiator.getDelegateCreator();\n            // Need to create a temporary property to allow contextual deserializers:\n            BeanProperty.Std property = new BeanProperty.Std(TEMP_PROPERTY_NAME,\n                    delegateType, null, _classAnnotations, delegateCreator,\n                    PropertyMetadata.STD_OPTIONAL);\n\n            TypeDeserializer td = delegateType.getTypeHandler();\n            if (td == null) {\n                td = ctxt.getConfig().findTypeDeserializer(delegateType);\n            }\n            JsonDeserializer<Object> dd = findDeserializer(ctxt, delegateType, property);\n            if (td != null) {\n                td = td.forProperty(property);\n                dd = new TypeWrappedDeserializer(td, dd);\n            }\n            _delegateDeserializer = dd;\n        }\n\n        // And now that we know CreatorProperty instances are also resolved can finally create the creator:\n        if (creatorProps != null) {\n            _propertyBasedCreator = PropertyBasedCreator.construct(ctxt, _valueInstantiator, creatorProps);\n        }\n\n        if (extTypes != null) {\n            _externalTypeIdHandler = extTypes.build();\n            // we consider this non-standard, to offline handling\n            _nonStandardCreation = true;\n        }\n        \n        _unwrappedPropertyHandler = unwrapped;\n        if (unwrapped != null) { // we consider this non-standard, to offline handling\n            _nonStandardCreation = true;\n        }\n\n        // may need to disable vanilla processing, if unwrapped handling was enabled...\n        _vanillaProcessing = _vanillaProcessing && !_nonStandardCreation;\n    }\n\n```",
+            "method_doc": " Method called to finalize setup of this deserializer, after deserializer itself has been registered. This is needed to handle recursive and transitive dependencies. "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    public JsonDeserializer<Object> findValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType propertyType)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser = _findCachedDeserializer(propertyType);\n        if (deser == null) {\n            // If not, need to request factory to construct (or recycle)\n            deser = _createAndCacheValueDeserializer(ctxt, factory, propertyType);\n            if (deser == null) {\n                /* Should we let caller handle it? Let's have a helper method\n                 * decide it; can throw an exception, or return a valid\n                 * deserializer\n                 */\n                deser = _handleUnknownValueDeserializer(propertyType);\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to get hold of a deserializer for a value of given type; or if no such deserializer can be found, a default handler (which may do a best-effort generic serialization or just simply throw an exception when invoked). <p> Note: this method is only called for value types; not for keys. Key deserializers can be accessed using {@link #findKeyDeserializer}. <p> Note also that deserializer returned is guaranteed to be resolved (if it is of type {@link ResolvableDeserializer}), but not contextualized (wrt {@link ContextualDeserializer}): caller has to handle latter if necessary.  @param ctxt Deserialization context @param propertyType Declared type of the value to deserializer (obtained using 'setter' method signature and/or type annotations  @throws JsonMappingException if there are fatal problems with accessing suitable deserializer; including that of not finding any serializer "
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCache2(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        JsonDeserializer<Object> deser;\n        try {\n            deser = _createDeserializer(ctxt, factory, type);\n        } catch (IllegalArgumentException iae) {\n            /* We better only expose checked exceptions, since those\n             * are what caller is expected to handle\n             */\n            throw new JsonMappingException(iae.getMessage(), null, iae);\n        }\n        if (deser == null) {\n            return null;\n        }\n        /* cache resulting deserializer? always true for \"plain\" BeanDeserializer\n         * (but can be re-defined for sub-classes by using @JsonCachable!)\n         */\n        // 08-Jun-2010, tatu: Related to [JACKSON-296], need to avoid caching MapSerializers... so:\n        boolean isResolvable = (deser instanceof ResolvableDeserializer);\n        // 27-Mar-2015, tatu: As per [databind#735], avoid caching types with custom value desers\n        boolean addToCache = !_hasCustomValueHandler(type) && deser.isCachable();\n\n        /* we will temporarily hold on to all created deserializers (to\n         * handle cyclic references, and possibly reuse non-cached\n         * deserializers (list, map))\n         */\n        /* 07-Jun-2010, tatu: Danger: [JACKSON-296] was caused by accidental\n         *   resolution of a reference -- couple of ways to prevent this;\n         *   either not add Lists or Maps, or clear references eagerly.\n         *   Let's actually do both; since both seem reasonable.\n         */\n        /* Need to resolve? Mostly done for bean deserializers; required for\n         * resolving cyclic references.\n         */\n        if (isResolvable) {\n            _incompleteDeserializers.put(type, deser);\n            ((ResolvableDeserializer)deser).resolve(ctxt);\n            _incompleteDeserializers.remove(type);\n        }\n        if (addToCache) {\n            _cachedDeserializers.put(type, deser);\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method that handles actual construction (via factory) and caching (both intermediate and eventual) "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> findDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanProperty property)\n        throws JsonMappingException\n    {\n        return ctxt.findContextualValueDeserializer(type, property);\n    }\n\n```",
+            "method_doc": " Helper method used to locate deserializers for properties the type this deserializer handles contains (usually for properties of bean types)  @param type Type of property to deserialize @param property Actual property object (field, method, constuctor parameter) used for passing deserialized values; provided so deserializer can be contextualized if necessary (since 1.7) "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+            "method_code": "```java\n    protected StdDeserializer(Class<?> vc) {\n        _valueClass = vc;\n    }\n\n```",
+            "method_doc": "This method initializes the `_valueClass` field with the provided value class."
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        /* Only one thread to construct deserializers at any given point in time;\n         * limitations necessary to ensure that only completely initialized ones\n         * are visible and used.\n         */\n        synchronized (_incompleteDeserializers) {\n            // Ok, then: could it be that due to a race condition, deserializer can now be found?\n            JsonDeserializer<Object> deser = _findCachedDeserializer(type);\n            if (deser != null) {\n                return deser;\n            }\n            int count = _incompleteDeserializers.size();\n            // Or perhaps being resolved right now?\n            if (count > 0) {\n                deser = _incompleteDeserializers.get(type);\n                if (deser != null) {\n                    return deser;\n                }\n            }\n            // Nope: need to create and possibly cache\n            try {\n                return _createAndCache2(ctxt, factory, type);\n            } finally {\n                // also: any deserializers that have been created are complete by now\n                if (count == 0 && _incompleteDeserializers.size() > 0) {\n                    _incompleteDeserializers.clear();\n                }\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method that will try to create a deserializer for given type, and resolve and cache it if necessary  @param ctxt Currently active deserialization context @param type Type of property to deserialize "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)",
+            "method_code": "```java\n    protected StdDeserializer(JavaType valueType) {\n        _valueClass = (valueType == null) ? null : valueType.getRawClass();\n    }\n\n```",
+            "method_doc": "This method initializes the `_valueClass` field with the raw class of the provided JavaType, or sets it to null if the JavaType is null."
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::defaultClassIntrospector()": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::defaultClassIntrospector()",
+            "method_code": "```java\n    protected ClassIntrospector defaultClassIntrospector() {\n        return new BasicClassIntrospector();\n    }\n\n```",
+            "method_doc": " Overridable helper method used to construct default {@link ClassIntrospector} to use.  @since 2.5 "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public <T> T readValue(String content, Class<T> valueType)\n        throws IOException, JsonParseException, JsonMappingException\n    {\n     // !!! TODO\n//    \t_setupClassLoaderForDeserialization(valueType);\n        return (T) _readMapAndClose(_jsonFactory.createParser(content), _typeFactory.constructType(valueType));\n    } \n\n```",
+            "method_doc": " Method to deserialize JSON content from given JSON content String.  @throws IOException if a low-level I/O problem (unexpected end-of-input, network error) occurs (passed through as-is without additional wrapping -- note that this is one case where {@link DeserializationFeature#WRAP_EXCEPTIONS} does NOT result in wrapping of exception even if enabled) @throws JsonParseException if underlying input contains invalid content of type {@link JsonParser} supports (JSON for default case) @throws JsonMappingException if the input JSON structure does not match structure expected for result type (or has other mismatch issues) "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)",
+            "method_code": "```java\n    protected DefaultDeserializationContext createDeserializationContext(JsonParser jp,\n            DeserializationConfig cfg) {\n        return _deserializationContext.createInstance(cfg, jp, _injectableValues);\n    }\n\n```",
+            "method_doc": " Internal helper method called to create an instance of {@link DeserializationContext} for deserializing a single root value. Can be overridden if a custom context is needed. "
+        },
+        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext::DefaultDeserializationContext(DeserializerFactory,DeserializerCache)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext::DefaultDeserializationContext(DeserializerFactory,DeserializerCache)",
+            "method_code": "```java\n    protected DefaultDeserializationContext(DeserializerFactory df, DeserializerCache cache) {\n        super(df, cache);\n    }\n\n```",
+            "method_doc": " Constructor that will pass specified deserializer factory and cache: cache may be null (in which case default implementation will be used), factory can not be null "
+        },
+        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)",
+            "method_code": "```java\n        @Override\n        public DefaultDeserializationContext createInstance(DeserializationConfig config,\n                JsonParser jp, InjectableValues values) {\n            return new Impl(this, config, jp, values);\n        }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected JsonDeserializer<Object> _createDeserializer(DeserializationContext ctxt,\n            DeserializerFactory factory, JavaType type)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n\n        // First things first: do we need to use abstract type mapping?\n        if (type.isAbstract() || type.isMapLikeType() || type.isCollectionLikeType()) {\n            type = factory.mapAbstractType(config, type);\n        }\n        BeanDescription beanDesc = config.introspect(type);\n        // Then: does type define explicit deserializer to use, with annotation(s)?\n        JsonDeserializer<Object> deser = findDeserializerFromAnnotation(ctxt,\n                beanDesc.getClassInfo());\n        if (deser != null) {\n            return deser;\n        }\n\n        // If not, may have further type-modification annotations to check:\n        JavaType newType = modifyTypeByAnnotation(ctxt, beanDesc.getClassInfo(), type);\n        if (newType != type) {\n            type = newType;\n            beanDesc = config.introspect(newType);\n        }\n\n        // We may also have a Builder type to consider...\n        Class<?> builder = beanDesc.findPOJOBuilder();\n        if (builder != null) {\n            return (JsonDeserializer<Object>) factory.createBuilderBasedDeserializer(\n            \t\tctxt, type, beanDesc, builder);\n        }\n\n        // Or perhaps a Converter?\n        Converter<Object,Object> conv = beanDesc.findDeserializationConverter();\n        if (conv == null) { // nope, just construct in normal way\n            return (JsonDeserializer<Object>) _createDeserializer2(ctxt, factory, type, beanDesc);\n        }\n        // otherwise need to do bit of introspection\n        JavaType delegateType = conv.getInputType(ctxt.getTypeFactory());\n        // One more twist, as per [Issue#288]; probably need to get new BeanDesc\n        if (!delegateType.hasRawClass(type.getRawClass())) {\n            beanDesc = config.introspect(delegateType);\n        }\n        return new StdDelegatingDeserializer<Object>(conv, delegateType,\n                _createDeserializer2(ctxt, factory, delegateType, beanDesc));\n    }\n\n```",
+            "method_doc": " Method that does the heavy lifting of checking for per-type annotations, find out full type, and figure out which actual factory method to call. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+            "method_code": "```java\n    protected JsonDeserializer<Object> _findRootDeserializer(DeserializationContext ctxt,\n            JavaType valueType)\n        throws JsonMappingException\n    {\n        // First: have we already seen it?\n        JsonDeserializer<Object> deser = _rootDeserializers.get(valueType);\n        if (deser != null) {\n            return deser;\n        }\n        // Nope: need to ask provider to resolve it\n        deser = ctxt.findRootValueDeserializer(valueType);\n        if (deser == null) { // can this happen?\n            throw new JsonMappingException(\"Can not find a deserializer for type \"+valueType);\n        }\n        _rootDeserializers.put(valueType, deser);\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called to locate deserializer for the passed root-level value. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()",
+            "method_code": "```java\n    public ObjectMapper() {\n        this(null, null, null);\n    }\n\n```",
+            "method_doc": " Default constructor, which will construct the default {@link JsonFactory} as necessary, use {@link SerializerProvider} as its {@link SerializerProvider}, and {@link BeanSerializerFactory} as its {@link SerializerFactory}. This means that it can serialize all standard JDK types, as well as regular Java Beans (based on method names and Jackson-specific annotations), but does not support JAXB annotations. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final DeserializationConfig config = ctxt.getConfig();\n        // We may also have custom overrides:\n        JsonDeserializer<Object> custom = _findCustomBeanDeserializer(type, config, beanDesc);\n        if (custom != null) {\n            return custom;\n        }\n        /* One more thing to check: do we have an exception type\n         * (Throwable or its sub-classes)? If so, need slightly\n         * different handling.\n         */\n        if (type.isThrowable()) {\n            return buildThrowableDeserializer(ctxt, type, beanDesc);\n        }\n        /* Or, for abstract types, may have alternate means for resolution\n         * (defaulting, materialization)\n         */\n        if (type.isAbstract()) {\n            // [JACKSON-41] (v1.6): Let's make it possible to materialize abstract types.\n            JavaType concreteType = materializeAbstractType(ctxt, type, beanDesc);\n            if (concreteType != null) {\n                /* important: introspect actual implementation (abstract class or\n                 * interface doesn't have constructors, for one)\n                 */\n                beanDesc = config.introspect(concreteType);\n                return buildBeanDeserializer(ctxt, concreteType, beanDesc);\n            }\n        }\n\n        // Otherwise, may want to check handlers for standard types, from superclass:\n        @SuppressWarnings(\"unchecked\")\n        JsonDeserializer<Object> deser = (JsonDeserializer<Object>) findStdDeserializer(ctxt, type, beanDesc);\n        if (deser != null) {\n            return deser;\n        }\n\n        // Otherwise: could the class be a Bean class? If not, bail out\n        if (!isPotentialBeanType(type.getRawClass())) {\n            return null;\n        }\n        // Use generic bean introspection to build deserializer\n        return buildBeanDeserializer(ctxt, type, beanDesc);\n    }\n\n```",
+            "method_doc": " Method that {@link DeserializerCache}s call to create a new deserializer for types other than Collections, Maps, arrays and enums. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonDeserializer<Object> buildBeanDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // First: check what creators we can use, if any\n        ValueInstantiator valueInstantiator;\n        /* 04-Jun-2015, tatu: To work around [databind#636], need to catch the\n         *    issue, defer; this seems like a reasonable good place for now.\n         *   Note, however, that for non-Bean types (Collections, Maps) this\n         *   probably won't work and needs to be added elsewhere.\n         */\n        try {\n            valueInstantiator = findValueInstantiator(ctxt, beanDesc);\n        } catch (NoClassDefFoundError error) {\n            return new NoClassDefFoundDeserializer<Object>(error);\n        }\n        BeanDeserializerBuilder builder = constructBeanDeserializerBuilder(ctxt, beanDesc);\n        builder.setValueInstantiator(valueInstantiator);\n         // And then setters for deserializing from JSON Object\n        addBeanProps(ctxt, beanDesc, builder);\n        addObjectIdReader(ctxt, beanDesc, builder);\n\n        // managed/back reference fields/setters need special handling... first part\n        addReferenceProperties(ctxt, beanDesc, builder);\n        addInjectables(ctxt, beanDesc, builder);\n        \n        final DeserializationConfig config = ctxt.getConfig();\n        // [JACKSON-440]: update builder now that all information is in?\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                builder = mod.updateBuilder(config, beanDesc, builder);\n            }\n        }\n        JsonDeserializer<?> deserializer;\n\n        /* 19-Mar-2012, tatu: This check used to be done earlier; but we have to defer\n         *   it a bit to collect information on ObjectIdReader, for example.\n         */\n        if (type.isAbstract() && !valueInstantiator.canInstantiate()) {\n            deserializer = builder.buildAbstract();\n        } else {\n            deserializer = builder.build();\n        }\n\n        // [JACKSON-440]: may have modifier(s) that wants to modify or replace serializer we just built:\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                deserializer = mod.modifyDeserializer(config, beanDesc, deserializer);\n            }\n        }\n        return (JsonDeserializer<Object>) deserializer;\n    }\n\n```",
+            "method_doc": " Method that is to actually build a bean deserializer instance. All basic sanity checks have been done to know that what we have may be a valid bean type, and that there are no default simple deserializers. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::findStdDeserializer(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::findStdDeserializer(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    protected JsonDeserializer<?> findStdDeserializer(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        // note: we do NOT check for custom deserializers here, caller has already\n        // done that\n        JsonDeserializer<?> deser = findDefaultDeserializer(ctxt, type, beanDesc);\n        // Also: better ensure these are post-processable?\n        if (deser != null) {\n            if (_factoryConfig.hasDeserializerModifiers()) {\n                for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                    deser = mod.modifyDeserializer(ctxt.getConfig(), beanDesc, deser);\n                }\n            }\n        }\n        return deser;\n    }\n\n```",
+            "method_doc": " Method called by {@link BeanDeserializerFactory} to see if there might be a standard deserializer registered for given type. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::materializeAbstractType(DeserializationContext,JavaType,BeanDescription)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::materializeAbstractType(DeserializationContext,JavaType,BeanDescription)",
+            "method_code": "```java\n    protected JavaType materializeAbstractType(DeserializationContext ctxt,\n            JavaType type, BeanDescription beanDesc)\n        throws JsonMappingException\n    {\n        final JavaType abstractType = beanDesc.getType();\n        // [JACKSON-502]: Now it is possible to have multiple resolvers too,\n        //   as they are registered via module interface.\n        for (AbstractTypeResolver r : _factoryConfig.abstractTypeResolvers()) {\n            JavaType concrete = r.resolveAbstractType(ctxt.getConfig(), abstractType);\n            if (concrete != null) {\n                return concrete;\n            }\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "This method attempts to materialize an abstract type by resolving it using registered abstract type resolvers."
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::BeanDeserializerBase(BeanDeserializerBuilder,BeanDescription,BeanPropertyMap,Map,HashSet,boolean,boolean)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::BeanDeserializerBase(BeanDeserializerBuilder,BeanDescription,BeanPropertyMap,Map,HashSet,boolean,boolean)",
+            "method_code": "```java\n    protected BeanDeserializerBase(BeanDeserializerBuilder builder,\n            BeanDescription beanDesc,\n            BeanPropertyMap properties, Map<String, SettableBeanProperty> backRefs,\n            HashSet<String> ignorableProps, boolean ignoreAllUnknown,\n            boolean hasViews)\n    {\n        super(beanDesc.getType());\n\n        AnnotatedClass ac = beanDesc.getClassInfo();\n        _classAnnotations = ac.getAnnotations();       \n        _beanType = beanDesc.getType();\n        _valueInstantiator = builder.getValueInstantiator();\n        \n        _beanProperties = properties;\n        _backRefs = backRefs;\n        _ignorableProps = ignorableProps;\n        _ignoreAllUnknown = ignoreAllUnknown;\n\n        _anySetter = builder.getAnySetter();\n        List<ValueInjector> injectables = builder.getInjectables();\n        _injectables = (injectables == null || injectables.isEmpty()) ? null\n                : injectables.toArray(new ValueInjector[injectables.size()]);\n        _objectIdReader = builder.getObjectIdReader();\n        _nonStandardCreation = (_unwrappedPropertyHandler != null)\n            || _valueInstantiator.canCreateUsingDelegate()\n            || _valueInstantiator.canCreateFromObjectWith()\n            || !_valueInstantiator.canCreateUsingDefault()\n            ;\n\n        // Any transformation we may need to apply?\n        JsonFormat.Value format = beanDesc.findExpectedFormat(null);\n        _serializationShape = (format == null) ? null : format.getShape();\n\n        _needViewProcesing = hasViews;\n        _vanillaProcessing = !_nonStandardCreation\n                && (_injectables == null)\n                && !_needViewProcesing\n                // also, may need to reorder stuff if we expect Object Id:\n                && (_objectIdReader == null)\n                ;\n    }\n\n```",
+            "method_doc": " Constructor used when initially building a deserializer instance, given a {@link BeanDeserializerBuilder} that contains configuration. "
+        },
+        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)",
+            "method_code": "```java\n    protected void addBeanProps(DeserializationContext ctxt,\n            BeanDescription beanDesc, BeanDeserializerBuilder builder)\n        throws JsonMappingException\n    {\n        final SettableBeanProperty[] creatorProps =\n                builder.getValueInstantiator().getFromObjectArguments(ctxt.getConfig());\n        final boolean isConcrete = !beanDesc.getType().isAbstract();\n        \n        // Things specified as \"ok to ignore\"? [JACKSON-77]\n        AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();\n        boolean ignoreAny = false;\n        {\n            Boolean B = intr.findIgnoreUnknownProperties(beanDesc.getClassInfo());\n            if (B != null) {\n                ignoreAny = B.booleanValue();\n                builder.setIgnoreUnknownProperties(ignoreAny);\n            }\n        }\n        // Or explicit/implicit definitions?\n        Set<String> ignored = ArrayBuilders.arrayToSet(intr.findPropertiesToIgnore(beanDesc.getClassInfo(), false));        \n        for (String propName : ignored) {\n            builder.addIgnorable(propName);\n        }\n        // Also, do we have a fallback \"any\" setter?\n        AnnotatedMethod anySetter = beanDesc.findAnySetter();\n        if (anySetter != null) {\n            builder.setAnySetter(constructAnySetter(ctxt, beanDesc, anySetter));\n        }\n        // NOTE: we do NOT add @JsonIgnore'd properties into blocked ones if there's any-setter\n        // Implicit ones via @JsonIgnore and equivalent?\n        if (anySetter == null) {\n            Collection<String> ignored2 = beanDesc.getIgnoredPropertyNames();\n            if (ignored2 != null) {\n                for (String propName : ignored2) {\n                    // allow ignoral of similarly named JSON property, but do not force;\n                    // latter means NOT adding this to 'ignored':\n                    builder.addIgnorable(propName);\n                }\n            }\n        }\n        final boolean useGettersAsSetters = (ctxt.isEnabled(MapperFeature.USE_GETTERS_AS_SETTERS)\n                && ctxt.isEnabled(MapperFeature.AUTO_DETECT_GETTERS));\n\n        // Ok: let's then filter out property definitions\n        List<BeanPropertyDefinition> propDefs = filterBeanProps(ctxt,\n                beanDesc, builder, beanDesc.findProperties(), ignored);\n\n        // After which we can let custom code change the set\n        if (_factoryConfig.hasDeserializerModifiers()) {\n            for (BeanDeserializerModifier mod : _factoryConfig.deserializerModifiers()) {\n                propDefs = mod.updateProperties(ctxt.getConfig(), beanDesc, propDefs);\n            }\n        }\n        \n        // At which point we still have all kinds of properties; not all with mutators:\n        for (BeanPropertyDefinition propDef : propDefs) {\n            SettableBeanProperty prop = null;\n            /* 18-Oct-2013, tatu: Although constructor parameters have highest precedence,\n             *   we need to do linkage (as per [Issue#318]), and so need to start with\n             *   other types, and only then create constructor parameter, if any.\n             */\n            if (propDef.hasSetter()) {\n                Type propertyType = propDef.getSetter().getGenericParameterType(0);\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (propDef.hasField()) {\n                Type propertyType = propDef.getField().getGenericType();\n                prop = constructSettableProperty(ctxt, beanDesc, propDef, propertyType);\n            } else if (useGettersAsSetters && propDef.hasGetter()) {\n                /* As per [JACKSON-88], may also need to consider getters\n                 * for Map/Collection properties; but with lowest precedence\n                 */\n                AnnotatedMethod getter = propDef.getGetter();\n                // should only consider Collections and Maps, for now?\n                Class<?> rawPropertyType = getter.getRawType();\n                if (Collection.class.isAssignableFrom(rawPropertyType)\n                        || Map.class.isAssignableFrom(rawPropertyType)) {\n                    prop = constructSetterlessProperty(ctxt, beanDesc, propDef);\n                }\n            }\n            // 25-Sep-2014, tatu: No point in finding constructor parameters for abstract types\n            //   (since they are never used anyway)\n            if (isConcrete && propDef.hasConstructorParameter()) {\n                /* [JACKSON-700] If property is passed via constructor parameter, we must\n                 *   handle things in special way. Not sure what is the most optimal way...\n                 *   for now, let's just call a (new) method in builder, which does nothing.\n                 */\n                // but let's call a method just to allow custom builders to be aware...\n                final String name = propDef.getName();\n                CreatorProperty cprop = null;\n                if (creatorProps != null) {\n                    for (SettableBeanProperty cp : creatorProps) {\n                        if (name.equals(cp.getName()) && (cp instanceof CreatorProperty)) {\n                            cprop = (CreatorProperty) cp;\n                            break;\n                        }\n                    }\n                }\n                if (cprop == null) {\n                    throw ctxt.mappingException(\"Could not find creator property with name '%s' (in class %s)\",\n                            name, beanDesc.getBeanClass().getName());\n                }\n                if (prop != null) {\n                    cprop.setFallbackSetter(prop);\n                }\n                prop = cprop;\n                builder.addCreatorProperty(cprop);\n                continue;\n            }\n\n            if (prop != null) {\n                Class<?>[] views = propDef.findViews();\n                if (views == null) {\n                    // one more twist: if default inclusion disabled, need to force empty set of views\n                    if (!ctxt.isEnabled(MapperFeature.DEFAULT_VIEW_INCLUSION)) {\n                        views = NO_VIEWS;\n                    }\n                }\n                // one more thing before adding to builder: copy any metadata\n                prop.setViews(views);\n                builder.addProperty(prop);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to figure out settable properties for the bean deserializer to use. <p> Note: designed to be overridable, and effort is made to keep interface similar between versions. "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::configureFromObjectSettings(AnnotatedWithParams,AnnotatedWithParams,JavaType,SettableBeanProperty[],AnnotatedWithParams,SettableBeanProperty[])": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::configureFromObjectSettings(AnnotatedWithParams,AnnotatedWithParams,JavaType,SettableBeanProperty[],AnnotatedWithParams,SettableBeanProperty[])",
+            "method_code": "```java\n    public void configureFromObjectSettings(AnnotatedWithParams defaultCreator,\n            AnnotatedWithParams delegateCreator, JavaType delegateType, SettableBeanProperty[] delegateArgs,\n            AnnotatedWithParams withArgsCreator, SettableBeanProperty[] constructorArgs)\n    {\n        _defaultCreator = defaultCreator;\n        _delegateCreator = delegateCreator;\n        _delegateType = delegateType;\n        _delegateArguments = delegateArgs;\n        _withArgsCreator = withArgsCreator;\n        _constructorArguments = constructorArgs;\n    }\n\n```",
+            "method_doc": " Method for setting properties related to instantiating values from JSON Object. We will choose basically only one approach (out of possible three), and clear other properties "
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::canCreateFromObjectWith()": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::canCreateFromObjectWith()",
+            "method_code": "```java\n    @Override\n    public boolean canCreateFromObjectWith() {\n        return (_withArgsCreator != null);\n    }\n\n```",
+            "method_doc": "This method checks if it can create an instance from object with parameters. It returns true if `_withArgsCreator` is not null."
+        },
+        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::getFromObjectArguments(DeserializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::getFromObjectArguments(DeserializationConfig)",
+            "method_code": "```java\n    @Override\n    public SettableBeanProperty[] getFromObjectArguments(DeserializationConfig config) {\n        return _constructorArguments;\n    }\n\n```",
+            "method_doc": "This method retrieves the arguments needed for creating an instance from object with parameters. It returns `_constructorArguments`."
+        },
+        "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer::FailingDeserializer(String)": {
+            "method_name": "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer::FailingDeserializer(String)",
+            "method_code": "```java\n    public FailingDeserializer(String m) {\n        super(Object.class);\n        _message = m;\n    }\n\n```",
+            "method_doc": "Initializes the `FailingDeserializer` with a custom message. This constructor does not call any other methods from the covered methods list."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.databind.deser.TestArrayDeserialization",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Missing Deserializer for Byte Array Field\n**Description:** The `HiddenBinaryBean890` class does not have a custom deserializer for its `someBytes` field, leading to the default deserializer attempting to treat the field as a bean rather than a simple byte array.\n\n**Location:** In the `HiddenBinaryBean890` class, specifically in the definition of the `someBytes` field.\n\n**Observation Support:** The stack trace indicates that the deserializer cache cannot find a suitable deserializer for the `Class [B` (byte array). This suggests that the default deserializer is being used, which is not capable of handling byte arrays directly.",
+                "Incorrect Type Mapping in ObjectMapper Configuration\n**Description:** The `ObjectMapper` instance used in the test may not have the necessary configuration to handle byte array fields correctly, possibly due to missing module registrations or incorrect settings.\n\n**Location:** In the setup or configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The error message mentions that the deserializer cache cannot create a value deserializer for `Class [B`. This could indicate that the `ObjectMapper` lacks the necessary modules or configurations to handle byte arrays properly.",
+                "Custom Deserializer Conflict\n**Description:** There might be a conflict between a custom deserializer registered for another part of the application and the default deserializer for byte arrays, causing the default deserializer to be invoked instead.\n\n**Location:** In the registration of custom deserializers within the application.\n\n**Observation Support:** The stack trace points to issues with creating and caching deserializers. A conflict with a custom deserializer could lead to the default deserializer being incorrectly invoked, resulting in the observed error.",
+                "Base64 Decoding Issue\n**Description:** The base64 decoding logic within the deserialization process might be flawed, leading to incorrect data being assigned to the `someBytes` field.\n\n**Location:** Within the deserialization logic of the `HiddenBinaryBean890` class or related utility methods.\n\n**Observation Support:** The error message states that the deserializer cannot handle `Class [B` as a bean. This could suggest that the base64 decoding step is failing or producing unexpected results, preventing the correct assignment of the byte array.",
+                "Incomplete or Misconfigured Object Mapper Initialization\n**Description:** The `ObjectMapper` instance used in the test might not be fully initialized or configured correctly, leading to issues with deserializing byte array fields.\n\n**Location:** During the initialization of the `ObjectMapper` instance in the test setup.\n\n**Observation Support:** The error message indicates problems with finding and creating deserializers. An incomplete or misconfigured `ObjectMapper` could lead to the default deserializer being invoked, which is not capable of handling byte arrays correctly."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+                    "com.fasterxml.jackson.databind.ObjectMapper"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext",
+                    "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory",
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache",
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer",
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext": [
+                        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext::DefaultDeserializationContext(DeserializerFactory,DeserializerCache)",
+                        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::defaultClassIntrospector()",
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::createDeserializationContext(JsonParser,DeserializationConfig)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator": [
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::configureFromObjectSettings(AnnotatedWithParams,AnnotatedWithParams,JavaType,SettableBeanProperty[],AnnotatedWithParams,SettableBeanProperty[])",
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::canCreateFromObjectWith()",
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::getFromObjectArguments(DeserializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::findStdDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::materializeAbstractType(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createDeserializer(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext": [
+                        "com.fasterxml.jackson.databind.deser.DefaultDeserializationContext$Impl::createInstance(DeserializationConfig,JsonParser,InjectableValues)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.impl.FailingDeserializer::FailingDeserializer(String)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::buildBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::addBeanProps(DeserializationContext,BeanDescription,BeanDeserializerBuilder)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator": [
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::configureFromObjectSettings(AnnotatedWithParams,AnnotatedWithParams,JavaType,SettableBeanProperty[],AnnotatedWithParams,SettableBeanProperty[])",
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::canCreateFromObjectWith()",
+                        "com.fasterxml.jackson.databind.deser.std.StdValueInstantiator::getFromObjectArguments(DeserializationConfig)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::readValue(String,Class)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_findRootDeserializer(DeserializationContext,JavaType)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::ObjectMapper()"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::createBeanDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::findStdDeserializer(DeserializationContext,JavaType,BeanDescription)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerFactory::materializeAbstractType(DeserializationContext,JavaType,BeanDescription)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.DeserializerCache": [
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::findValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCacheValueDeserializer(DeserializationContext,DeserializerFactory,JavaType)",
+                        "com.fasterxml.jackson.databind.deser.DeserializerCache::_createAndCache2(DeserializationContext,DeserializerFactory,JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.std.StdDeserializer": [
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::findDeserializer(DeserializationContext,JavaType,BeanProperty)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(Class)",
+                        "com.fasterxml.jackson.databind.deser.std.StdDeserializer::StdDeserializer(JavaType)"
+                    ],
+                    "com.fasterxml.jackson.databind.deser.BeanDeserializerBase": [
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::resolve(DeserializationContext)",
+                        "com.fasterxml.jackson.databind.deser.BeanDeserializerBase::BeanDeserializerBase(BeanDeserializerBuilder,BeanDescription,BeanPropertyMap,Map,HashSet,boolean,boolean)"
+                    ]
+                }
+            }
+        }
+    ]
+}

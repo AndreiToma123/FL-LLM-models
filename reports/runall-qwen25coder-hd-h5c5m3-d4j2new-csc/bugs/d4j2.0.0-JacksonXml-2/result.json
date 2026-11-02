@@ -1,0 +1,974 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+        "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule",
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector",
+        "com.fasterxml.jackson.dataformat.xml.util.XmlRootNameLookup"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+            "method_code": "```java\n    @Override\n    public Object deserialize(JsonParser jp, DeserializationContext ctxt)\n        throws IOException, JsonProcessingException\n    {\n        if (jp.getCurrentToken() == JsonToken.VALUE_STRING) {\n            Object bean = _valueInstantiator.createUsingDefault(ctxt);\n            _xmlTextProperty.deserializeAndSet(jp, ctxt, bean);\n            return bean;\n        }\n        return _delegatee.deserialize(jp,  ctxt);\n    }\n\n```",
+            "method_doc": "  Overridden deserialization methods  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+            "class_doc": " Delegating deserializer that is used in the special cases where we may sometimes see a \"plain\" String value but need to map it as if it was a property of POJO. The impedance is introduced by heuristic conversion from XML events into rough JSON equivalents; and this is one work-around that can only be done after the fact. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the deserialization process for mixed content. The assertion failure indicates that the `value` field is not being set correctly, which could be due to an issue within this method. By fixing the deserialization logic in this method, we can ensure that the `value` field is populated with the correct value from the text node.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 7,
+                "4": 8,
+                "5": 7
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n            switch (t) {\n            case START_OBJECT:\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                break;\n            case START_ARRAY:\n                _parsingContext = _parsingContext.createChildArrayContext(-1, -1);\n                break;\n            case END_OBJECT:\n            case END_ARRAY:\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                break;\n            case FIELD_NAME:\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                break;\n            default: // VALUE_STRING, VALUE_NULL\n                // should be fine as is?\n            }\n            return t;\n        }\n        int token = _xmlTokens.next();\n\n        // Need to have a loop just because we may have to eat/convert\n        // a start-element that indicates an array element.\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            // If we thought we might get leaf, no such luck\n            if (_mayBeLeaf) {\n                // leave _mayBeLeaf set, as we start a new context\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                return (_currToken = JsonToken.START_OBJECT);\n            }\n            if (_parsingContext.inArray()) {\n                // Yup: in array, so this element could be verified; but it won't be\n                // reported anyway, and we need to process following event.\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n\n            // Ok: virtual wrapping can be done by simply repeating current START_ELEMENT.\n            // Couple of ways to do it; but start by making _xmlTokens replay the thing...\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n\n            _mayBeLeaf = true;\n            // Ok: in array context we need to skip reporting field names.\n            // But what's the best way to find next token?\n            return (_currToken = JsonToken.FIELD_NAME);\n        }\n\n        // Ok; beyond start element, what do we get?\n        while (true) {\n            switch (token) {\n            case XmlTokenStream.XML_END_ELEMENT:\n                // Simple, except that if this is a leaf, need to suppress end:\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    if (_parsingContext.inArray()) {\n                        // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                        //    expose as empty Object, not null\n                        _nextToken = JsonToken.END_OBJECT;\n                        _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                        return (_currToken = JsonToken.START_OBJECT);\n                    }\n                    return (_currToken = JsonToken.VALUE_NULL);\n                }\n                _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                return _currToken;\n                \n            case XmlTokenStream.XML_ATTRIBUTE_NAME:\n                // If there was a chance of leaf node, no more...\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    _nextToken = JsonToken.FIELD_NAME;\n                    _currText = _xmlTokens.getText();\n                    _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                    return (_currToken = JsonToken.START_OBJECT);\n                }\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n                _currText = _xmlTokens.getText();\n                return (_currToken = JsonToken.VALUE_STRING);\n            case XmlTokenStream.XML_TEXT:\n                _currText = _xmlTokens.getText();\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    // One more refinement (pronunced like \"hack\") is that if\n                    // we had an empty String (or all white space), and we are\n                    // deserializing an array, we better hide the empty text.\n                    // Also: must skip following END_ELEMENT\n                    _xmlTokens.skipEndElement();\n                    if (_parsingContext.inArray()) {\n                        if (_isEmpty(_currText)) {\n                            // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                            //    expose as empty Object, not null (or, worse, as used to\n                            //    be done, by swallowing the token)\n                            _nextToken = JsonToken.END_OBJECT;\n                            _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                            return (_currToken = JsonToken.START_OBJECT);\n                        }\n                    }\n                    return (_currToken = JsonToken.VALUE_STRING);\n                } else {\n                    // [dataformat-xml#177]: empty text may also need to be skipped\n                    // but... [dataformat-xml#191]: looks like we can't short-cut, must\n                    // loop over again\n                    if (_parsingContext.inObject()) {\n                        if ((_currToken != JsonToken.FIELD_NAME) && _isEmpty(_currText)) {\n                            token = _xmlTokens.next();\n                            continue;\n                        }\n                    }\n                }\n                // If not a leaf (or otherwise ignorable), need to transform into property...\n                _parsingContext.setCurrentName(_cfgNameForTextElement);\n                _nextToken = JsonToken.VALUE_STRING;\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_END:\n                return (_currToken = null);\n            }\n        }\n    }\n\n```",
+            "method_doc": " @Override public JsonToken nextToken() throws IOException { JsonToken t = nextToken0(); if (t != null) { switch (t) { case FIELD_NAME: System.out.println(\"JsonToken: FIELD_NAME '\"+_parsingContext.getCurrentName()+\"'\"); break; case VALUE_STRING: System.out.println(\"JsonToken: VALUE_STRING '\"+getText()+\"'\"); break; default: System.out.println(\"JsonToken: \"+t); } } return t; }  public JsonToken nextToken0() throws IOException ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the parsing of XML tokens and determines the type of token being processed. Given that the test failure is related to incorrect handling of mixed content, it is reasonable to suspect that the issue lies within the logic of this method, particularly in how it processes text nodes and their values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 0,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+            "method_code": "```java\n    @Override\n    public String getText() throws IOException\n    {\n        if (_currToken == null) {\n            return null;\n        }\n        switch (_currToken) {\n        case FIELD_NAME:\n            return getCurrentName();\n        case VALUE_STRING:\n            return _currText;\n        default:\n            return _currToken.asString();\n        }\n    }\n\n```",
+            "method_doc": "  Public API, access to token information, text  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly returns the current text content based on the current token type. In the case of mixed content, the 'value' field might not be populated correctly if the token type is not handled properly. Since the test failure indicates an issue with the 'value' field not being set, fixing the getText() method could resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 0,
+                "3": 5,
+                "4": 8,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setupModule(SetupContext)",
+            "method_code": "```java\n    @Override\n    public void setupModule(SetupContext context)\n    {\n        // Need to modify BeanDeserializer, BeanSerializer that are used\n        context.addBeanSerializerModifier(new XmlBeanSerializerModifier());\n        context.addBeanDeserializerModifier(new XmlBeanDeserializerModifier(_cfgNameForTextElement));\n\n        // as well as AnnotationIntrospector\n        context.insertAnnotationIntrospector(_constructIntrospector());\n\n        // and finally inform XmlFactory about overrides, if need be:\n        if (_cfgNameForTextElement != FromXmlParser.DEFAULT_UNNAMED_TEXT_PROPERTY) {\n            XmlMapper m = (XmlMapper) context.getOwner();\n            m.setXMLTextElementName(_cfgNameForTextElement);\n        }\n\n        /* Usually this would be the first call; but here anything added will\n         * be stuff user may has added, so do it afterwards instead.\n         */\n        super.setupModule(context);\n    }    \n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule",
+            "class_doc": " Module that implements most functionality needed to support producing and consuming XML instead of JSON. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it involves modifying serializers and deserializers, which could directly impact how mixed content is handled during XML deserialization.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)",
+            "method_code": "```java\n    public XmlTextDeserializer(BeanDeserializerBase delegate, SettableBeanProperty prop)\n    {\n        super(delegate);\n        _xmlTextProperty = prop;\n        _xmlTextPropertyIndex = prop.getPropertyIndex();\n        _valueInstantiator = delegate.getValueInstantiator();\n    }\n\n```",
+            "method_doc": "  Construction  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+            "class_doc": " Delegating deserializer that is used in the special cases where we may sometimes see a \"plain\" String value but need to map it as if it was a property of POJO. The impedance is introduced by heuristic conversion from XML events into rough JSON equivalents; and this is one work-around that can only be done after the fact. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it involves the construction of a deserializer, which could potentially affect how mixed content is handled. However, the issue described seems more related to the actual deserialization process rather than the constructor itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)",
+            "method_code": "```java\n    public XmlTextDeserializer(BeanDeserializerBase delegate, int textPropIndex)\n    {\n        super(delegate);\n        _xmlTextPropertyIndex = textPropIndex;\n        _valueInstantiator = delegate.getValueInstantiator();\n        _xmlTextProperty = delegate.findProperty(textPropIndex);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+            "class_doc": " Delegating deserializer that is used in the special cases where we may sometimes see a \"plain\" String value but need to map it as if it was a property of POJO. The impedance is introduced by heuristic conversion from XML events into rough JSON equivalents; and this is one work-around that can only be done after the fact. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes some properties related to XML text deserialization, but it does not directly handle the actual deserialization process. Given the failure in the `testMixedContent` method, which involves mixed content, it is plausible that issues in the deserialization logic could stem from how the `XmlTextDeserializer` interacts with other parts of the deserialization pipeline. However, without further context or evidence linking this specific method directly to the failure, it cannot be conclusively determined as the primary issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 0,
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)",
+            "method_code": "```java\n    public FromXmlParser(IOContext ctxt, int genericParserFeatures, int xmlFeatures,\n            ObjectCodec codec, XMLStreamReader xmlReader)\n    {\n        super(genericParserFeatures);\n        _formatFeatures = xmlFeatures;\n        _ioContext = ctxt;\n        _objectCodec = codec;\n        _parsingContext = XmlReadContext.createRootContext(-1, -1);\n        // and thereby start a scope\n        _nextToken = JsonToken.START_OBJECT;\n        _xmlTokens = new XmlTokenStream(xmlReader, ctxt.getSourceReference());\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The provided stack trace indicates an issue with the deserialization process rather than the constructor of the parser. The error occurs when trying to access the `value` field of the `WindSpeed` object, suggesting that the deserialization logic within the `XmlDeserializer` for the `WindSpeed` class is flawed.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 2,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+            "method_code": "```java\n    public final XmlReadContext createChildObjectContext(int lineNr, int colNr)\n    {\n        XmlReadContext ctxt = _child;\n        if (ctxt == null) {\n            _child = ctxt = new XmlReadContext(this, TYPE_OBJECT, lineNr, colNr);\n            return ctxt;\n        }\n        ctxt.reset(TYPE_OBJECT, lineNr, colNr);\n        return ctxt;\n    }\n\n```",
+            "method_doc": "This method creates or resets a child object context for XML reading. If a child context already exists, it is reset; otherwise, a new one is created.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the creation or resetting of child contexts, which could indirectly affect how mixed content is processed. However, it does not directly handle the parsing or interpretation of text nodes, so it is less likely to be the primary issue causing the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 0,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)",
+            "method_code": "```java\n    public XmlMapper(JacksonXmlModule module) {\n        this(new XmlFactory(), module);\n    }\n\n```",
+            "method_doc": "This constructor initializes an `XmlMapper` instance using the provided `JacksonXmlModule`. It internally calls the parameterized constructor `XmlMapper(XmlFactory, JacksonXmlModule)` with a new `XmlFactory()` instance.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+            "class_doc": " Customized {@link ObjectMapper} that will read and write XML instead of JSON, using XML-backed {@link com.fasterxml.jackson.core.JsonFactory} implementation ({@link XmlFactory}). <p> Mapper itself overrides some aspects of functionality to try to handle data binding aspects as similar to JAXB as possible. <p> Note that most of configuration should be done by pre-constructing {@link JacksonXmlModule} explicitly, instead of relying on default settings. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the `XmlMapper` with a new `XmlFactory`, which could potentially lead to issues if the factory's configuration is not properly set up. However, since the issue seems to be related to mixed content handling, it's less likely that the problem lies in the factory initialization rather than in how the factory processes the XML content.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::_constructIntrospector()",
+            "method_code": "```java\n    protected AnnotationIntrospector _constructIntrospector() {\n        return new JacksonXmlAnnotationIntrospector(_cfgDefaultUseWrapper);\n    }\n\n```",
+            "method_doc": "  Internal methods  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule",
+            "class_doc": " Module that implements most functionality needed to support producing and consuming XML instead of JSON. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it constructs an `AnnotationIntrospector`, which could potentially affect how annotations are processed during deserialization. However, the issue described seems to be related to mixed content handling rather than annotation processing.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+            "method_code": "```java\n    public static XmlReadContext createRootContext(int lineNr, int colNr) {\n        return new XmlReadContext(null, TYPE_ROOT, lineNr, colNr);\n    }\n\n```",
+            "method_doc": "Factory methods",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the incorrect handling of mixed content in the deserializer, specifically with the `WindSpeed` class. The `createRootContext` method does not directly interact with the deserialization process of mixed content, so it is unlikely to be the source of the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public final String getCurrentName() { return _currentName; }\n\n```",
+            "method_doc": "  Abstract method implementation  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of mixed content in the deserializer, rather than the current name retrieval.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)",
+            "method_code": "```java\n    public XmlMapper(XmlFactory xmlFactory, JacksonXmlModule module)\n    {\n        /* Need to override serializer provider (due to root name handling);\n         * deserializer provider fine as is\n         */\n        super(xmlFactory, new XmlSerializerProvider(new XmlRootNameLookup()), null);\n        _xmlModule = module;\n        // but all the rest is done via Module interface!\n        if (module != null) {\n            registerModule(module);\n        }\n        // 19-May-2015, tatu: Must ensure we use XML-specific indenter\n        _serializationConfig = _serializationConfig.withDefaultPrettyPrinter(DEFAULT_XML_PRETTY_PRINTER);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+            "class_doc": " Customized {@link ObjectMapper} that will read and write XML instead of JSON, using XML-backed {@link com.fasterxml.jackson.core.JsonFactory} implementation ({@link XmlFactory}). <p> Mapper itself overrides some aspects of functionality to try to handle data binding aspects as similar to JAXB as possible. <p> Note that most of configuration should be done by pre-constructing {@link JacksonXmlModule} explicitly, instead of relying on default settings. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the deserialization process rather than the constructor of the `XmlMapper`. The `XmlMapper` constructor initializes the mapper with specific configurations and modules, which does not directly affect the deserialization of mixed content.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setDefaultUseWrapper(boolean)",
+            "method_code": "```java\n    public void setDefaultUseWrapper(boolean state) {\n        _cfgDefaultUseWrapper = state;\n    }\n\n```",
+            "method_doc": " Method that can be used to define whether {@link AnnotationIntrospector} we register will use wrapper for indexed (List, array) properties or not, if there are no explicit annotations. See {@link com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper} for details. <p> Note that method MUST be called before registering the module; otherwise change will not have any effect.  @param state Whether to enable or disable \"use wrapper for non-annotated List properties\"  @since 2.1 ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule",
+            "class_doc": " Module that implements most functionality needed to support producing and consuming XML instead of JSON. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of mixed content in the XML deserialization process, rather than the configuration of whether to use wrappers for indexed properties.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<?> modifyDeserializer(DeserializationConfig config,\n            BeanDescription beanDesc, JsonDeserializer<?> deser0)\n    {\n        if (!(deser0 instanceof BeanDeserializerBase)) {\n            return deser0;\n        }\n        /* 17-Aug-2013, tatu: One important special case first: if we have one \"XML Text\"\n         * property, it may be exposed as VALUE_STRING token (depending on whether any attribute\n         * values are exposed): and to deserialize from that, we need special handling unless POJO\n         * has appropriate single-string creator method.\n         */\n        BeanDeserializerBase deser = (BeanDeserializerBase) deser0;\n\n        // Heuristics are bit tricky; but for now let's assume that if POJO\n        // can already work with VALUE_STRING, it's ok and doesn't need extra support\n        if (!deser.getValueInstantiator().canCreateFromString()) {\n            SettableBeanProperty textProp = _findSoleTextProp(config, deser.properties());\n            if (textProp != null) {\n                return new XmlTextDeserializer(deser, textProp);\n            }\n        }\n        return new WrapperHandlingDeserializer(deser);\n    }\n\n```",
+            "method_doc": "This method modifies the deserializer for a given bean description. If the deserializer is an instance of `BeanDeserializerBase`, it checks for a sole text property and replaces the deserializer with an `XmlTextDeserializer` or a `WrapperHandlingDeserializer`.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+            "class_doc": " The main reason for a modifier is to support handling of 'wrapped' Collection types. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Missing Setter Method for `value` Field\n**Description:** The `WindSpeed` class might be missing a setter method for the `value` field, preventing the deserializer from populating this field.\n\n**Location:** In the `WindSpeed` class definition.\n\n**Observation Support:** The fact that the `value` field remains `0` after deserialization indicates that the setter method is not being called, which is necessary for the field to be updated.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly interacts with the deserialization process and could potentially influence how properties are set during deserialization.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)",
+            "method_code": "```java\n    private SettableBeanProperty _findSoleTextProp(DeserializationConfig config,\n            Iterator<SettableBeanProperty> propIt)\n    {\n        final AnnotationIntrospector ai = config.getAnnotationIntrospector();\n        SettableBeanProperty textProp = null;\n        while (propIt.hasNext()) {\n            SettableBeanProperty prop = propIt.next();\n            AnnotatedMember m = prop.getMember();\n            if (m != null) {\n                // Ok, let's use a simple check: we should have renamed it earlier so:\n                PropertyName n = prop.getFullName();\n                if (_cfgNameForTextValue.equals(n.getSimpleName())) {\n                    // should we verify we only got one?\n                    textProp = prop;\n                    continue;\n                }\n                // as-attribute are ok as well\n                Boolean b = AnnotationUtil.findIsAttributeAnnotation(ai, m);\n                if (b != null && b.booleanValue()) {\n                    continue;\n                }\n            }\n            // Otherwise, it's something else; no go\n            return null;\n        }\n        return textProp;\n    }\n\n```",
+            "method_doc": "This method iterates over the iterator of settable bean properties to find a property named `_cfgNameForTextValue`. If found, it returns the property; otherwise, it returns null.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+            "class_doc": " The main reason for a modifier is to support handling of 'wrapped' Collection types. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it is responsible for finding the sole text property during deserialization. Given that the test failure involves mixed content and the `radius` field not being correctly mapped, there is a high likelihood that the issue lies in how this method identifies and processes text properties.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 7,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::updateProperties(DeserializationConfig,BeanDescription,List)",
+            "method_code": "```java\n    @Override\n    public List<BeanPropertyDefinition> updateProperties(DeserializationConfig config,\n            BeanDescription beanDesc, List<BeanPropertyDefinition> propDefs)\n    {\n        final AnnotationIntrospector intr = config.getAnnotationIntrospector();\n        int changed = 0;\n        \n        for (int i = 0, propCount = propDefs.size(); i < propCount; ++i) {\n            BeanPropertyDefinition prop = propDefs.get(i);\n            AnnotatedMember acc = prop.getPrimaryMember();\n            // should not be null, but just in case:\n            if (acc == null) {\n                continue;\n            }\n            /* First: handle \"as text\"? Such properties\n             * are exposed as values of 'unnamed' fields; so one way to\n             * map them is to rename property to have name \"\"... (and\n             * hope this does not break other parts...)\n             */\n            Boolean b = AnnotationUtil.findIsTextAnnotation(intr, acc);\n            if (b != null && b.booleanValue()) {\n                // unwrapped properties will appear as 'unnamed' (empty String)\n                BeanPropertyDefinition newProp = prop.withSimpleName(_cfgNameForTextValue);\n                if (newProp != prop) {\n                    propDefs.set(i, newProp);\n                }\n                continue;\n            }\n            // second: do we need to handle wrapping (for Lists)?\n            PropertyName wrapperName = prop.getWrapperName();\n            \n            if (wrapperName != null && wrapperName != PropertyName.NO_NAME) {\n                String localName = wrapperName.getSimpleName();\n                if ((localName != null && localName.length() > 0)\n                        && !localName.equals(prop.getName())) {\n                    // make copy-on-write as necessary\n                    if (changed == 0) {\n                        propDefs = new ArrayList<BeanPropertyDefinition>(propDefs);\n                    }\n                    ++changed;\n                    propDefs.set(i, prop.withSimpleName(localName));\n                    continue;\n                }\n                // otherwise unwrapped; needs handling but later on\n            }\n        }\n        return propDefs;\n    }\n\n```",
+            "method_doc": "This method iterates over the list of bean property definitions, checks for properties marked as \"as text\", and updates their names accordingly. It also handles wrapping for collection types. If a property is wrapped, it renames the property to match the wrapper name.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+            "class_doc": " The main reason for a modifier is to support handling of 'wrapped' Collection types. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly involves modifying the properties of the bean during deserialization. The issue described in the test failure could be related to how nested elements are handled, which is something this method deals with. Specifically, the method checks for properties marked as 'as text' and updates their names accordingly. It also handles wrapping for collection types. Given that the test failure involves a nested `<radius>` element, it's plausible that the method is incorrectly updating the properties, leading to the failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findNameForDeserialization(Annotated)",
+            "method_code": "```java\n    @Override\n    public PropertyName findNameForDeserialization(Annotated a)\n    {\n        PropertyName name = _findXmlName(a);\n        if (name == null) {\n            name = super.findNameForDeserialization(a);\n            if (name == null) {\n                if (a.hasAnnotation(JacksonXmlText.class)) {\n                    return PropertyName.USE_DEFAULT;\n                }\n            }\n        }\n        return name;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector",
+            "class_doc": " Extension of {@link JacksonAnnotationIntrospector} that is needed to support additional xml-specific annotation that Jackson provides. Note, however, that there is no JAXB annotation support here; that is provided with separate introspector (see {@link com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector}). ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it handles the deserialization of XML elements and could potentially misinterpret the nested content if not configured correctly.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                0,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::_verifyDeserType(JsonDeserializer)",
+            "method_code": "```java\n    protected BeanDeserializerBase _verifyDeserType(JsonDeserializer<?> deser)\n    {\n        if (!(deser instanceof BeanDeserializerBase)) {\n            throw new IllegalArgumentException(\"Can not change delegate to be of type \"\n                    +deser.getClass().getName());\n        }\n        return (BeanDeserializerBase) deser;\n    }\n\n```",
+            "method_doc": "  Internal methods  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+            "class_doc": " Delegating deserializer that is used in the special cases where we may sometimes see a \"plain\" String value but need to map it as if it was a property of POJO. The impedance is introduced by heuristic conversion from XML events into rough JSON equivalents; and this is one work-around that can only be done after the fact. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Issue with XML Parsing Library\n**Description:** There might be a bug in the XML parsing library being used by Jackson, causing it to handle mixed content incorrectly.\n\n**Location:** Within the Jackson XML parsing library.\n\n**Observation Support:** The widespread nature of the issue across different tests and the fact that it involves mixed content suggest that the problem lies in the library itself rather than in the specific test cases or application code.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it primarily deals with verifying the type of the deserializer and does not directly involve the handling of mixed content. The issue described seems to be related to how mixed content is parsed and handled within the XML parsing library, which is outside the scope of this method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findWrapperName(Annotated)",
+            "method_code": "```java\n    @Override\n    public PropertyName findWrapperName(Annotated ann)\n    {\n        JacksonXmlElementWrapper w = ann.getAnnotation(JacksonXmlElementWrapper.class);\n        if (w != null) {\n            // Special case: wrapping explicitly blocked?\n            if (!w.useWrapping()) {\n                return PropertyName.NO_NAME;\n            }\n            // also: need to ensure we use marker:\n            String localName = w.localName();\n            if (localName == null || localName.length() == 0) {\n                return PropertyName.USE_DEFAULT;\n            }\n            return PropertyName.construct(w.localName(), w.namespace());\n        }\n        /* 09-Sep-2012, tatu: In absence of configurating we need to use our\n         *   default settings...\n         */\n        if (_cfgDefaultUseWrapper) {\n            return PropertyName.USE_DEFAULT;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "  Overrides of JacksonAnnotationIntrospector impls  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector",
+            "class_doc": " Extension of {@link JacksonAnnotationIntrospector} that is needed to support additional xml-specific annotation that Jackson provides. Note, however, that there is no JAXB annotation support here; that is provided with separate introspector (see {@link com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector}). ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the logic for finding wrapper names, which could potentially affect how nested elements are processed during XML deserialization. However, the issue described seems more related to the mapping configuration or the `WindSpeed` class annotations rather than the logic within this method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::_findXmlName(Annotated)",
+            "method_code": "```java\n    protected PropertyName _findXmlName(Annotated a)\n    {\n        JacksonXmlProperty pann = a.getAnnotation(JacksonXmlProperty.class);\n        if (pann != null) {\n            return PropertyName.construct(pann.localName(), pann.namespace());\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "  Internal methods  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector",
+            "class_doc": " Extension of {@link JacksonAnnotationIntrospector} that is needed to support additional xml-specific annotation that Jackson provides. Note, however, that there is no JAXB annotation support here; that is provided with separate introspector (see {@link com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector}). ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it only handles the `JacksonXmlProperty` annotation and does not consider other potential XML-related annotations that might affect the mapping of nested elements.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::XmlBeanDeserializerModifier(String)",
+            "method_code": "```java\n    public XmlBeanDeserializerModifier(String nameForTextValue)\n    {\n        _cfgNameForTextValue = nameForTextValue;\n    }\n\n```",
+            "method_doc": "This constructor initializes the `_cfgNameForTextValue` field with the provided string value.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+            "class_doc": " The main reason for a modifier is to support handling of 'wrapped' Collection types. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Incorrect Configuration of ObjectMapper\n**Description:** The `ObjectMapper` might be configured incorrectly, leading to issues in how XML content is deserialized.\n\n**Location:** In the configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The assertion failure indicates that the deserialization process is not functioning as expected, which could be due to improper configuration settings such as disabling certain features or enabling others that interfere with the deserialization process.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The error in the test suggests an issue with the deserialization process rather than the initialization of the `_cfgNameForTextValue` field.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::createContextual(DeserializationContext,BeanProperty)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<?> createContextual(DeserializationContext ctxt,\n            BeanProperty property)\n        throws JsonMappingException\n    {\n        return new XmlTextDeserializer(_verifyDeserType(_delegatee), _xmlTextPropertyIndex);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+            "class_doc": " Delegating deserializer that is used in the special cases where we may sometimes see a \"plain\" String value but need to map it as if it was a property of POJO. The impedance is introduced by heuristic conversion from XML events into rough JSON equivalents; and this is one work-around that can only be done after the fact. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Missing Setter Method for `value` Field\n**Description:** The `WindSpeed` class might be missing a setter method for the `value` field, preventing the deserializer from populating this field.\n\n**Location:** In the `WindSpeed` class definition.\n\n**Observation Support:** The fact that the `value` field remains `0` after deserialization indicates that the setter method is not being called, which is necessary for the field to be updated.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the `WindSpeed` class missing a setter method for the `value` field, not the behavior of the `XmlTextDeserializer::createContextual` method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public String getCurrentName() throws IOException\n    {\n        // start markers require information from parent\n        String name;\n        if (_currToken == JsonToken.START_OBJECT || _currToken == JsonToken.START_ARRAY) {\n            XmlReadContext parent = _parsingContext.getParent();\n            name = parent.getCurrentName();\n        } else {\n            name = _parsingContext.getCurrentName();\n        }\n        // sanity check\n        if (name == null) {\n            throw new IllegalStateException(\"Missing name, in state: \"+_currToken);\n        }\n        return name;\n    }\n\n```",
+            "method_doc": " Method that can be called to get the name associated with the current event. ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "test_failure_causes": "Missing Setter Method for `value` Field\n**Description:** The `WindSpeed` class might be missing a setter method for the `value` field, preventing the deserializer from populating this field.\n\n**Location:** In the `WindSpeed` class definition.\n\n**Observation Support:** The fact that the `value` field remains `0` after deserialization indicates that the setter method is not being called, which is necessary for the field to be updated.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the deserialization process, specifically the handling of mixed content in XML. The `getCurrentName()` method is responsible for retrieving the name of the current token, which is part of the parsing logic. It does not directly interact with the fields of the `WindSpeed` class or their setters. Therefore, fixing this method alone would not resolve the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+            "method_code": "```java\n    @Override\n    public Object deserialize(JsonParser jp, DeserializationContext ctxt)\n        throws IOException, JsonProcessingException\n    {\n        if (jp.getCurrentToken() == JsonToken.VALUE_STRING) {\n            Object bean = _valueInstantiator.createUsingDefault(ctxt);\n            _xmlTextProperty.deserializeAndSet(jp, ctxt, bean);\n            return bean;\n        }\n        return _delegatee.deserialize(jp,  ctxt);\n    }\n\n```",
+            "method_doc": "  Overridden deserialization methods  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n            switch (t) {\n            case START_OBJECT:\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                break;\n            case START_ARRAY:\n                _parsingContext = _parsingContext.createChildArrayContext(-1, -1);\n                break;\n            case END_OBJECT:\n            case END_ARRAY:\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                break;\n            case FIELD_NAME:\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                break;\n            default: // VALUE_STRING, VALUE_NULL\n                // should be fine as is?\n            }\n            return t;\n        }\n        int token = _xmlTokens.next();\n\n        // Need to have a loop just because we may have to eat/convert\n        // a start-element that indicates an array element.\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            // If we thought we might get leaf, no such luck\n            if (_mayBeLeaf) {\n                // leave _mayBeLeaf set, as we start a new context\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                return (_currToken = JsonToken.START_OBJECT);\n            }\n            if (_parsingContext.inArray()) {\n                // Yup: in array, so this element could be verified; but it won't be\n                // reported anyway, and we need to process following event.\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n\n            // Ok: virtual wrapping can be done by simply repeating current START_ELEMENT.\n            // Couple of ways to do it; but start by making _xmlTokens replay the thing...\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n\n            _mayBeLeaf = true;\n            // Ok: in array context we need to skip reporting field names.\n            // But what's the best way to find next token?\n            return (_currToken = JsonToken.FIELD_NAME);\n        }\n\n        // Ok; beyond start element, what do we get?\n        while (true) {\n            switch (token) {\n            case XmlTokenStream.XML_END_ELEMENT:\n                // Simple, except that if this is a leaf, need to suppress end:\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    if (_parsingContext.inArray()) {\n                        // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                        //    expose as empty Object, not null\n                        _nextToken = JsonToken.END_OBJECT;\n                        _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                        return (_currToken = JsonToken.START_OBJECT);\n                    }\n                    return (_currToken = JsonToken.VALUE_NULL);\n                }\n                _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                return _currToken;\n                \n            case XmlTokenStream.XML_ATTRIBUTE_NAME:\n                // If there was a chance of leaf node, no more...\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    _nextToken = JsonToken.FIELD_NAME;\n                    _currText = _xmlTokens.getText();\n                    _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                    return (_currToken = JsonToken.START_OBJECT);\n                }\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n                _currText = _xmlTokens.getText();\n                return (_currToken = JsonToken.VALUE_STRING);\n            case XmlTokenStream.XML_TEXT:\n                _currText = _xmlTokens.getText();\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    // One more refinement (pronunced like \"hack\") is that if\n                    // we had an empty String (or all white space), and we are\n                    // deserializing an array, we better hide the empty text.\n                    // Also: must skip following END_ELEMENT\n                    _xmlTokens.skipEndElement();\n                    if (_parsingContext.inArray()) {\n                        if (_isEmpty(_currText)) {\n                            // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                            //    expose as empty Object, not null (or, worse, as used to\n                            //    be done, by swallowing the token)\n                            _nextToken = JsonToken.END_OBJECT;\n                            _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                            return (_currToken = JsonToken.START_OBJECT);\n                        }\n                    }\n                    return (_currToken = JsonToken.VALUE_STRING);\n                } else {\n                    // [dataformat-xml#177]: empty text may also need to be skipped\n                    // but... [dataformat-xml#191]: looks like we can't short-cut, must\n                    // loop over again\n                    if (_parsingContext.inObject()) {\n                        if ((_currToken != JsonToken.FIELD_NAME) && _isEmpty(_currText)) {\n                            token = _xmlTokens.next();\n                            continue;\n                        }\n                    }\n                }\n                // If not a leaf (or otherwise ignorable), need to transform into property...\n                _parsingContext.setCurrentName(_cfgNameForTextElement);\n                _nextToken = JsonToken.VALUE_STRING;\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_END:\n                return (_currToken = null);\n            }\n        }\n    }\n\n```",
+            "method_doc": " @Override public JsonToken nextToken() throws IOException { JsonToken t = nextToken0(); if (t != null) { switch (t) { case FIELD_NAME: System.out.println(\"JsonToken: FIELD_NAME '\"+_parsingContext.getCurrentName()+\"'\"); break; case VALUE_STRING: System.out.println(\"JsonToken: VALUE_STRING '\"+getText()+\"'\"); break; default: System.out.println(\"JsonToken: \"+t); } } return t; }  public JsonToken nextToken0() throws IOException "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+            "method_code": "```java\n    @Override\n    public String getText() throws IOException\n    {\n        if (_currToken == null) {\n            return null;\n        }\n        switch (_currToken) {\n        case FIELD_NAME:\n            return getCurrentName();\n        case VALUE_STRING:\n            return _currText;\n        default:\n            return _currToken.asString();\n        }\n    }\n\n```",
+            "method_doc": "  Public API, access to token information, text  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setupModule(SetupContext)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setupModule(SetupContext)",
+            "method_code": "```java\n    @Override\n    public void setupModule(SetupContext context)\n    {\n        // Need to modify BeanDeserializer, BeanSerializer that are used\n        context.addBeanSerializerModifier(new XmlBeanSerializerModifier());\n        context.addBeanDeserializerModifier(new XmlBeanDeserializerModifier(_cfgNameForTextElement));\n\n        // as well as AnnotationIntrospector\n        context.insertAnnotationIntrospector(_constructIntrospector());\n\n        // and finally inform XmlFactory about overrides, if need be:\n        if (_cfgNameForTextElement != FromXmlParser.DEFAULT_UNNAMED_TEXT_PROPERTY) {\n            XmlMapper m = (XmlMapper) context.getOwner();\n            m.setXMLTextElementName(_cfgNameForTextElement);\n        }\n\n        /* Usually this would be the first call; but here anything added will\n         * be stuff user may has added, so do it afterwards instead.\n         */\n        super.setupModule(context);\n    }    \n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)",
+            "method_code": "```java\n    public XmlTextDeserializer(BeanDeserializerBase delegate, SettableBeanProperty prop)\n    {\n        super(delegate);\n        _xmlTextProperty = prop;\n        _xmlTextPropertyIndex = prop.getPropertyIndex();\n        _valueInstantiator = delegate.getValueInstantiator();\n    }\n\n```",
+            "method_doc": "  Construction  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)",
+            "method_code": "```java\n    public XmlTextDeserializer(BeanDeserializerBase delegate, int textPropIndex)\n    {\n        super(delegate);\n        _xmlTextPropertyIndex = textPropIndex;\n        _valueInstantiator = delegate.getValueInstantiator();\n        _xmlTextProperty = delegate.findProperty(textPropIndex);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)",
+            "method_code": "```java\n    public FromXmlParser(IOContext ctxt, int genericParserFeatures, int xmlFeatures,\n            ObjectCodec codec, XMLStreamReader xmlReader)\n    {\n        super(genericParserFeatures);\n        _formatFeatures = xmlFeatures;\n        _ioContext = ctxt;\n        _objectCodec = codec;\n        _parsingContext = XmlReadContext.createRootContext(-1, -1);\n        // and thereby start a scope\n        _nextToken = JsonToken.START_OBJECT;\n        _xmlTokens = new XmlTokenStream(xmlReader, ctxt.getSourceReference());\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+            "method_code": "```java\n    public final XmlReadContext createChildObjectContext(int lineNr, int colNr)\n    {\n        XmlReadContext ctxt = _child;\n        if (ctxt == null) {\n            _child = ctxt = new XmlReadContext(this, TYPE_OBJECT, lineNr, colNr);\n            return ctxt;\n        }\n        ctxt.reset(TYPE_OBJECT, lineNr, colNr);\n        return ctxt;\n    }\n\n```",
+            "method_doc": "This method creates or resets a child object context for XML reading. If a child context already exists, it is reset; otherwise, a new one is created."
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)",
+            "method_code": "```java\n    public XmlMapper(JacksonXmlModule module) {\n        this(new XmlFactory(), module);\n    }\n\n```",
+            "method_doc": "This constructor initializes an `XmlMapper` instance using the provided `JacksonXmlModule`. It internally calls the parameterized constructor `XmlMapper(XmlFactory, JacksonXmlModule)` with a new `XmlFactory()` instance."
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::_constructIntrospector()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::_constructIntrospector()",
+            "method_code": "```java\n    protected AnnotationIntrospector _constructIntrospector() {\n        return new JacksonXmlAnnotationIntrospector(_cfgDefaultUseWrapper);\n    }\n\n```",
+            "method_doc": "  Internal methods  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+            "method_code": "```java\n    public static XmlReadContext createRootContext(int lineNr, int colNr) {\n        return new XmlReadContext(null, TYPE_ROOT, lineNr, colNr);\n    }\n\n```",
+            "method_doc": "Factory methods"
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public final String getCurrentName() { return _currentName; }\n\n```",
+            "method_doc": "  Abstract method implementation  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)",
+            "method_code": "```java\n    public XmlMapper(XmlFactory xmlFactory, JacksonXmlModule module)\n    {\n        /* Need to override serializer provider (due to root name handling);\n         * deserializer provider fine as is\n         */\n        super(xmlFactory, new XmlSerializerProvider(new XmlRootNameLookup()), null);\n        _xmlModule = module;\n        // but all the rest is done via Module interface!\n        if (module != null) {\n            registerModule(module);\n        }\n        // 19-May-2015, tatu: Must ensure we use XML-specific indenter\n        _serializationConfig = _serializationConfig.withDefaultPrettyPrinter(DEFAULT_XML_PRETTY_PRINTER);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setDefaultUseWrapper(boolean)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setDefaultUseWrapper(boolean)",
+            "method_code": "```java\n    public void setDefaultUseWrapper(boolean state) {\n        _cfgDefaultUseWrapper = state;\n    }\n\n```",
+            "method_doc": " Method that can be used to define whether {@link AnnotationIntrospector} we register will use wrapper for indexed (List, array) properties or not, if there are no explicit annotations. See {@link com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper} for details. <p> Note that method MUST be called before registering the module; otherwise change will not have any effect.  @param state Whether to enable or disable \"use wrapper for non-annotated List properties\"  @since 2.1 "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<?> modifyDeserializer(DeserializationConfig config,\n            BeanDescription beanDesc, JsonDeserializer<?> deser0)\n    {\n        if (!(deser0 instanceof BeanDeserializerBase)) {\n            return deser0;\n        }\n        /* 17-Aug-2013, tatu: One important special case first: if we have one \"XML Text\"\n         * property, it may be exposed as VALUE_STRING token (depending on whether any attribute\n         * values are exposed): and to deserialize from that, we need special handling unless POJO\n         * has appropriate single-string creator method.\n         */\n        BeanDeserializerBase deser = (BeanDeserializerBase) deser0;\n\n        // Heuristics are bit tricky; but for now let's assume that if POJO\n        // can already work with VALUE_STRING, it's ok and doesn't need extra support\n        if (!deser.getValueInstantiator().canCreateFromString()) {\n            SettableBeanProperty textProp = _findSoleTextProp(config, deser.properties());\n            if (textProp != null) {\n                return new XmlTextDeserializer(deser, textProp);\n            }\n        }\n        return new WrapperHandlingDeserializer(deser);\n    }\n\n```",
+            "method_doc": "This method modifies the deserializer for a given bean description. If the deserializer is an instance of `BeanDeserializerBase`, it checks for a sole text property and replaces the deserializer with an `XmlTextDeserializer` or a `WrapperHandlingDeserializer`."
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)",
+            "method_code": "```java\n    private SettableBeanProperty _findSoleTextProp(DeserializationConfig config,\n            Iterator<SettableBeanProperty> propIt)\n    {\n        final AnnotationIntrospector ai = config.getAnnotationIntrospector();\n        SettableBeanProperty textProp = null;\n        while (propIt.hasNext()) {\n            SettableBeanProperty prop = propIt.next();\n            AnnotatedMember m = prop.getMember();\n            if (m != null) {\n                // Ok, let's use a simple check: we should have renamed it earlier so:\n                PropertyName n = prop.getFullName();\n                if (_cfgNameForTextValue.equals(n.getSimpleName())) {\n                    // should we verify we only got one?\n                    textProp = prop;\n                    continue;\n                }\n                // as-attribute are ok as well\n                Boolean b = AnnotationUtil.findIsAttributeAnnotation(ai, m);\n                if (b != null && b.booleanValue()) {\n                    continue;\n                }\n            }\n            // Otherwise, it's something else; no go\n            return null;\n        }\n        return textProp;\n    }\n\n```",
+            "method_doc": "This method iterates over the iterator of settable bean properties to find a property named `_cfgNameForTextValue`. If found, it returns the property; otherwise, it returns null."
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::updateProperties(DeserializationConfig,BeanDescription,List)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::updateProperties(DeserializationConfig,BeanDescription,List)",
+            "method_code": "```java\n    @Override\n    public List<BeanPropertyDefinition> updateProperties(DeserializationConfig config,\n            BeanDescription beanDesc, List<BeanPropertyDefinition> propDefs)\n    {\n        final AnnotationIntrospector intr = config.getAnnotationIntrospector();\n        int changed = 0;\n        \n        for (int i = 0, propCount = propDefs.size(); i < propCount; ++i) {\n            BeanPropertyDefinition prop = propDefs.get(i);\n            AnnotatedMember acc = prop.getPrimaryMember();\n            // should not be null, but just in case:\n            if (acc == null) {\n                continue;\n            }\n            /* First: handle \"as text\"? Such properties\n             * are exposed as values of 'unnamed' fields; so one way to\n             * map them is to rename property to have name \"\"... (and\n             * hope this does not break other parts...)\n             */\n            Boolean b = AnnotationUtil.findIsTextAnnotation(intr, acc);\n            if (b != null && b.booleanValue()) {\n                // unwrapped properties will appear as 'unnamed' (empty String)\n                BeanPropertyDefinition newProp = prop.withSimpleName(_cfgNameForTextValue);\n                if (newProp != prop) {\n                    propDefs.set(i, newProp);\n                }\n                continue;\n            }\n            // second: do we need to handle wrapping (for Lists)?\n            PropertyName wrapperName = prop.getWrapperName();\n            \n            if (wrapperName != null && wrapperName != PropertyName.NO_NAME) {\n                String localName = wrapperName.getSimpleName();\n                if ((localName != null && localName.length() > 0)\n                        && !localName.equals(prop.getName())) {\n                    // make copy-on-write as necessary\n                    if (changed == 0) {\n                        propDefs = new ArrayList<BeanPropertyDefinition>(propDefs);\n                    }\n                    ++changed;\n                    propDefs.set(i, prop.withSimpleName(localName));\n                    continue;\n                }\n                // otherwise unwrapped; needs handling but later on\n            }\n        }\n        return propDefs;\n    }\n\n```",
+            "method_doc": "This method iterates over the list of bean property definitions, checks for properties marked as \"as text\", and updates their names accordingly. It also handles wrapping for collection types. If a property is wrapped, it renames the property to match the wrapper name."
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findNameForDeserialization(Annotated)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findNameForDeserialization(Annotated)",
+            "method_code": "```java\n    @Override\n    public PropertyName findNameForDeserialization(Annotated a)\n    {\n        PropertyName name = _findXmlName(a);\n        if (name == null) {\n            name = super.findNameForDeserialization(a);\n            if (name == null) {\n                if (a.hasAnnotation(JacksonXmlText.class)) {\n                    return PropertyName.USE_DEFAULT;\n                }\n            }\n        }\n        return name;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::_verifyDeserType(JsonDeserializer)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::_verifyDeserType(JsonDeserializer)",
+            "method_code": "```java\n    protected BeanDeserializerBase _verifyDeserType(JsonDeserializer<?> deser)\n    {\n        if (!(deser instanceof BeanDeserializerBase)) {\n            throw new IllegalArgumentException(\"Can not change delegate to be of type \"\n                    +deser.getClass().getName());\n        }\n        return (BeanDeserializerBase) deser;\n    }\n\n```",
+            "method_doc": "  Internal methods  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findWrapperName(Annotated)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findWrapperName(Annotated)",
+            "method_code": "```java\n    @Override\n    public PropertyName findWrapperName(Annotated ann)\n    {\n        JacksonXmlElementWrapper w = ann.getAnnotation(JacksonXmlElementWrapper.class);\n        if (w != null) {\n            // Special case: wrapping explicitly blocked?\n            if (!w.useWrapping()) {\n                return PropertyName.NO_NAME;\n            }\n            // also: need to ensure we use marker:\n            String localName = w.localName();\n            if (localName == null || localName.length() == 0) {\n                return PropertyName.USE_DEFAULT;\n            }\n            return PropertyName.construct(w.localName(), w.namespace());\n        }\n        /* 09-Sep-2012, tatu: In absence of configurating we need to use our\n         *   default settings...\n         */\n        if (_cfgDefaultUseWrapper) {\n            return PropertyName.USE_DEFAULT;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "  Overrides of JacksonAnnotationIntrospector impls  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::_findXmlName(Annotated)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::_findXmlName(Annotated)",
+            "method_code": "```java\n    protected PropertyName _findXmlName(Annotated a)\n    {\n        JacksonXmlProperty pann = a.getAnnotation(JacksonXmlProperty.class);\n        if (pann != null) {\n            return PropertyName.construct(pann.localName(), pann.namespace());\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "  Internal methods  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::XmlBeanDeserializerModifier(String)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::XmlBeanDeserializerModifier(String)",
+            "method_code": "```java\n    public XmlBeanDeserializerModifier(String nameForTextValue)\n    {\n        _cfgNameForTextValue = nameForTextValue;\n    }\n\n```",
+            "method_doc": "This constructor initializes the `_cfgNameForTextValue` field with the provided string value."
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::createContextual(DeserializationContext,BeanProperty)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::createContextual(DeserializationContext,BeanProperty)",
+            "method_code": "```java\n    @Override\n    public JsonDeserializer<?> createContextual(DeserializationContext ctxt,\n            BeanProperty property)\n        throws JsonMappingException\n    {\n        return new XmlTextDeserializer(_verifyDeserType(_delegatee), _xmlTextPropertyIndex);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public String getCurrentName() throws IOException\n    {\n        // start markers require information from parent\n        String name;\n        if (_currToken == JsonToken.START_OBJECT || _currToken == JsonToken.START_ARRAY) {\n            XmlReadContext parent = _parsingContext.getParent();\n            name = parent.getCurrentName();\n        } else {\n            name = _parsingContext.getCurrentName();\n        }\n        // sanity check\n        if (name == null) {\n            throw new IllegalStateException(\"Missing name, in state: \"+_currToken);\n        }\n        return name;\n    }\n\n```",
+            "method_doc": " Method that can be called to get the name associated with the current event. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.misc.XmlTextTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Mixed Content in Deserializer\n**Description:** The deserializer might be incorrectly handling mixed content, leading to the `value` field not being populated with the expected value from the text node.\n\n**Location:** Likely in the `XmlDeserializer` implementation for the `WindSpeed` class or the underlying Jackson library's XML deserialization logic.\n\n**Observation Support:** The assertion failure `expected:<27> but was:<0>` strongly suggests that the `value` field is not being set correctly during deserialization. This implies that the deserializer is either ignoring the text node or misinterpreting its contents.",
+                "Missing Setter Method for `value` Field\n**Description:** The `WindSpeed` class might be missing a setter method for the `value` field, preventing the deserializer from populating this field.\n\n**Location:** In the `WindSpeed` class definition.\n\n**Observation Support:** The fact that the `value` field remains `0` after deserialization indicates that the setter method is not being called, which is necessary for the field to be updated.",
+                "Incorrect Mapping of Nested Elements\n**Description:** The mapping configuration for the nested `<radius>` element might be incorrect, causing the deserializer to ignore or misinterpret the nested content.\n\n**Location:** In the `ObjectMapper` configuration or the `WindSpeed` class annotations.\n\n**Observation Support:** The presence of the `radius` field in the `WindSpeed` object suggests that the nested element is being processed, but the failure in setting its value indicates a misconfiguration in how the nested elements are mapped.",
+                "Issue with XML Parsing Library\n**Description:** There might be a bug in the XML parsing library being used by Jackson, causing it to handle mixed content incorrectly.\n\n**Location:** Within the Jackson XML parsing library.\n\n**Observation Support:** The widespread nature of the issue across different tests and the fact that it involves mixed content suggest that the problem lies in the library itself rather than in the specific test cases or application code.",
+                "Incorrect Configuration of ObjectMapper\n**Description:** The `ObjectMapper` might be configured incorrectly, leading to issues in how XML content is deserialized.\n\n**Location:** In the configuration of the `ObjectMapper` instance used in the test.\n\n**Observation Support:** The assertion failure indicates that the deserialization process is not functioning as expected, which could be due to improper configuration settings such as disabling certain features or enabling others that interfere with the deserialization process."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    7.0
+                ],
+                "3": [
+                    8,
+                    7.666666666666667
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    7.666666666666667
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+                    "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier",
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.util.XmlRootNameLookup"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer",
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper",
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule": [
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setupModule(SetupContext)",
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::setDefaultUseWrapper(boolean)",
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlModule::_constructIntrospector()"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::createContextual(DeserializationContext,BeanProperty)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::XmlBeanDeserializerModifier(String)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector": [
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findWrapperName(Annotated)",
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::findNameForDeserialization(Annotated)",
+                        "com.fasterxml.jackson.dataformat.xml.JacksonXmlAnnotationIntrospector::_findXmlName(Annotated)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::updateProperties(DeserializationConfig,BeanDescription,List)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::_verifyDeserType(JsonDeserializer)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.util.XmlRootNameLookup": []
+                },
+                "5": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::deserialize(JsonParser,DeserializationContext)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::_verifyDeserType(JsonDeserializer)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTextDeserializer::XmlTextDeserializer(BeanDeserializerBase,SettableBeanProperty)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlMapper": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(JacksonXmlModule)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlMapper::XmlMapper(XmlFactory,JacksonXmlModule)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getText()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::FromXmlParser(IOContext,int,int,ObjectCodec,XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createChildObjectContext(int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::modifyDeserializer(DeserializationConfig,BeanDescription,JsonDeserializer)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::_findSoleTextProp(DeserializationConfig,Iterator)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlBeanDeserializerModifier::XmlBeanDeserializerModifier(String)"
+                    ]
+                }
+            }
+        }
+    ]
+}

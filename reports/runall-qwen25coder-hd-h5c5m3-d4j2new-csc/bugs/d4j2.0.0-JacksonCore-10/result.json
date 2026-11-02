@@ -1,0 +1,1515 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+        "com.fasterxml.jackson.core.JsonFactory",
+        "com.fasterxml.jackson.core.util.InternCache"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+            "method_code": "```java\n    public String addName(String name, int[] q, int qlen)\n    {\n        _verifySharing();\n        if (_intern) {\n            name = InternCache.instance.intern(name);\n        }\n        int offset;\n        \n        switch (qlen) {\n        case 1:\n        {\n                offset = _findOffsetForAdd(calcHash(q[0]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+3] = 1;\n            }\n            break;\n        case 2:\n            {\n                offset = _findOffsetForAdd(calcHash(q[0], q[1]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+1] = q[1];\n                _hashArea[offset+3] = 2;\n            }\n            break;\n        case 3:\n            {\n                offset = _findOffsetForAdd(calcHash(q[0], q[1], q[2]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+1] = q[1];\n                _hashArea[offset+2] = q[2];\n                _hashArea[offset+3] = 3;\n            }\n            break;\n        default:\n            final int hash = calcHash(q, qlen);\n            offset = _findOffsetForAdd(hash);\n\n            _hashArea[offset] = hash;\n            int longStart = _appendLongName(q, qlen);\n            _hashArea[offset+1] = longStart;\n            _hashArea[offset+3] = qlen;\n        }\n        // plus add the actual String\n        _names[offset >> 2] = name;\n\n        // and finally; see if we really should rehash.\n        ++_count;\n        _verifyNeedForRehash();\n        return name;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the logic for adding names to the canonicalizer, including the calculation of offsets and the storage of symbols. The ArrayIndexOutOfBoundsException suggests an issue with how indices are being managed within the `_hashArea` array, which is a critical part of this method's functionality.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+            "method_code": "```java\n    private void rehash()\n    {\n        _needRehash = false;\n        // Note: since we'll make copies, no need to unshare, can just mark as such:\n        _hashShared = false;\n\n        // And then we can first deal with the main hash area. Since we are expanding\n        // linearly (double up), we know there'll be no collisions during this phase.\n        final int[] oldHashArea = _hashArea;\n        final String[] oldNames = _names;\n        final int oldSize = _hashSize;\n        final int oldCount = _count;\n        final int newSize = oldSize + oldSize;\n        final int oldEnd = _spilloverEnd;\n\n        /* 13-Mar-2010, tatu: Let's guard against OOME that could be caused by\n         *    large documents with unique (or mostly so) names\n         */\n        if (newSize > MAX_T_SIZE) {\n            nukeSymbols(true);\n            return;\n        }\n        // double up main hash area, but do not expand long-name area:\n        _hashArea = new int[oldHashArea.length + (oldSize<<3)];\n        _hashSize = newSize;\n        _secondaryStart = (newSize << 2); // 4 ints per entry\n        _tertiaryStart = _secondaryStart + (_secondaryStart >> 1); // right after secondary\n        _tertiaryShift = _calcTertiaryShift(newSize);\n        \n        // and simply double up name array\n        _names = new String[oldNames.length << 1];\n        nukeSymbols(false);\n\n        // Plus we can scan only through the primary hash area, looking for non-empty\n        // slots, without worrying about ordering. This should never reduce priority\n        // of existing entries: primaries remain primaries; however, due to increased\n        // space, secondaries may become primaries etc\n\n        int copyCount = 0;\n        int[] q = new int[16];\n        for (int offset = 0, end = oldEnd; offset < end; offset += 4) {\n            int len = oldHashArea[offset+3];\n            if (len == 0) { // empty slot, skip\n                continue;\n            }\n            ++copyCount;\n            String name = oldNames[offset>>2];\n            switch (len) {\n            case 1:\n                q[0] = oldHashArea[offset];\n                addName(name, q, 1);\n                break;\n            case 2:\n                q[0] = oldHashArea[offset];\n                q[1] = oldHashArea[offset+1];\n                addName(name, q, 2);\n                break;\n            case 3:\n                q[0] = oldHashArea[offset];\n                q[1] = oldHashArea[offset+1];\n                q[2] = oldHashArea[offset+2];\n                addName(name, q, 3);\n                break;\n            default:\n                if (len > q.length) {\n                    q = new int[len];\n                }\n                // #0 is hash, #1 offset\n                int qoff = oldHashArea[offset+1];\n                System.arraycopy(oldHashArea, qoff, q, 0, len);\n                addName(name, q, len);\n                break;\n            }\n        }\n\n        // Sanity checks: since corruption difficult to detect, assert explicitly\n        // with production code\n        if (copyCount != oldCount) {\n            throw new IllegalStateException(\"Failed rehash(): old count=\"+oldCount+\", copyCount=\"+copyCount);\n        }\n    }\n\n```",
+            "method_doc": "  Rehashing  ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the rehashing process, which involves manipulating arrays and adding symbols. The ArrayIndexOutOfBoundsException suggests an issue with array access within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)",
+            "method_code": "```java\n    private void nukeSymbols(boolean fill) {\n        _count = 0;\n        // reset spill-over to empty (starting at 7/8 of hash area)\n        _spilloverEnd = _spilloverStart();\n        // and long name area to empty, starting immediately after hash area\n        _longNameOffset = _hashSize << 3;\n        if (fill) {\n            Arrays.fill(_hashArea, 0);\n            Arrays.fill(_names, null);\n        }\n    }\n\n```",
+            "method_doc": " Helper method called to empty all shared symbols, but to leave arrays allocated ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it resets the state of the canonicalizer, including clearing out any existing symbols. If the issue arises from the addition of too many symbols causing an overflow, resetting the state might resolve the problem. Additionally, the method's comment mentions filling the arrays, which could help prevent future overflows.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 5,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _numTypesValid = NR_UNKNOWN;\n        /* First: field names are special -- we will always tokenize\n         * (part of) value along with field name to simplify\n         * state handling. If so, can and need to use secondary token:\n         */\n        if (_currToken == JsonToken.FIELD_NAME) {\n            return _nextAfterName();\n        }\n        if (_tokenIncomplete) {\n            _skipString(); // only strings can be partial\n        }\n        int i = _skipWSOrEnd();\n        if (i < 0) { // end-of-input\n            // Close/release things like input source, symbol table and recyclable buffers\n            close();\n            return (_currToken = null);\n        }\n\n        // First, need to ensure we know the starting location of token\n        // after skipping leading white space\n        _tokenInputTotal = _currInputProcessed + _inputPtr - 1;\n        _tokenInputRow = _currInputRow;\n        _tokenInputCol = _inputPtr - _currInputRowStart - 1;\n\n        // finally: clear any data retained so far\n        _binaryValue = null;\n\n        // Closing scope?\n        if (i == INT_RBRACKET) {\n            if (!_parsingContext.inArray()) {\n                _reportMismatchedEndMarker(i, '}');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_ARRAY);\n        }\n        if (i == INT_RCURLY) {\n            if (!_parsingContext.inObject()) {\n                _reportMismatchedEndMarker(i, ']');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_OBJECT);\n        }\n\n        // Nope: do we then expect a comma?\n        if (_parsingContext.expectComma()) {\n            if (i != INT_COMMA) {\n                _reportUnexpectedChar(i, \"was expecting comma to separate \"+_parsingContext.getTypeDesc()+\" entries\");\n            }\n            i = _skipWS();\n        }\n\n        /* And should we now have a name? Always true for\n         * Object contexts, since the intermediate 'expect-value'\n         * state is never retained.\n         */\n        if (!_parsingContext.inObject()) {\n            return _nextTokenNotInObject(i);\n        }\n        // So first parse the field name itself:\n        String n = _parseName(i);\n        _parsingContext.setCurrentName(n);\n        _currToken = JsonToken.FIELD_NAME;\n\n        i = _skipColon();\n\n        // Ok: we must have a value... what is it? Strings are very common, check first:\n        if (i == INT_QUOTE) {\n            _tokenIncomplete = true;\n            _nextToken = JsonToken.VALUE_STRING;\n            return _currToken;\n        }        \n        JsonToken t;\n\n        switch (i) {\n        case '-':\n            t = _parseNegNumber();\n            break;\n\n            /* Should we have separate handling for plus? Although\n             * it is not allowed per se, it may be erroneously used,\n             * and could be indicate by a more specific error message.\n             */\n        case '0':\n        case '1':\n        case '2':\n        case '3':\n        case '4':\n        case '5':\n        case '6':\n        case '7':\n        case '8':\n        case '9':\n            t = _parsePosNumber(i);\n            break;\n        case 'f':\n            _matchToken(\"false\", 1);\n             t = JsonToken.VALUE_FALSE;\n            break;\n        case 'n':\n            _matchToken(\"null\", 1);\n            t = JsonToken.VALUE_NULL;\n            break;\n        case 't':\n            _matchToken(\"true\", 1);\n            t = JsonToken.VALUE_TRUE;\n            break;\n        case '[':\n            t = JsonToken.START_ARRAY;\n            break;\n        case '{':\n            t = JsonToken.START_OBJECT;\n            break;\n\n        default:\n            t = _handleUnexpectedValue(i);\n        }\n        _nextToken = t;\n        return _currToken;\n    }\n\n```",
+            "method_doc": " @return Next token from the stream, if any found, or null to indicate end-of-input ",
+            "class_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.InputStream} as the input source. <p> Note: non-final since version 2.3. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for parsing JSON tokens and interacts closely with the `ByteQuadsCanonicalizer`. The error occurs when trying to add a name, which suggests that there might be an issue with how symbols are being handled during the parsing process.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+            "method_code": "```java\n    protected final String _parseName(int i) throws IOException\n    {\n        if (i != INT_QUOTE) {\n            return _handleOddName(i);\n        }\n        // First: can we optimize out bounds checks?\n        if ((_inputPtr + 13) > _inputEnd) { // Need up to 12 chars, plus one trailing (quote)\n            return slowParseName();\n        }\n\n        // If so, can also unroll loops nicely\n        /* 25-Nov-2008, tatu: This may seem weird, but here we do\n         *   NOT want to worry about UTF-8 decoding. Rather, we'll\n         *   assume that part is ok (if not it will get caught\n         *   later on), and just handle quotes and backslashes here.\n         */\n        final byte[] input = _inputBuffer;\n        final int[] codes = _icLatin1;\n\n        int q = input[_inputPtr++] & 0xFF;\n\n        if (codes[q] == 0) {\n            i = input[_inputPtr++] & 0xFF;\n            if (codes[i] == 0) {\n                q = (q << 8) | i;\n                i = input[_inputPtr++] & 0xFF;\n                if (codes[i] == 0) {\n                    q = (q << 8) | i;\n                    i = input[_inputPtr++] & 0xFF;\n                    if (codes[i] == 0) {\n                        q = (q << 8) | i;\n                        i = input[_inputPtr++] & 0xFF;\n                        if (codes[i] == 0) {\n                            _quad1 = q;\n                            return parseMediumName(i);\n                        }\n                        if (i == INT_QUOTE) { // 4 byte/char case or broken\n                            return findName(q, 4);\n                        }\n                        return parseName(q, i, 4);\n                    }\n                    if (i == INT_QUOTE) { // 3 byte/char case or broken\n                        return findName(q, 3);\n                    }\n                    return parseName(q, i, 3);\n                }                \n                if (i == INT_QUOTE) { // 2 byte/char case or broken\n                    return findName(q, 2);\n                }\n                return parseName(q, i, 2);\n            }\n            if (i == INT_QUOTE) { // one byte/char case or broken\n                return findName(q, 1);\n            }\n            return parseName(q, i, 1);\n        }     \n        if (q == INT_QUOTE) { // special case, \"\"\n            return \"\";\n        }\n        return parseName(0, q, 0); // quoting or invalid char\n    }\n\n```",
+            "method_doc": "  Internal methods, secondary parsing  ",
+            "class_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.InputStream} as the input source. <p> Note: non-final since version 2.3. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of JSON names, which involves manipulating symbols and their canonical forms. The ArrayIndexOutOfBoundsException suggests an issue with how symbols are being added or accessed within the method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)",
+            "method_code": "```java\n    private final String addName(int[] quads, int qlen, int lastQuadBytes) throws JsonParseException\n    {\n        /* Ok: must decode UTF-8 chars. No other validation is\n         * needed, since unescaping has been done earlier as necessary\n         * (as well as error reporting for unescaped control chars)\n         */\n        // 4 bytes per quad, except last one maybe less\n        int byteLen = (qlen << 2) - 4 + lastQuadBytes;\n\n        /* And last one is not correctly aligned (leading zero bytes instead\n         * need to shift a bit, instead of trailing). Only need to shift it\n         * for UTF-8 decoding; need revert for storage (since key will not\n         * be aligned, to optimize lookup speed)\n         */\n        int lastQuad;\n\n        if (lastQuadBytes < 4) {\n            lastQuad = quads[qlen-1];\n            // 8/16/24 bit left shift\n            quads[qlen-1] = (lastQuad << ((4 - lastQuadBytes) << 3));\n        } else {\n            lastQuad = 0;\n        }\n\n        // Need some working space, TextBuffer works well:\n        char[] cbuf = _textBuffer.emptyAndGetCurrentSegment();\n        int cix = 0;\n\n        for (int ix = 0; ix < byteLen; ) {\n            int ch = quads[ix >> 2]; // current quad, need to shift+mask\n            int byteIx = (ix & 3);\n            ch = (ch >> ((3 - byteIx) << 3)) & 0xFF;\n            ++ix;\n\n            if (ch > 127) { // multi-byte\n                int needed;\n                if ((ch & 0xE0) == 0xC0) { // 2 bytes (0x0080 - 0x07FF)\n                    ch &= 0x1F;\n                    needed = 1;\n                } else if ((ch & 0xF0) == 0xE0) { // 3 bytes (0x0800 - 0xFFFF)\n                    ch &= 0x0F;\n                    needed = 2;\n                } else if ((ch & 0xF8) == 0xF0) { // 4 bytes; double-char with surrogates and all...\n                    ch &= 0x07;\n                    needed = 3;\n                } else { // 5- and 6-byte chars not valid xml chars\n                    _reportInvalidInitial(ch);\n                    needed = ch = 1; // never really gets this far\n                }\n                if ((ix + needed) > byteLen) {\n                    _reportInvalidEOF(\" in field name\");\n                }\n                \n                // Ok, always need at least one more:\n                int ch2 = quads[ix >> 2]; // current quad, need to shift+mask\n                byteIx = (ix & 3);\n                ch2 = (ch2 >> ((3 - byteIx) << 3));\n                ++ix;\n                \n                if ((ch2 & 0xC0) != 0x080) {\n                    _reportInvalidOther(ch2);\n                }\n                ch = (ch << 6) | (ch2 & 0x3F);\n                if (needed > 1) {\n                    ch2 = quads[ix >> 2];\n                    byteIx = (ix & 3);\n                    ch2 = (ch2 >> ((3 - byteIx) << 3));\n                    ++ix;\n                    \n                    if ((ch2 & 0xC0) != 0x080) {\n                        _reportInvalidOther(ch2);\n                    }\n                    ch = (ch << 6) | (ch2 & 0x3F);\n                    if (needed > 2) { // 4 bytes? (need surrogates on output)\n                        ch2 = quads[ix >> 2];\n                        byteIx = (ix & 3);\n                        ch2 = (ch2 >> ((3 - byteIx) << 3));\n                        ++ix;\n                        if ((ch2 & 0xC0) != 0x080) {\n                            _reportInvalidOther(ch2 & 0xFF);\n                        }\n                        ch = (ch << 6) | (ch2 & 0x3F);\n                    }\n                }\n                if (needed > 2) { // surrogate pair? once again, let's output one here, one later on\n                    ch -= 0x10000; // to normalize it starting with 0x0\n                    if (cix >= cbuf.length) {\n                        cbuf = _textBuffer.expandCurrentSegment();\n                    }\n                    cbuf[cix++] = (char) (0xD800 + (ch >> 10));\n                    ch = 0xDC00 | (ch & 0x03FF);\n                }\n            }\n            if (cix >= cbuf.length) {\n                cbuf = _textBuffer.expandCurrentSegment();\n            }\n            cbuf[cix++] = (char) ch;\n        }\n\n        // Ok. Now we have the character array, and can construct the String\n        String baseName = new String(cbuf, 0, cix);\n        // And finally, un-align if necessary\n        if (lastQuadBytes < 4) {\n            quads[qlen-1] = lastQuad;\n        }\n        return _symbols.addName(baseName, quads, qlen);\n    }\n\n```",
+            "method_doc": " This is the main workhorse method used when we take a symbol table miss. It needs to demultiplex individual bytes, decode multi-byte chars (if any), and then construct Name instance and add it to the symbol table. ",
+            "class_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.InputStream} as the input source. <p> Note: non-final since version 2.3. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for adding names to the symbol table, which involves handling UTF-8 characters and can easily lead to out-of-bounds errors if not properly managed.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)",
+            "method_code": "```java\n    protected JsonParser _createParser(byte[] data, int offset, int len, IOContext ctxt) throws IOException\n    {\n        return new ByteSourceJsonBootstrapper(ctxt, data, offset, len).constructParser(_parserFeatures,\n                _objectCodec, _byteSymbolCanonicalizer, _rootCharSymbols, _factoryFeatures);\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates parser using given {@link Reader} object for reading content passed as raw byte array. <p> This method is specifically designed to remain compatible between minor versions so that sub-classes can count on it being called as expected. That is, it is part of official interface from sub-class perspective, although not a public method available to users of factory implementations. ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it involves creating parsers which interact with the symbol canonicalizer, and the failure occurs during parsing. The `ByteQuadsCanonicalizer` is involved in managing symbols, and issues related to symbol management often occur in methods that create or parse JSON.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.InternCache::intern(String)",
+            "method_code": "```java\n    public String intern(String input) {\n        String result = get(input);\n        if (result != null) { return result; }\n\n        /* 18-Sep-2013, tatu: We used to use LinkedHashMap, which has simple LRU\n         *   method. No such functionality exists with CHM; and let's use simplest\n         *   possible limitation: just clear all contents. This because otherwise\n         *   we are simply likely to keep on clearing same, commonly used entries.\n         */\n        if (size() >= MAX_ENTRIES) {\n            /* Not incorrect wrt well-known double-locking anti-pattern because underlying\n             * storage gives close enough answer to real one here; and we are\n             * more concerned with flooding than starvation.\n             */\n            synchronized (lock) {\n                if (size() >= MAX_ENTRIES) {\n                    clear();\n                }\n            }\n        }\n        result = input.intern();\n        put(result, result);\n        return result;\n    }\n\n```",
+            "method_doc": "This method checks if the input string is already interned using the `get` method from the superclass `LinkedHashMap`. If not found, it clears the cache if its size exceeds `MAX_ENTRIES`, then interns the string using `input.intern()` and stores it in the cache using the `put` method. This method does not call any other methods in the Covered Methods List.",
+            "class_name": "com.fasterxml.jackson.core.util.InternCache",
+            "class_doc": " Singleton class that adds a simple first-level cache in front of regular String.intern() functionality. This is done as a minor performance optimization, to avoid calling native intern() method in cases where same String is being interned multiple times. <p> Note: that this class extends {@link LinkedHashMap} is an implementation detail -- no code should ever directly call Map methods. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it involves the core functionality of string interning, which can lead to issues when not handled properly. The ArrayIndexOutOfBoundsException suggests that there might be a problem with how symbols are being added or managed within the InternCache, making this method a prime candidate for fixing.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()",
+            "method_code": "```java\n    public int bucketCount() { return _hashSize; }\n\n```",
+            "method_doc": " Returns number of primary slots table has currently ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly returns `_hashSize`, which seems to be the source of the discrepancy in the bucket count calculations across different tests.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 0,
+                "4": 0
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::primaryCount()",
+            "method_code": "```java\n    public int primaryCount()\n    {\n        int count = 0;\n        for (int offset = 3, end = _secondaryStart; offset < end; offset += 4) {\n            if (_hashArea[offset] != 0) {\n                ++count;\n            }\n        }\n        return count;\n    }\n\n```",
+            "method_doc": " Method mostly needed by unit tests; calculates number of entries that are in the primary slot set. These are \"perfect\" entries, accessible with a single lookup ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the calculation of the number of entries in the primary slot set, which is crucial for the correctness of the bucket count calculation. The failure in all three tests points to an issue with how the primary count is being calculated, leading to incorrect bucket counts.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::calcHash(int[],int)",
+            "method_code": "```java\n    public int calcHash(int[] q, int qlen)\n    {\n        if (qlen < 4) {\n            throw new IllegalArgumentException();\n        }\n        /* And then change handling again for \"multi-quad\" case; mostly\n         * to make calculation of collisions less fun. For example,\n         * add seed bit later in the game, and switch plus/xor around,\n         * use different shift lengths.\n         */\n        int hash = q[0] ^ _seed;\n        hash += (hash >>> 9);\n        hash += q[1];\n        hash += (hash >>> 15);\n        hash *= MULT;\n        hash ^= q[2];\n        hash += (hash >>> 4);\n\n        for (int i = 3; i < qlen; ++i) {\n            int next = q[i];\n            next = next ^ (next >> 21);\n            hash += next;\n        }\n        hash *= MULT2;\n        \n        // and finally shuffle some more once done\n        hash += (hash >>> 19);\n        hash ^= (hash << 5);\n        return hash;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the calculation of hashes, which is crucial for the correct functioning of the symbol table. The failure in the bucket count calculations across multiple tests strongly indicates an issue with the hash function itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::createParser(byte[])",
+            "method_code": "```java\n    public JsonParser createParser(byte[] data) throws IOException, JsonParseException {\n        IOContext ctxt = _createContext(data, true);\n        if (_inputDecorator != null) {\n            InputStream in = _inputDecorator.decorate(ctxt, data, 0, data.length);\n            if (in != null) {\n                return _createParser(in, ctxt);\n            }\n        }\n        return _createParser(data, 0, data.length, ctxt);\n    }\n\n```",
+            "method_doc": " Method for constructing parser for parsing the contents of given byte array.  @since 2.1 ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately likely to be the best location that needs to be fixed, because it involves creating parsers which might interact with the symbol canonicalization process. However, the specific issue seems to stem from the `ByteQuadsCanonicalizer` rather than the parser creation itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::isEnabled(Feature)",
+            "method_code": "```java\n    public final boolean isEnabled(JsonGenerator.Feature f) {\n        return (_generatorFeatures & f.getMask()) != 0;\n    }\n\n```",
+            "method_doc": " Check whether specified generator feature is enabled. ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error stack trace points to an issue within the `ByteQuadsCanonicalizer` class, specifically in the `addName` method. The `isEnabled` method in `JsonFactory` does not appear to be related to the array index out of bounds exception encountered during the test.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+            "method_code": "```java\n    public void setEncoding(JsonEncoding enc) {\n        _encoding = enc;\n    }\n\n```",
+            "method_doc": "This method sets the encoding for the IOContext object.",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. <p> NOTE: non-final since 2.4, to allow sub-classing. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the `ByteQuadsCanonicalizer` class, specifically in the `addName` method. The `setEncoding` method in `IOContext` does not interact with the symbol canonicalization process and is therefore unlikely to be the source of the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+            "method_code": "```java\n    public TextBuffer constructTextBuffer() {\n        return new TextBuffer(_bufferRecycler);\n    }\n\n```",
+            "method_doc": "  Public API, buffer management  ",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. <p> NOTE: non-final since 2.4, to allow sub-classing. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the `ByteQuadsCanonicalizer` class, specifically in the `addName` method. The `constructTextBuffer` method in `IOContext` does not seem to be directly involved in the symbol canonicalization process, which is where the problem appears to lie.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)",
+            "method_code": "```java\n    public IOContext(BufferRecycler br, Object sourceRef, boolean managedResource)\n    {\n        _bufferRecycler = br;\n        _sourceRef = sourceRef;\n        _managedResource = managedResource;\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.core.io.IOContext",
+            "class_doc": " To limit number of configuration and state objects to pass, all contextual objects that need to be passed by the factory to readers and writers are combined under this object. One instance is created for each reader and writer. <p> NOTE: non-final since 2.4, to allow sub-classing. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the `ByteQuadsCanonicalizer` class, specifically in the `addName` method. The `IOContext` constructor does not seem to be directly involved in the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults() {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) { flags |= f.getMask(); }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test cases seems to be related to the bucket count calculation in the `ByteQuadsCanonicalizer` class, rather than the default feature settings collected by `JsonFactory$Feature::collectDefaults()`. The method simply collects default feature flags and does not directly impact the symbol table's bucket count.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+            "method_code": "```java\n        public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "This method returns whether the feature is enabled by default. It returns the value of `_defaultState`.",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test cases is related to the bucket count calculation in the `ByteQuadsCanonicalizer` class, not the `enabledByDefault()` method in `JsonFactory$Feature`. The `enabledByDefault()` method simply returns the default state of a feature and does not involve any calculations or configurations that could affect the bucket count.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)",
+            "method_code": "```java\n        public boolean enabledIn(int flags) { return (flags & getMask()) != 0; }\n\n```",
+            "method_doc": "This method checks if the feature is enabled in the given flags. It uses the bitwise AND operator to check if the mask of the feature is present in the flags.",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test cases seems to be related to the bucket count calculation in the `ByteQuadsCanonicalizer` class, not directly in the `JsonFactory$Feature::enabledIn(int)` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::slowParseName()",
+            "method_code": "```java\n    protected String slowParseName() throws IOException\n    {\n        if (_inputPtr >= _inputEnd) {\n            if (!loadMore()) {\n                _reportInvalidEOF(\": was expecting closing '\\\"' for name\");\n            }\n        }\n        int i = _inputBuffer[_inputPtr++] & 0xFF;\n        if (i == INT_QUOTE) { // special case, \"\"\n            return \"\";\n        }\n        return parseEscapedName(_quadBuffer, 0, 0, i, 0);\n    }\n\n```",
+            "method_doc": " Method called when not even first 8 bytes are guaranteed to come consequtively. Happens rarely, so this is offlined; plus we'll also do full checks for escaping etc. ",
+            "class_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+            "class_doc": " This is a concrete implementation of {@link JsonParser}, which is based on a {@link java.io.InputStream} as the input source. <p> Note: non-final since version 2.3. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Thread Safety Violations\n**Description:** If the `ByteQuadsCanonicalizer` is not thread-safe, concurrent access to it could lead to unexpected behavior or errors. The test might be running in a multi-threaded environment, triggering a race condition or other concurrency issues.\n\n**Location:** Any part of the `ByteQuadsCanonicalizer` that is accessed concurrently.\n\n**Observation:** The error occurs during parsing, which could suggest that a concurrency issue is causing the problem.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the parsing of JSON names, which can easily trigger issues related to character encoding and boundary conditions. The ArrayIndexOutOfBoundsException suggests that there might be an off-by-one error or improper handling of buffer indices within this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+            "method_code": "```java\n    public BufferRecycler _getBufferRecycler()\n    {\n        BufferRecycler br;\n\n        /* 23-Apr-2015, tatu: Let's allow disabling of buffer recycling\n         *   scheme, for cases where it is considered harmful (possibly\n         *   on Android, for example)\n         */\n        if (isEnabled(Feature.USE_THREAD_LOCAL_FOR_BUFFER_RECYCLING)) {\n            SoftReference<BufferRecycler> ref = _recyclerRef.get();\n            br = (ref == null) ? null : ref.get();\n    \n            if (br == null) {\n                br = new BufferRecycler();\n                _recyclerRef.set(new SoftReference<BufferRecycler>(br));\n            }\n        } else {\n            br = new BufferRecycler();\n        }\n        return br;\n    }\n\n```",
+            "method_doc": " Method used by factory to create buffer recycler instances for parsers and generators. <p> Note: only public to give access for <code>ObjectMapper</code> ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Thread Safety Violations\n**Description:** If the `ByteQuadsCanonicalizer` is not thread-safe, concurrent access to it could lead to unexpected behavior or errors. The test might be running in a multi-threaded environment, triggering a race condition or other concurrency issues.\n\n**Location:** Any part of the `ByteQuadsCanonicalizer` that is accessed concurrently.\n\n**Observation:** The error occurs during parsing, which could suggest that a concurrency issue is causing the problem.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating buffer recyclers, which are crucial for efficient memory management in the Jackson library. The error observed in the test suggests an issue with buffer recycling, making this method a prime candidate for fixing the bug.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::initTables(int)",
+            "method_code": "```java\n    private void initTables(int initialSize)\n    {\n        _symbols = new String[initialSize];\n        _buckets = new Bucket[initialSize >> 1];\n        // Mask is easy to calc for powers of two.\n        _indexMask = initialSize - 1;\n        _size = 0;\n        _longestCollisionList = 0;\n        // Hard-coded fill factor is 75%\n        _sizeThreshold = _thresholdSize(initialSize);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer",
+            "class_doc": " This class is a kind of specialized type-safe Map, from char array to String value. Specialization means that in addition to type-safety and specific access patterns (key char array, Value optionally interned String; values added on access if necessary), and that instances are meant to be used concurrently, but by using well-defined mechanisms to obtain such concurrently usable instances. Main use for the class is to store symbol table information for things like compilers and parsers; especially when number of symbols (keywords) is limited. <p> For optimal performance, usage pattern should be one where matches should be very common (especially after \"warm-up\"), and as with most hash-based maps/sets, that hash codes are uniformly distributed. Also, collisions are slightly more expensive than with HashMap or HashSet, since hash codes are not used in resolving collisions; that is, equals() comparison is done with all symbols in same bucket index.<br> Finally, rehashing is also more expensive, as hash codes are not stored; rehashing requires all entries' hash codes to be recalculated. Reason for not storing hash codes is reduced memory usage, hoping for better memory locality. <p> Usual usage pattern is to create a single \"master\" instance, and either use that instance in sequential fashion, or to create derived \"child\" instances, which after use, are asked to return possible symbol additions to master instance. In either case benefit is that symbol table gets initialized so that further uses are more efficient, as eventually all symbols needed will already be in symbol table. At that point no more Symbol String allocations are needed, nor changes to symbol table itself. <p> Note that while individual SymbolTable instances are NOT thread-safe (much like generic collection classes), concurrently used \"child\" instances can be freely used without synchronization. However, using master table concurrently with child instances can only be done if access to master instance is read-only (i.e. no modifications done). ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Incorrect Handling of Large Number of Symbols\n**Description:** The test constructs a JSON object with 60 unique keys, which might be too many for the current implementation of the symbol canonicalization mechanism. If the system does not handle large numbers of unique symbols efficiently, it could lead to overflow or incorrect indexing.\n\n**Location:** Potentially in the `addName` method or related methods in `ByteQuadsCanonicalizer.java`.\n\n**Observation:** The error occurs when parsing the JSON, indicating that the system may not be able to manage the large number of unique keys effectively.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the tables that are used for symbol canonicalization. The ArrayIndexOutOfBoundsException suggests that there might be an issue with the size of these tables, leading to out-of-bounds accesses during the parsing process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::allocCharBuffer(int,int)",
+            "method_code": "```java\n    public char[] allocCharBuffer(int ix, int minSize) {\n        final int DEF_SIZE = charBufferLength(ix);\n        if (minSize < DEF_SIZE) {\n            minSize = DEF_SIZE;\n        }\n        char[] buffer = _charBuffers[ix];\n        if (buffer == null || buffer.length < minSize) {\n            buffer = calloc(minSize);\n        } else {\n            _charBuffers[ix] = null;\n        }\n        return buffer;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.util.BufferRecycler",
+            "class_doc": " This is a small utility class, whose main functionality is to allow simple reuse of raw byte/char buffers. It is usually used through <code>ThreadLocal</code> member of the owning class pointing to instance of this class through a <code>SoftReference</code>. The end result is a low-overhead GC-cleanable recycling: hopefully ideal for use by stream readers. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles buffer allocation, which can lead to memory management issues when dealing with large data structures like the one created in the failing test.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::initTableInfo(int)",
+            "method_code": "```java\n    private TableInfo initTableInfo(int sz) {\n        return new TableInfo(0, // count\n                sz - 1, // mainHashMask\n                new int[sz], // mainHash\n                new Name[sz], // mainNames\n                null, // collList\n                0, // collCount,\n                0, // collEnd\n                0 // longestCollisionList\n        );\n    }\n\n```",
+            "method_doc": " public TableInfo(int count, int mainHashMask, int[] mainHash, Name[] mainNames, Bucket[] collList, int collCount, int collEnd, int longestCollisionList) ",
+            "class_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer",
+            "class_doc": " A caching symbol table implementation used for canonicalizing JSON field names (as {@link Name}s which are constructed directly from a byte-based input source). Complications arise from trying to do efficient reuse and merging of symbol tables, to be able to make use of usually shared vocabulary of subsequent parsing runs.  @deprecated Since 2.6, replaced by {@link ByteQuadsCanonicalizer} ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the hash table structures used by the symbol canonicalizer. The ArrayIndexOutOfBoundsException suggests an issue with array bounds, which could be due to incorrect initialization or improper handling of the hash table size. Fixing the initialization logic in this method could resolve the memory management issues observed in the test.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static BytesToNameCanonicalizer createRoot(int seed) {\n        return new BytesToNameCanonicalizer(DEFAULT_T_SIZE, true, seed, true);\n    }\n\n```",
+            "method_doc": " Factory method that should only be called from unit tests, where seed value should remain the same. ",
+            "class_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer",
+            "class_doc": " A caching symbol table implementation used for canonicalizing JSON field names (as {@link Name}s which are constructed directly from a byte-based input source). Complications arise from trying to do efficient reuse and merging of symbol tables, to be able to make use of usually shared vocabulary of subsequent parsing runs.  @deprecated Since 2.6, replaced by {@link ByteQuadsCanonicalizer} ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the root of the symbol table with a specific seed value, which might be causing issues when handling large JSON objects with many unique keys. The error stack trace points to an ArrayIndexOutOfBoundsException occurring during parsing, suggesting that there might be a problem with how the symbol table is being managed or expanded.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifyNeedForRehash()",
+            "method_code": "```java\n    private void _verifyNeedForRehash() {\n        // Yes if above 80%, or above 50% AND have ~1% spill-overs\n        if (_count > (_hashSize >> 1)) { // over 50%\n            int spillCount = (_spilloverEnd - _spilloverStart()) >> 2;\n            if ((spillCount > (1 + _count >> 7))\n                    || (_count > (_hashSize * 0.80))) {\n                _needRehash = true;\n            }\n        }\n    }\n\n```",
+            "method_doc": "Verifies if rehashing is needed based on the current load factor.",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Memory Allocation Issues\n**Description:** There might be memory allocation issues causing the `ByteQuadsCanonicalizer` to allocate more buckets than intended. This could happen if there's a bug in the memory management logic.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, particularly in methods related to memory allocation and resizing.\n\n**Observation:** The tests involve adding a large number of unique strings. If there's a bug in memory allocation, it could lead to excessive bucket creation, causing the observed discrepancies.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the decision-making process for rehashing, which can significantly impact the performance and correctness of the symbol table operations. The failure in the test cases suggests that the current logic for verifying the need for rehashing might be incorrect or insufficient, leading to an imbalance in the distribution of symbols across buckets.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_appendLongName(int[],int)",
+            "method_code": "```java\n    private int _appendLongName(int[] quads, int qlen)\n    {\n        int start = _longNameOffset;\n        \n        // note: at this point we must already be shared. But may not have enough space\n        if ((start + qlen) > _hashArea.length) {\n            // try to increment in reasonable chunks; at least space that we need\n            int toAdd = (start + qlen) - _hashArea.length;\n            // but at least 1/8 of regular hash area size or 16kB (whichever smaller)\n            int minAdd = Math.min(4096, _hashSize);\n\n            int newSize = _hashArea.length + Math.max(toAdd, minAdd);\n            _hashArea = Arrays.copyOf(_hashArea, newSize);\n        }\n        System.arraycopy(quads, 0, _hashArea, start, qlen);\n        _longNameOffset += qlen;\n        return start;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Bug in the `addName` Method\n**Description:** There might be a bug in the `addName` method of the `ByteQuadsCanonicalizer` class, causing it to incorrectly update the bucket count or add duplicate entries.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, specifically in the `addName` method.\n\n**Observation:** The tests involve adding a large number of unique strings. If the `addName` method has a bug, it could lead to incorrect bucket counts or duplicate entries, causing the observed discrepancies.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the storage and management of long names in the symbol table. The failure in the test cases suggests an issue with how these names are being added or managed, leading to incorrect bucket counts or duplicate entries. By fixing bugs within this method, we can ensure that the symbol table operations are performed correctly, thus resolving the test failures.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot()",
+            "method_code": "```java\n    public static CharsToNameCanonicalizer createRoot() {\n        /* [Issue-21]: Need to use a variable seed, to thwart hash-collision\n         * based attacks.\n         */\n        long now = System.currentTimeMillis();\n        // ensure it's not 0; and might as well require to be odd so:\n        int seed = (((int) now) + ((int) (now >>> 32))) | 1;\n        return createRoot(seed);\n    }\n\n```",
+            "method_doc": " Method called to create root canonicalizer for a {@link com.fasterxml.jackson.core.JsonFactory} instance. Root instance is never used directly; its main use is for storing and sharing underlying symbol arrays as needed. ",
+            "class_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer",
+            "class_doc": " This class is a kind of specialized type-safe Map, from char array to String value. Specialization means that in addition to type-safety and specific access patterns (key char array, Value optionally interned String; values added on access if necessary), and that instances are meant to be used concurrently, but by using well-defined mechanisms to obtain such concurrently usable instances. Main use for the class is to store symbol table information for things like compilers and parsers; especially when number of symbols (keywords) is limited. <p> For optimal performance, usage pattern should be one where matches should be very common (especially after \"warm-up\"), and as with most hash-based maps/sets, that hash codes are uniformly distributed. Also, collisions are slightly more expensive than with HashMap or HashSet, since hash codes are not used in resolving collisions; that is, equals() comparison is done with all symbols in same bucket index.<br> Finally, rehashing is also more expensive, as hash codes are not stored; rehashing requires all entries' hash codes to be recalculated. Reason for not storing hash codes is reduced memory usage, hoping for better memory locality. <p> Usual usage pattern is to create a single \"master\" instance, and either use that instance in sequential fashion, or to create derived \"child\" instances, which after use, are asked to return possible symbol additions to master instance. In either case benefit is that symbol table gets initialized so that further uses are more efficient, as eventually all symbols needed will already be in symbol table. At that point no more Symbol String allocations are needed, nor changes to symbol table itself. <p> Note that while individual SymbolTable instances are NOT thread-safe (much like generic collection classes), concurrently used \"child\" instances can be freely used without synchronization. However, using master table concurrently with child instances can only be done if access to master instance is read-only (i.e. no modifications done). ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Incorrect Handling of Large Number of Symbols\n**Description:** The test constructs a JSON object with 60 unique keys, which might be too many for the current implementation of the symbol canonicalization mechanism. If the system does not handle large numbers of unique symbols efficiently, it could lead to overflow or incorrect indexing.\n\n**Location:** Potentially in the `addName` method or related methods in `ByteQuadsCanonicalizer.java`.\n\n**Observation:** The error occurs when parsing the JSON, indicating that the system may not be able to manage the large number of unique keys effectively.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the seed for creating the root canonicalizer, but it does not directly address the issue of handling a large number of symbols. The problem seems to lie in the `addName` method or related methods within `ByteQuadsCanonicalizer.java`, where the actual storage and management of symbols occur.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static CharsToNameCanonicalizer createRoot(int hashSeed) {\n        return sBootstrapSymbolTable.makeOrphan(hashSeed);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer",
+            "class_doc": " This class is a kind of specialized type-safe Map, from char array to String value. Specialization means that in addition to type-safety and specific access patterns (key char array, Value optionally interned String; values added on access if necessary), and that instances are meant to be used concurrently, but by using well-defined mechanisms to obtain such concurrently usable instances. Main use for the class is to store symbol table information for things like compilers and parsers; especially when number of symbols (keywords) is limited. <p> For optimal performance, usage pattern should be one where matches should be very common (especially after \"warm-up\"), and as with most hash-based maps/sets, that hash codes are uniformly distributed. Also, collisions are slightly more expensive than with HashMap or HashSet, since hash codes are not used in resolving collisions; that is, equals() comparison is done with all symbols in same bucket index.<br> Finally, rehashing is also more expensive, as hash codes are not stored; rehashing requires all entries' hash codes to be recalculated. Reason for not storing hash codes is reduced memory usage, hoping for better memory locality. <p> Usual usage pattern is to create a single \"master\" instance, and either use that instance in sequential fashion, or to create derived \"child\" instances, which after use, are asked to return possible symbol additions to master instance. In either case benefit is that symbol table gets initialized so that further uses are more efficient, as eventually all symbols needed will already be in symbol table. At that point no more Symbol String allocations are needed, nor changes to symbol table itself. <p> Note that while individual SymbolTable instances are NOT thread-safe (much like generic collection classes), concurrently used \"child\" instances can be freely used without synchronization. However, using master table concurrently with child instances can only be done if access to master instance is read-only (i.e. no modifications done). ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Incorrect Handling of Large Number of Symbols\n**Description:** The test constructs a JSON object with 60 unique keys, which might be too many for the current implementation of the symbol canonicalization mechanism. If the system does not handle large numbers of unique symbols efficiently, it could lead to overflow or incorrect indexing.\n\n**Location:** Potentially in the `addName` method or related methods in `ByteQuadsCanonicalizer.java`.\n\n**Observation:** The error occurs when parsing the JSON, indicating that the system may not be able to manage the large number of unique keys effectively.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it creates a root symbol table, but it does not directly handle the logic for adding names or managing the size of the symbol table. Given the error message about an ArrayIndexOutOfBoundsException, it's plausible that the issue lies elsewhere in the symbol table management rather than in creating the root table.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::calloc(int)",
+            "method_code": "```java\n    protected char[] calloc(int size) { return new char[size]; }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.util.BufferRecycler",
+            "class_doc": " This is a small utility class, whose main functionality is to allow simple reuse of raw byte/char buffers. It is usually used through <code>ThreadLocal</code> member of the owning class pointing to instance of this class through a <code>SoftReference</code>. The end result is a low-overhead GC-cleanable recycling: hopefully ideal for use by stream readers. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly allocates memory using 'new', which can lead to memory management issues if not handled properly. However, since the issue seems to be related to memory allocation within the context of JSON parsing, it's plausible that fixing the memory allocation logic in this method could resolve the problem.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot()",
+            "method_code": "```java\n    public static BytesToNameCanonicalizer createRoot() {\n        /* [Issue-21]: Need to use a variable seed, to thwart hash-collision\n         * based attacks.\n         */\n        long now = System.currentTimeMillis();\n        // ensure it's not 0; and might as well require to be odd so:\n        int seed = (((int) now) + ((int) (now >>> 32))) | 1;\n        return createRoot(seed);\n    }\n\n```",
+            "method_doc": " Factory method to call to create a symbol table instance with a randomized seed value. ",
+            "class_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer",
+            "class_doc": " A caching symbol table implementation used for canonicalizing JSON field names (as {@link Name}s which are constructed directly from a byte-based input source). Complications arise from trying to do efficient reuse and merging of symbol tables, to be able to make use of usually shared vocabulary of subsequent parsing runs.  @deprecated Since 2.6, replaced by {@link ByteQuadsCanonicalizer} ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the seed for the symbol table creation using the current time, which might not be sufficient to avoid collisions. However, it is unlikely to be the direct cause of the ArrayIndexOutOfBoundsException since the error occurs later during parsing.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static ByteQuadsCanonicalizer createRoot(int seed) {\n        return new ByteQuadsCanonicalizer(DEFAULT_T_SIZE, true, seed, true);\n    }\n\n```",
+            "method_doc": " Factory method that should only be called from unit tests, where seed value should remain the same. ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Inconsistent Hashing Logic\n**Description:** There might be inconsistencies in the hashing logic used to calculate the hash codes for strings. This could lead to incorrect bucket assignments, resulting in unexpected bucket counts.\n\n**Location:** Potentially in the `calcQuads` method or any other method involved in string hashing.\n\n**Observation:** The tests involve adding strings with varying lengths and representations. If the hashing logic is inconsistent, it could result in incorrect bucket counts across different tests.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the ByteQuadsCanonicalizer with default values, which might not be suitable for all test cases. The inconsistency in bucket counts observed in the failing tests suggests that there could be an issue with how the canonicalizer handles collisions or memory allocation.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::makeChild(int)",
+            "method_code": "```java\n    public ByteQuadsCanonicalizer makeChild(int flags) {\n        return new ByteQuadsCanonicalizer(this,\n                JsonFactory.Feature.INTERN_FIELD_NAMES.enabledIn(flags),\n                _seed,\n                JsonFactory.Feature.FAIL_ON_SYMBOL_HASH_OVERFLOW.enabledIn(flags),\n                _tableInfo.get());\n    }\n\n```",
+            "method_doc": " Factory method used to create actual symbol table instance to use for parsing. ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Inconsistent Hashing Logic\n**Description:** There might be inconsistencies in the hashing logic used to calculate the hash codes for strings. This could lead to incorrect bucket assignments, resulting in unexpected bucket counts.\n\n**Location:** Potentially in the `calcQuads` method or any other method involved in string hashing.\n\n**Observation:** The tests involve adding strings with varying lengths and representations. If the hashing logic is inconsistent, it could result in incorrect bucket counts across different tests.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it creates a new instance of ByteQuadsCanonicalizer, but does not directly interact with the hashing logic or bucket counts. However, since it is a factory method that initializes the symbol table, there's a possibility that issues in its implementation can affect the behavior of the symbol table, including bucket counts.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::size()",
+            "method_code": "```java\n    public int size()\n    {\n        if (_tableInfo != null) { // root table\n            return _tableInfo.get().count;\n        }\n        // nope, child table\n        return _count;\n    }\n\n```",
+            "method_doc": "  API, accessors  ",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Inconsistent Hashing Logic\n**Description:** There might be inconsistencies in the hashing logic used to calculate the hash codes for strings. This could lead to incorrect bucket assignments, resulting in unexpected bucket counts.\n\n**Location:** Potentially in the `calcQuads` method or any other method involved in string hashing.\n\n**Observation:** The tests involve adding strings with varying lengths and representations. If the hashing logic is inconsistent, it could result in incorrect bucket counts across different tests.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it returns the count of symbols, but the failure messages indicate issues with bucket counts rather than the total number of symbols.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifySharing()",
+            "method_code": "```java\n    private void _verifySharing()\n    {\n        if (_hashShared) {\n            _hashArea = Arrays.copyOf(_hashArea, _hashArea.length);\n            _names = Arrays.copyOf(_names, _names.length);\n            _hashShared = false;\n        }\n        if (_needRehash) {\n            rehash();\n        }\n    }\n\n```",
+            "method_doc": "Verifies if the symbol table needs to be shared or rehashed. Calls `_verifyNeedForRehash` and `rehash`.",
+            "class_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+            "class_doc": " Replacement for <code>BytesToNameCanonicalizer</code> which aims at more localized memory access due to flattening of name quad data. Performance improvement modest for simple JSON document data binding (maybe 3%), but should help more for larger symbol tables, or for binary formats like Smile.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "test_failure_causes": "Memory Allocation Issues\n**Description:** There might be memory allocation issues causing the `ByteQuadsCanonicalizer` to allocate more buckets than intended. This could happen if there's a bug in the memory management logic.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, particularly in methods related to memory allocation and resizing.\n\n**Observation:** The tests involve adding a large number of unique strings. If there's a bug in memory allocation, it could lead to excessive bucket creation, causing the observed discrepancies.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves operations that could affect the state of the symbol table, such as copying arrays and rehashing. However, without further context, it's unclear if these operations directly contribute to the memory allocation issues observed in the test failures.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createContext(Object,boolean)",
+            "method_code": "```java\n    protected IOContext _createContext(Object srcRef, boolean resourceManaged) {\n        return new IOContext(_getBufferRecycler(), srcRef, resourceManaged);\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates desired context object. ",
+            "class_name": "com.fasterxml.jackson.core.JsonFactory",
+            "class_doc": " The main factory class of Jackson package, used to configure and construct reader (aka parser, {@link JsonParser}) and writer (aka generator, {@link JsonGenerator}) instances. <p> Factory instances are thread-safe and reusable after configuration (if any). Typically applications and services use only a single globally shared factory instance, unless they need differently configured factories. Factory reuse is important if efficiency matters; most recycling of expensive construct is done on per-factory basis. <p> Creation of a factory instance is a light-weight operation, and since there is no need for pluggable alternative implementations (as there is no \"standard\" JSON processor API to implement), the default constructor is used for constructing factory instances.  ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Reflection Injection Issue\n**Description:** Using reflection to inject a custom `ByteQuadsCanonicalizer` into the `JsonFactory` might interfere with the normal operation of the factory. This could lead to unexpected behavior or errors during parsing.\n\n**Location:** The injection point in the test code, particularly the lines involving reflection.\n\n**Observation:** The error occurs after the injection, suggesting that the custom canonicalizer might not be functioning correctly or is interfering with the default behavior.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the custom `ByteQuadsCanonicalizer` being injected via reflection, rather than an inherent problem with the `_createContext` method itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::charBufferLength(int)",
+            "method_code": "```java\n    protected int charBufferLength(int ix) {\n        return CHAR_BUFFER_LENGTHS[ix];\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.util.BufferRecycler",
+            "class_doc": " This is a small utility class, whose main functionality is to allow simple reuse of raw byte/char buffers. It is usually used through <code>ThreadLocal</code> member of the owning class pointing to instance of this class through a <code>SoftReference</code>. The end result is a low-overhead GC-cleanable recycling: hopefully ideal for use by stream readers. ",
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "test_failure_causes": "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error stack trace indicates that the issue is occurring in the `addName` method of `ByteQuadsCanonicalizer`, specifically when trying to access an array index. The `charBufferLength` method simply returns a value from a predefined array based on the input index, and there is no indication that this method itself is causing the `ArrayIndexOutOfBoundsException`. Therefore, fixing this method alone is unlikely to resolve the test failure.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+            "method_code": "```java\n    public String addName(String name, int[] q, int qlen)\n    {\n        _verifySharing();\n        if (_intern) {\n            name = InternCache.instance.intern(name);\n        }\n        int offset;\n        \n        switch (qlen) {\n        case 1:\n        {\n                offset = _findOffsetForAdd(calcHash(q[0]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+3] = 1;\n            }\n            break;\n        case 2:\n            {\n                offset = _findOffsetForAdd(calcHash(q[0], q[1]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+1] = q[1];\n                _hashArea[offset+3] = 2;\n            }\n            break;\n        case 3:\n            {\n                offset = _findOffsetForAdd(calcHash(q[0], q[1], q[2]));\n                _hashArea[offset] = q[0];\n                _hashArea[offset+1] = q[1];\n                _hashArea[offset+2] = q[2];\n                _hashArea[offset+3] = 3;\n            }\n            break;\n        default:\n            final int hash = calcHash(q, qlen);\n            offset = _findOffsetForAdd(hash);\n\n            _hashArea[offset] = hash;\n            int longStart = _appendLongName(q, qlen);\n            _hashArea[offset+1] = longStart;\n            _hashArea[offset+3] = qlen;\n        }\n        // plus add the actual String\n        _names[offset >> 2] = name;\n\n        // and finally; see if we really should rehash.\n        ++_count;\n        _verifyNeedForRehash();\n        return name;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+            "method_code": "```java\n    private void rehash()\n    {\n        _needRehash = false;\n        // Note: since we'll make copies, no need to unshare, can just mark as such:\n        _hashShared = false;\n\n        // And then we can first deal with the main hash area. Since we are expanding\n        // linearly (double up), we know there'll be no collisions during this phase.\n        final int[] oldHashArea = _hashArea;\n        final String[] oldNames = _names;\n        final int oldSize = _hashSize;\n        final int oldCount = _count;\n        final int newSize = oldSize + oldSize;\n        final int oldEnd = _spilloverEnd;\n\n        /* 13-Mar-2010, tatu: Let's guard against OOME that could be caused by\n         *    large documents with unique (or mostly so) names\n         */\n        if (newSize > MAX_T_SIZE) {\n            nukeSymbols(true);\n            return;\n        }\n        // double up main hash area, but do not expand long-name area:\n        _hashArea = new int[oldHashArea.length + (oldSize<<3)];\n        _hashSize = newSize;\n        _secondaryStart = (newSize << 2); // 4 ints per entry\n        _tertiaryStart = _secondaryStart + (_secondaryStart >> 1); // right after secondary\n        _tertiaryShift = _calcTertiaryShift(newSize);\n        \n        // and simply double up name array\n        _names = new String[oldNames.length << 1];\n        nukeSymbols(false);\n\n        // Plus we can scan only through the primary hash area, looking for non-empty\n        // slots, without worrying about ordering. This should never reduce priority\n        // of existing entries: primaries remain primaries; however, due to increased\n        // space, secondaries may become primaries etc\n\n        int copyCount = 0;\n        int[] q = new int[16];\n        for (int offset = 0, end = oldEnd; offset < end; offset += 4) {\n            int len = oldHashArea[offset+3];\n            if (len == 0) { // empty slot, skip\n                continue;\n            }\n            ++copyCount;\n            String name = oldNames[offset>>2];\n            switch (len) {\n            case 1:\n                q[0] = oldHashArea[offset];\n                addName(name, q, 1);\n                break;\n            case 2:\n                q[0] = oldHashArea[offset];\n                q[1] = oldHashArea[offset+1];\n                addName(name, q, 2);\n                break;\n            case 3:\n                q[0] = oldHashArea[offset];\n                q[1] = oldHashArea[offset+1];\n                q[2] = oldHashArea[offset+2];\n                addName(name, q, 3);\n                break;\n            default:\n                if (len > q.length) {\n                    q = new int[len];\n                }\n                // #0 is hash, #1 offset\n                int qoff = oldHashArea[offset+1];\n                System.arraycopy(oldHashArea, qoff, q, 0, len);\n                addName(name, q, len);\n                break;\n            }\n        }\n\n        // Sanity checks: since corruption difficult to detect, assert explicitly\n        // with production code\n        if (copyCount != oldCount) {\n            throw new IllegalStateException(\"Failed rehash(): old count=\"+oldCount+\", copyCount=\"+copyCount);\n        }\n    }\n\n```",
+            "method_doc": "  Rehashing  "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)",
+            "method_code": "```java\n    private void nukeSymbols(boolean fill) {\n        _count = 0;\n        // reset spill-over to empty (starting at 7/8 of hash area)\n        _spilloverEnd = _spilloverStart();\n        // and long name area to empty, starting immediately after hash area\n        _longNameOffset = _hashSize << 3;\n        if (fill) {\n            Arrays.fill(_hashArea, 0);\n            Arrays.fill(_names, null);\n        }\n    }\n\n```",
+            "method_doc": " Helper method called to empty all shared symbols, but to leave arrays allocated "
+        },
+        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()": {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _numTypesValid = NR_UNKNOWN;\n        /* First: field names are special -- we will always tokenize\n         * (part of) value along with field name to simplify\n         * state handling. If so, can and need to use secondary token:\n         */\n        if (_currToken == JsonToken.FIELD_NAME) {\n            return _nextAfterName();\n        }\n        if (_tokenIncomplete) {\n            _skipString(); // only strings can be partial\n        }\n        int i = _skipWSOrEnd();\n        if (i < 0) { // end-of-input\n            // Close/release things like input source, symbol table and recyclable buffers\n            close();\n            return (_currToken = null);\n        }\n\n        // First, need to ensure we know the starting location of token\n        // after skipping leading white space\n        _tokenInputTotal = _currInputProcessed + _inputPtr - 1;\n        _tokenInputRow = _currInputRow;\n        _tokenInputCol = _inputPtr - _currInputRowStart - 1;\n\n        // finally: clear any data retained so far\n        _binaryValue = null;\n\n        // Closing scope?\n        if (i == INT_RBRACKET) {\n            if (!_parsingContext.inArray()) {\n                _reportMismatchedEndMarker(i, '}');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_ARRAY);\n        }\n        if (i == INT_RCURLY) {\n            if (!_parsingContext.inObject()) {\n                _reportMismatchedEndMarker(i, ']');\n            }\n            _parsingContext = _parsingContext.getParent();\n            return (_currToken = JsonToken.END_OBJECT);\n        }\n\n        // Nope: do we then expect a comma?\n        if (_parsingContext.expectComma()) {\n            if (i != INT_COMMA) {\n                _reportUnexpectedChar(i, \"was expecting comma to separate \"+_parsingContext.getTypeDesc()+\" entries\");\n            }\n            i = _skipWS();\n        }\n\n        /* And should we now have a name? Always true for\n         * Object contexts, since the intermediate 'expect-value'\n         * state is never retained.\n         */\n        if (!_parsingContext.inObject()) {\n            return _nextTokenNotInObject(i);\n        }\n        // So first parse the field name itself:\n        String n = _parseName(i);\n        _parsingContext.setCurrentName(n);\n        _currToken = JsonToken.FIELD_NAME;\n\n        i = _skipColon();\n\n        // Ok: we must have a value... what is it? Strings are very common, check first:\n        if (i == INT_QUOTE) {\n            _tokenIncomplete = true;\n            _nextToken = JsonToken.VALUE_STRING;\n            return _currToken;\n        }        \n        JsonToken t;\n\n        switch (i) {\n        case '-':\n            t = _parseNegNumber();\n            break;\n\n            /* Should we have separate handling for plus? Although\n             * it is not allowed per se, it may be erroneously used,\n             * and could be indicate by a more specific error message.\n             */\n        case '0':\n        case '1':\n        case '2':\n        case '3':\n        case '4':\n        case '5':\n        case '6':\n        case '7':\n        case '8':\n        case '9':\n            t = _parsePosNumber(i);\n            break;\n        case 'f':\n            _matchToken(\"false\", 1);\n             t = JsonToken.VALUE_FALSE;\n            break;\n        case 'n':\n            _matchToken(\"null\", 1);\n            t = JsonToken.VALUE_NULL;\n            break;\n        case 't':\n            _matchToken(\"true\", 1);\n            t = JsonToken.VALUE_TRUE;\n            break;\n        case '[':\n            t = JsonToken.START_ARRAY;\n            break;\n        case '{':\n            t = JsonToken.START_OBJECT;\n            break;\n\n        default:\n            t = _handleUnexpectedValue(i);\n        }\n        _nextToken = t;\n        return _currToken;\n    }\n\n```",
+            "method_doc": " @return Next token from the stream, if any found, or null to indicate end-of-input "
+        },
+        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)": {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+            "method_code": "```java\n    protected final String _parseName(int i) throws IOException\n    {\n        if (i != INT_QUOTE) {\n            return _handleOddName(i);\n        }\n        // First: can we optimize out bounds checks?\n        if ((_inputPtr + 13) > _inputEnd) { // Need up to 12 chars, plus one trailing (quote)\n            return slowParseName();\n        }\n\n        // If so, can also unroll loops nicely\n        /* 25-Nov-2008, tatu: This may seem weird, but here we do\n         *   NOT want to worry about UTF-8 decoding. Rather, we'll\n         *   assume that part is ok (if not it will get caught\n         *   later on), and just handle quotes and backslashes here.\n         */\n        final byte[] input = _inputBuffer;\n        final int[] codes = _icLatin1;\n\n        int q = input[_inputPtr++] & 0xFF;\n\n        if (codes[q] == 0) {\n            i = input[_inputPtr++] & 0xFF;\n            if (codes[i] == 0) {\n                q = (q << 8) | i;\n                i = input[_inputPtr++] & 0xFF;\n                if (codes[i] == 0) {\n                    q = (q << 8) | i;\n                    i = input[_inputPtr++] & 0xFF;\n                    if (codes[i] == 0) {\n                        q = (q << 8) | i;\n                        i = input[_inputPtr++] & 0xFF;\n                        if (codes[i] == 0) {\n                            _quad1 = q;\n                            return parseMediumName(i);\n                        }\n                        if (i == INT_QUOTE) { // 4 byte/char case or broken\n                            return findName(q, 4);\n                        }\n                        return parseName(q, i, 4);\n                    }\n                    if (i == INT_QUOTE) { // 3 byte/char case or broken\n                        return findName(q, 3);\n                    }\n                    return parseName(q, i, 3);\n                }                \n                if (i == INT_QUOTE) { // 2 byte/char case or broken\n                    return findName(q, 2);\n                }\n                return parseName(q, i, 2);\n            }\n            if (i == INT_QUOTE) { // one byte/char case or broken\n                return findName(q, 1);\n            }\n            return parseName(q, i, 1);\n        }     \n        if (q == INT_QUOTE) { // special case, \"\"\n            return \"\";\n        }\n        return parseName(0, q, 0); // quoting or invalid char\n    }\n\n```",
+            "method_doc": "  Internal methods, secondary parsing  "
+        },
+        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)": {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)",
+            "method_code": "```java\n    private final String addName(int[] quads, int qlen, int lastQuadBytes) throws JsonParseException\n    {\n        /* Ok: must decode UTF-8 chars. No other validation is\n         * needed, since unescaping has been done earlier as necessary\n         * (as well as error reporting for unescaped control chars)\n         */\n        // 4 bytes per quad, except last one maybe less\n        int byteLen = (qlen << 2) - 4 + lastQuadBytes;\n\n        /* And last one is not correctly aligned (leading zero bytes instead\n         * need to shift a bit, instead of trailing). Only need to shift it\n         * for UTF-8 decoding; need revert for storage (since key will not\n         * be aligned, to optimize lookup speed)\n         */\n        int lastQuad;\n\n        if (lastQuadBytes < 4) {\n            lastQuad = quads[qlen-1];\n            // 8/16/24 bit left shift\n            quads[qlen-1] = (lastQuad << ((4 - lastQuadBytes) << 3));\n        } else {\n            lastQuad = 0;\n        }\n\n        // Need some working space, TextBuffer works well:\n        char[] cbuf = _textBuffer.emptyAndGetCurrentSegment();\n        int cix = 0;\n\n        for (int ix = 0; ix < byteLen; ) {\n            int ch = quads[ix >> 2]; // current quad, need to shift+mask\n            int byteIx = (ix & 3);\n            ch = (ch >> ((3 - byteIx) << 3)) & 0xFF;\n            ++ix;\n\n            if (ch > 127) { // multi-byte\n                int needed;\n                if ((ch & 0xE0) == 0xC0) { // 2 bytes (0x0080 - 0x07FF)\n                    ch &= 0x1F;\n                    needed = 1;\n                } else if ((ch & 0xF0) == 0xE0) { // 3 bytes (0x0800 - 0xFFFF)\n                    ch &= 0x0F;\n                    needed = 2;\n                } else if ((ch & 0xF8) == 0xF0) { // 4 bytes; double-char with surrogates and all...\n                    ch &= 0x07;\n                    needed = 3;\n                } else { // 5- and 6-byte chars not valid xml chars\n                    _reportInvalidInitial(ch);\n                    needed = ch = 1; // never really gets this far\n                }\n                if ((ix + needed) > byteLen) {\n                    _reportInvalidEOF(\" in field name\");\n                }\n                \n                // Ok, always need at least one more:\n                int ch2 = quads[ix >> 2]; // current quad, need to shift+mask\n                byteIx = (ix & 3);\n                ch2 = (ch2 >> ((3 - byteIx) << 3));\n                ++ix;\n                \n                if ((ch2 & 0xC0) != 0x080) {\n                    _reportInvalidOther(ch2);\n                }\n                ch = (ch << 6) | (ch2 & 0x3F);\n                if (needed > 1) {\n                    ch2 = quads[ix >> 2];\n                    byteIx = (ix & 3);\n                    ch2 = (ch2 >> ((3 - byteIx) << 3));\n                    ++ix;\n                    \n                    if ((ch2 & 0xC0) != 0x080) {\n                        _reportInvalidOther(ch2);\n                    }\n                    ch = (ch << 6) | (ch2 & 0x3F);\n                    if (needed > 2) { // 4 bytes? (need surrogates on output)\n                        ch2 = quads[ix >> 2];\n                        byteIx = (ix & 3);\n                        ch2 = (ch2 >> ((3 - byteIx) << 3));\n                        ++ix;\n                        if ((ch2 & 0xC0) != 0x080) {\n                            _reportInvalidOther(ch2 & 0xFF);\n                        }\n                        ch = (ch << 6) | (ch2 & 0x3F);\n                    }\n                }\n                if (needed > 2) { // surrogate pair? once again, let's output one here, one later on\n                    ch -= 0x10000; // to normalize it starting with 0x0\n                    if (cix >= cbuf.length) {\n                        cbuf = _textBuffer.expandCurrentSegment();\n                    }\n                    cbuf[cix++] = (char) (0xD800 + (ch >> 10));\n                    ch = 0xDC00 | (ch & 0x03FF);\n                }\n            }\n            if (cix >= cbuf.length) {\n                cbuf = _textBuffer.expandCurrentSegment();\n            }\n            cbuf[cix++] = (char) ch;\n        }\n\n        // Ok. Now we have the character array, and can construct the String\n        String baseName = new String(cbuf, 0, cix);\n        // And finally, un-align if necessary\n        if (lastQuadBytes < 4) {\n            quads[qlen-1] = lastQuad;\n        }\n        return _symbols.addName(baseName, quads, qlen);\n    }\n\n```",
+            "method_doc": " This is the main workhorse method used when we take a symbol table miss. It needs to demultiplex individual bytes, decode multi-byte chars (if any), and then construct Name instance and add it to the symbol table. "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)",
+            "method_code": "```java\n    protected JsonParser _createParser(byte[] data, int offset, int len, IOContext ctxt) throws IOException\n    {\n        return new ByteSourceJsonBootstrapper(ctxt, data, offset, len).constructParser(_parserFeatures,\n                _objectCodec, _byteSymbolCanonicalizer, _rootCharSymbols, _factoryFeatures);\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates parser using given {@link Reader} object for reading content passed as raw byte array. <p> This method is specifically designed to remain compatible between minor versions so that sub-classes can count on it being called as expected. That is, it is part of official interface from sub-class perspective, although not a public method available to users of factory implementations. "
+        },
+        "com.fasterxml.jackson.core.util.InternCache::intern(String)": {
+            "method_name": "com.fasterxml.jackson.core.util.InternCache::intern(String)",
+            "method_code": "```java\n    public String intern(String input) {\n        String result = get(input);\n        if (result != null) { return result; }\n\n        /* 18-Sep-2013, tatu: We used to use LinkedHashMap, which has simple LRU\n         *   method. No such functionality exists with CHM; and let's use simplest\n         *   possible limitation: just clear all contents. This because otherwise\n         *   we are simply likely to keep on clearing same, commonly used entries.\n         */\n        if (size() >= MAX_ENTRIES) {\n            /* Not incorrect wrt well-known double-locking anti-pattern because underlying\n             * storage gives close enough answer to real one here; and we are\n             * more concerned with flooding than starvation.\n             */\n            synchronized (lock) {\n                if (size() >= MAX_ENTRIES) {\n                    clear();\n                }\n            }\n        }\n        result = input.intern();\n        put(result, result);\n        return result;\n    }\n\n```",
+            "method_doc": "This method checks if the input string is already interned using the `get` method from the superclass `LinkedHashMap`. If not found, it clears the cache if its size exceeds `MAX_ENTRIES`, then interns the string using `input.intern()` and stores it in the cache using the `put` method. This method does not call any other methods in the Covered Methods List."
+        },
+        "com.fasterxml.jackson.core.JsonFactory::createParser(byte[])": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::createParser(byte[])",
+            "method_code": "```java\n    public JsonParser createParser(byte[] data) throws IOException, JsonParseException {\n        IOContext ctxt = _createContext(data, true);\n        if (_inputDecorator != null) {\n            InputStream in = _inputDecorator.decorate(ctxt, data, 0, data.length);\n            if (in != null) {\n                return _createParser(in, ctxt);\n            }\n        }\n        return _createParser(data, 0, data.length, ctxt);\n    }\n\n```",
+            "method_doc": " Method for constructing parser for parsing the contents of given byte array.  @since 2.1 "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::isEnabled(Feature)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::isEnabled(Feature)",
+            "method_code": "```java\n    public final boolean isEnabled(JsonGenerator.Feature f) {\n        return (_generatorFeatures & f.getMask()) != 0;\n    }\n\n```",
+            "method_doc": " Check whether specified generator feature is enabled. "
+        },
+        "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+            "method_code": "```java\n    public void setEncoding(JsonEncoding enc) {\n        _encoding = enc;\n    }\n\n```",
+            "method_doc": "This method sets the encoding for the IOContext object."
+        },
+        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+            "method_code": "```java\n    public TextBuffer constructTextBuffer() {\n        return new TextBuffer(_bufferRecycler);\n    }\n\n```",
+            "method_doc": "  Public API, buffer management  "
+        },
+        "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)": {
+            "method_name": "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)",
+            "method_code": "```java\n    public IOContext(BufferRecycler br, Object sourceRef, boolean managedResource)\n    {\n        _bufferRecycler = br;\n        _sourceRef = sourceRef;\n        _managedResource = managedResource;\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::slowParseName()": {
+            "method_name": "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::slowParseName()",
+            "method_code": "```java\n    protected String slowParseName() throws IOException\n    {\n        if (_inputPtr >= _inputEnd) {\n            if (!loadMore()) {\n                _reportInvalidEOF(\": was expecting closing '\\\"' for name\");\n            }\n        }\n        int i = _inputBuffer[_inputPtr++] & 0xFF;\n        if (i == INT_QUOTE) { // special case, \"\"\n            return \"\";\n        }\n        return parseEscapedName(_quadBuffer, 0, 0, i, 0);\n    }\n\n```",
+            "method_doc": " Method called when not even first 8 bytes are guaranteed to come consequtively. Happens rarely, so this is offlined; plus we'll also do full checks for escaping etc. "
+        },
+        "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+            "method_code": "```java\n    public BufferRecycler _getBufferRecycler()\n    {\n        BufferRecycler br;\n\n        /* 23-Apr-2015, tatu: Let's allow disabling of buffer recycling\n         *   scheme, for cases where it is considered harmful (possibly\n         *   on Android, for example)\n         */\n        if (isEnabled(Feature.USE_THREAD_LOCAL_FOR_BUFFER_RECYCLING)) {\n            SoftReference<BufferRecycler> ref = _recyclerRef.get();\n            br = (ref == null) ? null : ref.get();\n    \n            if (br == null) {\n                br = new BufferRecycler();\n                _recyclerRef.set(new SoftReference<BufferRecycler>(br));\n            }\n        } else {\n            br = new BufferRecycler();\n        }\n        return br;\n    }\n\n```",
+            "method_doc": " Method used by factory to create buffer recycler instances for parsers and generators. <p> Note: only public to give access for <code>ObjectMapper</code> "
+        },
+        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::initTables(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::initTables(int)",
+            "method_code": "```java\n    private void initTables(int initialSize)\n    {\n        _symbols = new String[initialSize];\n        _buckets = new Bucket[initialSize >> 1];\n        // Mask is easy to calc for powers of two.\n        _indexMask = initialSize - 1;\n        _size = 0;\n        _longestCollisionList = 0;\n        // Hard-coded fill factor is 75%\n        _sizeThreshold = _thresholdSize(initialSize);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.util.BufferRecycler::allocCharBuffer(int,int)": {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::allocCharBuffer(int,int)",
+            "method_code": "```java\n    public char[] allocCharBuffer(int ix, int minSize) {\n        final int DEF_SIZE = charBufferLength(ix);\n        if (minSize < DEF_SIZE) {\n            minSize = DEF_SIZE;\n        }\n        char[] buffer = _charBuffers[ix];\n        if (buffer == null || buffer.length < minSize) {\n            buffer = calloc(minSize);\n        } else {\n            _charBuffers[ix] = null;\n        }\n        return buffer;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::initTableInfo(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::initTableInfo(int)",
+            "method_code": "```java\n    private TableInfo initTableInfo(int sz) {\n        return new TableInfo(0, // count\n                sz - 1, // mainHashMask\n                new int[sz], // mainHash\n                new Name[sz], // mainNames\n                null, // collList\n                0, // collCount,\n                0, // collEnd\n                0 // longestCollisionList\n        );\n    }\n\n```",
+            "method_doc": " public TableInfo(int count, int mainHashMask, int[] mainHash, Name[] mainNames, Bucket[] collList, int collCount, int collEnd, int longestCollisionList) "
+        },
+        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static BytesToNameCanonicalizer createRoot(int seed) {\n        return new BytesToNameCanonicalizer(DEFAULT_T_SIZE, true, seed, true);\n    }\n\n```",
+            "method_doc": " Factory method that should only be called from unit tests, where seed value should remain the same. "
+        },
+        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot()": {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot()",
+            "method_code": "```java\n    public static CharsToNameCanonicalizer createRoot() {\n        /* [Issue-21]: Need to use a variable seed, to thwart hash-collision\n         * based attacks.\n         */\n        long now = System.currentTimeMillis();\n        // ensure it's not 0; and might as well require to be odd so:\n        int seed = (((int) now) + ((int) (now >>> 32))) | 1;\n        return createRoot(seed);\n    }\n\n```",
+            "method_doc": " Method called to create root canonicalizer for a {@link com.fasterxml.jackson.core.JsonFactory} instance. Root instance is never used directly; its main use is for storing and sharing underlying symbol arrays as needed. "
+        },
+        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static CharsToNameCanonicalizer createRoot(int hashSeed) {\n        return sBootstrapSymbolTable.makeOrphan(hashSeed);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.util.BufferRecycler::calloc(int)": {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::calloc(int)",
+            "method_code": "```java\n    protected char[] calloc(int size) { return new char[size]; }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot()": {
+            "method_name": "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot()",
+            "method_code": "```java\n    public static BytesToNameCanonicalizer createRoot() {\n        /* [Issue-21]: Need to use a variable seed, to thwart hash-collision\n         * based attacks.\n         */\n        long now = System.currentTimeMillis();\n        // ensure it's not 0; and might as well require to be odd so:\n        int seed = (((int) now) + ((int) (now >>> 32))) | 1;\n        return createRoot(seed);\n    }\n\n```",
+            "method_doc": " Factory method to call to create a symbol table instance with a randomized seed value. "
+        },
+        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults() {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) { flags |= f.getMask(); }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. "
+        },
+        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+            "method_code": "```java\n        public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "Returns whether the feature is enabled by default."
+        },
+        "com.fasterxml.jackson.core.JsonFactory::_createContext(Object,boolean)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory::_createContext(Object,boolean)",
+            "method_code": "```java\n    protected IOContext _createContext(Object srcRef, boolean resourceManaged) {\n        return new IOContext(_getBufferRecycler(), srcRef, resourceManaged);\n    }\n\n```",
+            "method_doc": " Overridable factory method that actually instantiates desired context object. "
+        },
+        "com.fasterxml.jackson.core.util.BufferRecycler::charBufferLength(int)": {
+            "method_name": "com.fasterxml.jackson.core.util.BufferRecycler::charBufferLength(int)",
+            "method_code": "```java\n    protected int charBufferLength(int ix) {\n        return CHAR_BUFFER_LENGTHS[ix];\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()",
+            "method_code": "```java\n    public int bucketCount() { return _hashSize; }\n\n```",
+            "method_doc": " Returns number of primary slots table has currently "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::primaryCount()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::primaryCount()",
+            "method_code": "```java\n    public int primaryCount()\n    {\n        int count = 0;\n        for (int offset = 3, end = _secondaryStart; offset < end; offset += 4) {\n            if (_hashArea[offset] != 0) {\n                ++count;\n            }\n        }\n        return count;\n    }\n\n```",
+            "method_doc": " Method mostly needed by unit tests; calculates number of entries that are in the primary slot set. These are \"perfect\" entries, accessible with a single lookup "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::calcHash(int[],int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::calcHash(int[],int)",
+            "method_code": "```java\n    public int calcHash(int[] q, int qlen)\n    {\n        if (qlen < 4) {\n            throw new IllegalArgumentException();\n        }\n        /* And then change handling again for \"multi-quad\" case; mostly\n         * to make calculation of collisions less fun. For example,\n         * add seed bit later in the game, and switch plus/xor around,\n         * use different shift lengths.\n         */\n        int hash = q[0] ^ _seed;\n        hash += (hash >>> 9);\n        hash += q[1];\n        hash += (hash >>> 15);\n        hash *= MULT;\n        hash ^= q[2];\n        hash += (hash >>> 4);\n\n        for (int i = 3; i < qlen; ++i) {\n            int next = q[i];\n            next = next ^ (next >> 21);\n            hash += next;\n        }\n        hash *= MULT2;\n        \n        // and finally shuffle some more once done\n        hash += (hash >>> 19);\n        hash ^= (hash << 5);\n        return hash;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)": {
+            "method_name": "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)",
+            "method_code": "```java\n        public boolean enabledIn(int flags) { return (flags & getMask()) != 0; }\n\n```",
+            "method_doc": "This method checks if the feature is enabled in the given flags. It uses the bitwise AND operator to check if the mask of the feature is present in the flags."
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifyNeedForRehash()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifyNeedForRehash()",
+            "method_code": "```java\n    private void _verifyNeedForRehash() {\n        // Yes if above 80%, or above 50% AND have ~1% spill-overs\n        if (_count > (_hashSize >> 1)) { // over 50%\n            int spillCount = (_spilloverEnd - _spilloverStart()) >> 2;\n            if ((spillCount > (1 + _count >> 7))\n                    || (_count > (_hashSize * 0.80))) {\n                _needRehash = true;\n            }\n        }\n    }\n\n```",
+            "method_doc": "Verifies if rehashing is needed based on the current load factor."
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_appendLongName(int[],int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_appendLongName(int[],int)",
+            "method_code": "```java\n    private int _appendLongName(int[] quads, int qlen)\n    {\n        int start = _longNameOffset;\n        \n        // note: at this point we must already be shared. But may not have enough space\n        if ((start + qlen) > _hashArea.length) {\n            // try to increment in reasonable chunks; at least space that we need\n            int toAdd = (start + qlen) - _hashArea.length;\n            // but at least 1/8 of regular hash area size or 16kB (whichever smaller)\n            int minAdd = Math.min(4096, _hashSize);\n\n            int newSize = _hashArea.length + Math.max(toAdd, minAdd);\n            _hashArea = Arrays.copyOf(_hashArea, newSize);\n        }\n        System.arraycopy(quads, 0, _hashArea, start, qlen);\n        _longNameOffset += qlen;\n        return start;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::createRoot(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::createRoot(int)",
+            "method_code": "```java\n    protected static ByteQuadsCanonicalizer createRoot(int seed) {\n        return new ByteQuadsCanonicalizer(DEFAULT_T_SIZE, true, seed, true);\n    }\n\n```",
+            "method_doc": " Factory method that should only be called from unit tests, where seed value should remain the same. "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::makeChild(int)": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::makeChild(int)",
+            "method_code": "```java\n    public ByteQuadsCanonicalizer makeChild(int flags) {\n        return new ByteQuadsCanonicalizer(this,\n                JsonFactory.Feature.INTERN_FIELD_NAMES.enabledIn(flags),\n                _seed,\n                JsonFactory.Feature.FAIL_ON_SYMBOL_HASH_OVERFLOW.enabledIn(flags),\n                _tableInfo.get());\n    }\n\n```",
+            "method_doc": " Factory method used to create actual symbol table instance to use for parsing. "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::size()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::size()",
+            "method_code": "```java\n    public int size()\n    {\n        if (_tableInfo != null) { // root table\n            return _tableInfo.get().count;\n        }\n        // nope, child table\n        return _count;\n    }\n\n```",
+            "method_doc": "  API, accessors  "
+        },
+        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifySharing()": {
+            "method_name": "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifySharing()",
+            "method_code": "```java\n    private void _verifySharing()\n    {\n        if (_hashShared) {\n            _hashArea = Arrays.copyOf(_hashArea, _hashArea.length);\n            _names = Arrays.copyOf(_names, _names.length);\n            _hashShared = false;\n        }\n        if (_needRehash) {\n            rehash();\n        }\n    }\n\n```",
+            "method_doc": "Verifies if the symbol table needs to be shared or rehashed. Calls `_verifyNeedForRehash` and `rehash`."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.core.sym.TestByteBasedSymbols",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Array Index Out of Bounds in Symbol Canonicalization\n**Description:** The `ArrayIndexOutOfBoundsException` indicates that the code attempted to access an index outside the bounds of an array. In the context of the `ByteQuadsCanonicalizer`, this could happen if the code tries to add a symbol that exceeds the capacity of its internal arrays.\n\n**Location:** Likely in the `addName` method of `ByteQuadsCanonicalizer.java` around line 853.\n\n**Observation:** The stack trace points directly to `ByteQuadsCanonicalizer.addName(ByteQuadsCanonicalizer.java:853)`, suggesting that the issue lies in the handling of symbol addition.",
+                "Incorrect Handling of Large Number of Symbols\n**Description:** The test constructs a JSON object with 60 unique keys, which might be too many for the current implementation of the symbol canonicalization mechanism. If the system does not handle large numbers of unique symbols efficiently, it could lead to overflow or incorrect indexing.\n\n**Location:** Potentially in the `addName` method or related methods in `ByteQuadsCanonicalizer.java`.\n\n**Observation:** The error occurs when parsing the JSON, indicating that the system may not be able to manage the large number of unique keys effectively.",
+                "Reflection Injection Issue\n**Description:** Using reflection to inject a custom `ByteQuadsCanonicalizer` into the `JsonFactory` might interfere with the normal operation of the factory. This could lead to unexpected behavior or errors during parsing.\n\n**Location:** The injection point in the test code, particularly the lines involving reflection.\n\n**Observation:** The error occurs after the injection, suggesting that the custom canonicalizer might not be functioning correctly or is interfering with the default behavior.",
+                "Memory Management Issues\n**Description:** The test involves creating a large JSON object with many unique keys, which could lead to memory management issues. If the system runs out of memory or improperly manages memory, it could result in unexpected errors during parsing.\n\n**Location:** Potentially throughout the `ByteQuadsCanonicalizer` and related classes, especially those involved in memory allocation and deallocation.\n\n**Observation:** The error occurs during parsing, which could indicate that memory-related issues are causing the problem.",
+                "Thread Safety Violations\n**Description:** If the `ByteQuadsCanonicalizer` is not thread-safe, concurrent access to it could lead to unexpected behavior or errors. The test might be running in a multi-threaded environment, triggering a race condition or other concurrency issues.\n\n**Location:** Any part of the `ByteQuadsCanonicalizer` that is accessed concurrently.\n\n**Observation:** The error occurs during parsing, which could suggest that a concurrency issue is causing the problem."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache",
+                    "com.fasterxml.jackson.core.io.IOContext"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+                    "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache",
+                    "com.fasterxml.jackson.core.io.IOContext"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+                    "com.fasterxml.jackson.core.util.BufferRecycler",
+                    "com.fasterxml.jackson.core.io.IOContext",
+                    "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.BufferRecycler",
+                    "com.fasterxml.jackson.core.io.IOContext"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser": [
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::isEnabled(Feature)",
+                        "com.fasterxml.jackson.core.JsonFactory::createParser(byte[])",
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ],
+                    "com.fasterxml.jackson.core.io.IOContext": [
+                        "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+                        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+                        "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser": [
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)"
+                    ],
+                    "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot()",
+                        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::createRoot(int)",
+                        "com.fasterxml.jackson.core.sym.CharsToNameCanonicalizer::initTables(int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser": [
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)",
+                        "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+                        "com.fasterxml.jackson.core.JsonFactory::_createContext(Object,boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ],
+                    "com.fasterxml.jackson.core.io.IOContext": [
+                        "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+                        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+                        "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser": [
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::addName(int[],int,int)"
+                    ],
+                    "com.fasterxml.jackson.core.util.BufferRecycler": [
+                        "com.fasterxml.jackson.core.util.BufferRecycler::allocCharBuffer(int,int)",
+                        "com.fasterxml.jackson.core.util.BufferRecycler::charBufferLength(int)",
+                        "com.fasterxml.jackson.core.util.BufferRecycler::calloc(int)"
+                    ],
+                    "com.fasterxml.jackson.core.io.IOContext": [
+                        "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+                        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+                        "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::initTableInfo(int)",
+                        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot()",
+                        "com.fasterxml.jackson.core.sym.BytesToNameCanonicalizer::createRoot(int)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::rehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::nukeSymbols(boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.json.UTF8StreamJsonParser": [
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::nextToken()",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::_parseName(int)",
+                        "com.fasterxml.jackson.core.json.UTF8StreamJsonParser::slowParseName()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory::_createParser(byte[],int,int,IOContext)",
+                        "com.fasterxml.jackson.core.JsonFactory::_getBufferRecycler()",
+                        "com.fasterxml.jackson.core.JsonFactory::_createContext(Object,boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.util.BufferRecycler": [
+                        "com.fasterxml.jackson.core.util.BufferRecycler::allocCharBuffer(int,int)",
+                        "com.fasterxml.jackson.core.util.BufferRecycler::charBufferLength(int)",
+                        "com.fasterxml.jackson.core.util.BufferRecycler::calloc(int)"
+                    ],
+                    "com.fasterxml.jackson.core.io.IOContext": [
+                        "com.fasterxml.jackson.core.io.IOContext::setEncoding(JsonEncoding)",
+                        "com.fasterxml.jackson.core.io.IOContext::constructTextBuffer()",
+                        "com.fasterxml.jackson.core.io.IOContext::IOContext(BufferRecycler,Object,boolean)"
+                    ]
+                }
+            }
+        },
+        {
+            "test_suite": "com.fasterxml.jackson.core.sym.TestSymbolTables",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Bucket Count Calculation\n**Description:** The calculation of the bucket count might be incorrect. The `ByteQuadsCanonicalizer` class may have a bug in the logic that determines the number of buckets.\n\n**Location:** Likely within the `ByteQuadsCanonicalizer` class, specifically in the method responsible for calculating the bucket count.\n\n**Observation:** All three tests fail with an assertion error related to `bucketCount()`. This suggests that the issue is consistently affecting the bucket count calculation across different scenarios.",
+                "Inconsistent Hashing Logic\n**Description:** There might be inconsistencies in the hashing logic used to calculate the hash codes for strings. This could lead to incorrect bucket assignments, resulting in unexpected bucket counts.\n\n**Location:** Potentially in the `calcQuads` method or any other method involved in string hashing.\n\n**Observation:** The tests involve adding strings with varying lengths and representations. If the hashing logic is inconsistent, it could result in incorrect bucket counts across different tests.",
+                "Memory Allocation Issues\n**Description:** There might be memory allocation issues causing the `ByteQuadsCanonicalizer` to allocate more buckets than intended. This could happen if there's a bug in the memory management logic.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, particularly in methods related to memory allocation and resizing.\n\n**Observation:** The tests involve adding a large number of unique strings. If there's a bug in memory allocation, it could lead to excessive bucket creation, causing the observed discrepancies.",
+                "Race Condition During Symbol Table Population\n**Description:** A race condition might occur during the population of the symbol table, leading to inconsistent bucket counts. Multiple threads accessing and modifying the symbol table simultaneously could cause this issue.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, particularly in methods that handle concurrent access and modification of the symbol table.\n\n**Observation:** Although the tests run sequentially, the presence of a race condition could still manifest due to subtle timing differences or interactions with other parts of the system.",
+                "Bug in the `addName` Method\n**Description:** There might be a bug in the `addName` method of the `ByteQuadsCanonicalizer` class, causing it to incorrectly update the bucket count or add duplicate entries.\n\n**Location:** Within the `ByteQuadsCanonicalizer` class, specifically in the `addName` method.\n\n**Observation:** The tests involve adding a large number of unique strings. If the `addName` method has a bug, it could lead to incorrect bucket counts or duplicate entries, causing the observed discrepancies."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    6.0
+                ],
+                "3": [
+                    8,
+                    6.0
+                ],
+                "4": [
+                    8,
+                    7.0
+                ],
+                "5": [
+                    8,
+                    8.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.util.InternCache",
+                    "com.fasterxml.jackson.core.JsonFactory"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer",
+                    "com.fasterxml.jackson.core.JsonFactory",
+                    "com.fasterxml.jackson.core.util.InternCache"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::primaryCount()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::calcHash(int[],int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::createRoot(int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::makeChild(int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::size()"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifyNeedForRehash()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_verifySharing()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::size()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::bucketCount()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer": [
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::addName(String,int[],int)",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::primaryCount()",
+                        "com.fasterxml.jackson.core.sym.ByteQuadsCanonicalizer::_appendLongName(int[],int)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonFactory": [
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledByDefault()",
+                        "com.fasterxml.jackson.core.JsonFactory$Feature::enabledIn(int)"
+                    ],
+                    "com.fasterxml.jackson.core.util.InternCache": [
+                        "com.fasterxml.jackson.core.util.InternCache::intern(String)"
+                    ]
+                }
+            }
+        }
+    ]
+}

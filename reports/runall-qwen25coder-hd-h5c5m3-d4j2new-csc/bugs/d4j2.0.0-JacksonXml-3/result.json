@@ -1,0 +1,749 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+        "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+            "method_code": "```java\n    @Override\n    public String nextTextValue() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n\n            // expected case; yes, got a String\n            if (t == JsonToken.VALUE_STRING) {\n                return _currText;\n            }\n            _updateState(t);\n            return null;\n        }\n\n        int token = _xmlTokens.next();\n\n        // mostly copied from 'nextToken()'\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            if (_mayBeLeaf) {\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                _currToken = JsonToken.START_OBJECT;\n                return null;\n            }\n            if (_parsingContext.inArray()) {\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n            _mayBeLeaf = true;\n            _currToken = JsonToken.FIELD_NAME;\n            return null;\n        }\n\n        // Ok; beyond start element, what do we get?\n        switch (token) {\n        case XmlTokenStream.XML_END_ELEMENT:\n            if (_mayBeLeaf) {\n                // NOTE: this is different from nextToken() -- produce \"\", NOT null\n                _mayBeLeaf = false;\n                _currToken = JsonToken.VALUE_STRING;\n                return (_currText = \"\");\n            }\n            _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n            _parsingContext = _parsingContext.getParent();\n            _namesToWrap = _parsingContext.getNamesToWrap();\n            break;\n        case XmlTokenStream.XML_ATTRIBUTE_NAME:\n            // If there was a chance of leaf node, no more...\n            if (_mayBeLeaf) {\n                _mayBeLeaf = false;\n                _nextToken = JsonToken.FIELD_NAME;\n                _currText = _xmlTokens.getText();\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                _currToken = JsonToken.START_OBJECT;\n            } else {\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                _currToken = JsonToken.FIELD_NAME;\n            }\n            break;\n        case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n            _currText = _xmlTokens.getText();\n            _currToken = JsonToken.VALUE_STRING;\n            break;\n        case XmlTokenStream.XML_TEXT:\n            _currText = _xmlTokens.getText();\n            if (_mayBeLeaf) {\n                _mayBeLeaf = false;\n                // Also: must skip following END_ELEMENT\n                _xmlTokens.skipEndElement();\n\n                // NOTE: this is different from nextToken() -- NO work-around\n                // for otherwise empty List/array\n                _currToken = JsonToken.VALUE_STRING;\n                return _currText;\n            }\n            // If not a leaf, need to transform into property...\n            _parsingContext.setCurrentName(_cfgNameForTextElement);\n            _nextToken = JsonToken.VALUE_STRING;\n            _currToken = JsonToken.FIELD_NAME;\n            break;\n        case XmlTokenStream.XML_END:\n            _currToken = null;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " Method overridden to support more reliable deserialization of String collections. ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the transition between tokens, including attribute names and their corresponding text values. The failure in the test indicates that the method is not correctly identifying and returning the text value associated with the `max` attribute, which is a critical functionality for the XML parsing process.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 8,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n            switch (t) {\n            case START_OBJECT:\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                break;\n            case START_ARRAY:\n                _parsingContext = _parsingContext.createChildArrayContext(-1, -1);\n                break;\n            case END_OBJECT:\n            case END_ARRAY:\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                break;\n            case FIELD_NAME:\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                break;\n            default: // VALUE_STRING, VALUE_NULL\n                // should be fine as is?\n            }\n            return t;\n        }\n        int token = _xmlTokens.next();\n\n        // Need to have a loop just because we may have to eat/convert\n        // a start-element that indicates an array element.\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            // If we thought we might get leaf, no such luck\n            if (_mayBeLeaf) {\n                // leave _mayBeLeaf set, as we start a new context\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                return (_currToken = JsonToken.START_OBJECT);\n            }\n            if (_parsingContext.inArray()) {\n                // Yup: in array, so this element could be verified; but it won't be\n                // reported anyway, and we need to process following event.\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n\n            // Ok: virtual wrapping can be done by simply repeating current START_ELEMENT.\n            // Couple of ways to do it; but start by making _xmlTokens replay the thing...\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n\n            _mayBeLeaf = true;\n            // Ok: in array context we need to skip reporting field names.\n            // But what's the best way to find next token?\n            return (_currToken = JsonToken.FIELD_NAME);\n        }\n\n        // Ok; beyond start element, what do we get?\n        while (true) {\n            switch (token) {\n            case XmlTokenStream.XML_END_ELEMENT:\n                // Simple, except that if this is a leaf, need to suppress end:\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    if (_parsingContext.inArray()) {\n                        // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                        //    expose as empty Object, not null\n                        _nextToken = JsonToken.END_OBJECT;\n                        _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                        return (_currToken = JsonToken.START_OBJECT);\n                    }\n                    return (_currToken = JsonToken.VALUE_NULL);\n                }\n                _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                return _currToken;\n                \n            case XmlTokenStream.XML_ATTRIBUTE_NAME:\n                // If there was a chance of leaf node, no more...\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    _nextToken = JsonToken.FIELD_NAME;\n                    _currText = _xmlTokens.getText();\n                    _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                    return (_currToken = JsonToken.START_OBJECT);\n                }\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n                _currText = _xmlTokens.getText();\n                return (_currToken = JsonToken.VALUE_STRING);\n            case XmlTokenStream.XML_TEXT:\n                _currText = _xmlTokens.getText();\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    // One more refinement (pronunced like \"hack\") is that if\n                    // we had an empty String (or all white space), and we are\n                    // deserializing an array, we better hide the empty text.\n                    // Also: must skip following END_ELEMENT\n                    _xmlTokens.skipEndElement();\n                    if (_parsingContext.inArray()) {\n                        if (_isEmpty(_currText)) {\n                            // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                            //    expose as empty Object, not null (or, worse, as used to\n                            //    be done, by swallowing the token)\n                            _nextToken = JsonToken.END_OBJECT;\n                            _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                            return (_currToken = JsonToken.START_OBJECT);\n                        }\n                    }\n                    return (_currToken = JsonToken.VALUE_STRING);\n                } else {\n                    // [dataformat-xml#177]: empty text may also need to be skipped\n                    // but... [dataformat-xml#191]: looks like we can't short-cut, must\n                    // loop over again\n                    if (_parsingContext.inObject()) {\n                        if ((_currToken != JsonToken.FIELD_NAME) && _isEmpty(_currText)) {\n                            token = _xmlTokens.next();\n                            continue;\n                        }\n                    }\n                }\n                // If not a leaf (or otherwise ignorable), need to transform into property...\n                _parsingContext.setCurrentName(_cfgNameForTextElement);\n                _nextToken = JsonToken.VALUE_STRING;\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_END:\n                return (_currToken = null);\n            }\n        }\n    }\n\n```",
+            "method_doc": " @Override public JsonToken nextToken() throws IOException { JsonToken t = nextToken0(); if (t != null) { switch (t) { case FIELD_NAME: System.out.println(\"JsonToken: FIELD_NAME '\"+_parsingContext.getCurrentName()+\"'\"); break; case VALUE_STRING: System.out.println(\"JsonToken: VALUE_STRING '\"+getText()+\"'\"); break; default: System.out.println(\"JsonToken: \"+t); } } return t; }  public JsonToken nextToken0() throws IOException ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the transition between different tokens, including attribute names and their corresponding text values. The failure in the test suggests that the method is not correctly identifying and returning the text value associated with the `max` attribute.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+            "method_code": "```java\n    private final int _next() throws XMLStreamException\n    {\n        switch (_currentState) {\n        case XML_ATTRIBUTE_VALUE:\n            ++_nextAttributeIndex;\n            // fall through\n        case XML_START_ELEMENT: // attributes to return?\n            if (_nextAttributeIndex < _attributeCount) {\n                _localName = _xmlReader.getAttributeLocalName(_nextAttributeIndex);\n                _namespaceURI = _xmlReader.getAttributeNamespace(_nextAttributeIndex);\n                _textValue = _xmlReader.getAttributeValue(_nextAttributeIndex);\n                return (_currentState = XML_ATTRIBUTE_NAME);\n            }\n            // otherwise need to find START/END_ELEMENT or text\n            String text = _collectUntilTag();\n            // If it's START_ELEMENT, ignore any text\n            if (_xmlReader.getEventType() == XMLStreamReader.START_ELEMENT) {\n                return _initStartElement();\n            }\n            // For END_ELEMENT we will return text, if any\n            if (text != null) {\n                _textValue = text;\n                return (_currentState = XML_TEXT);\n            }\n            return _handleEndElement();\n        case XML_ATTRIBUTE_NAME:\n            // if we just returned name, will need to just send value next\n            return (_currentState = XML_ATTRIBUTE_VALUE);\n        case XML_TEXT:\n            // text is always followed by END_ELEMENT\n            return _handleEndElement();\n        case XML_END:\n            return XML_END;\n//            throw new IllegalStateException(\"No more XML tokens available (end of input)\");\n        }\n\n        // Ok: must be END_ELEMENT; see what tag we get (or end)\n        switch (_skipUntilTag()) {\n        case XMLStreamConstants.END_DOCUMENT:\n            return (_currentState = XML_END);\n        case XMLStreamConstants.END_ELEMENT:\n            return _handleEndElement();\n        }\n        // START_ELEMENT...\n        return _initStartElement();\n    }\n\n```",
+            "method_doc": "  Internal methods, parsing  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+            "class_doc": " Simple helper class used on top of STAX {@link XMLStreamReader} to further abstract out all irrelevant details, and to expose equivalent of flat token stream with no \"fluff\" tokens (comments, processing instructions, mixed content) all of which is just to simplify actual higher-level conversion to JSON tokens ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the state transitions and token extraction logic, which could directly impact the behavior of `nextTextValue()`. The issue observed in the test failure suggests that there might be a problem with how the method processes attribute values and transitions to the next token.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+            "method_code": "```java\n    public int next() throws IOException \n    {\n        if (_repeatElement != 0) {\n            return (_currentState = _handleRepeatElement());\n        }\n        try {\n            return _next();\n        } catch (XMLStreamException e) {\n            StaxUtil.throwXmlAsIOException(e);\n            return -1;\n        }\n    }\n\n```",
+            "method_doc": " public int next() throws IOException  { int n = next0(); switch (n) { case XML_START_ELEMENT:  System.out.println(\" XML-token: XML_START_ELEMENT '\"+_localName+\"'\"); break; case XML_END_ELEMENT:  System.out.println(\" XML-token: XML_END_ELEMENT '\"+_localName+\"'\"); break; case XML_ATTRIBUTE_NAME:  System.out.println(\" XML-token: XML_ATTRIBUTE_NAME '\"+_localName+\"'\"); break; case XML_ATTRIBUTE_VALUE:  System.out.println(\" XML-token: XML_ATTRIBUTE_VALUE '\"+_textValue+\"'\"); break; case XML_TEXT:  System.out.println(\" XML-token: XML_TEXT '\"+_textValue+\"'\"); break; case XML_END:  System.out.println(\" XML-token: XML_END\"); break; default: throw new IllegalStateException(); } return n; } ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+            "class_doc": " Simple helper class used on top of STAX {@link XMLStreamReader} to further abstract out all irrelevant details, and to expose equivalent of flat token stream with no \"fluff\" tokens (comments, processing instructions, mixed content) all of which is just to simplify actual higher-level conversion to JSON tokens ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the progression of tokens through the XML stream. However, the issue described seems to be related to the handling of attribute values rather than the general token progression logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)",
+            "method_code": "```java\n    public XmlTokenStream(XMLStreamReader xmlReader, Object sourceRef)\n    {\n        _sourceReference = sourceRef;\n        // Let's ensure we point to START_ELEMENT...\n        if (xmlReader.getEventType() != XMLStreamConstants.START_ELEMENT) {\n            throw new IllegalArgumentException(\"Invalid XMLStreamReader passed: should be pointing to START_ELEMENT (\"\n                    +XMLStreamConstants.START_ELEMENT+\"), instead got \"+xmlReader.getEventType());\n        }\n        _xmlReader = Stax2ReaderAdapter.wrapIfNecessary(xmlReader);\n        _currentState = XML_START_ELEMENT;\n        _localName = _xmlReader.getLocalName();\n        _namespaceURI = _xmlReader.getNamespaceURI();\n        _attributeCount = _xmlReader.getAttributeCount();\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+            "class_doc": " Simple helper class used on top of STAX {@link XMLStreamReader} to further abstract out all irrelevant details, and to expose equivalent of flat token stream with no \"fluff\" tokens (comments, processing instructions, mixed content) all of which is just to simplify actual higher-level conversion to JSON tokens ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the state of the `XmlTokenStream` object, but does not directly handle the logic for parsing XML attributes or their text values. Given that the failure occurs in the `testXmlAttributesWithNextTextValue` method, which involves checking attribute values, it is plausible that the issue lies elsewhere in the codebase rather than in the constructor of `XmlTokenStream`. However, since the constructor sets up the initial state, there could still be subtle issues related to token initialization or state management that contribute to the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+            "method_code": "```java\n    @Override\n    protected FromXmlParser _createParser(Reader r, IOContext ctxt) throws IOException\n    {\n        XMLStreamReader sr;\n        try {\n            sr = _xmlInputFactory.createXMLStreamReader(r);\n            sr = _initializeXmlReader(sr);\n        } catch (XMLStreamException e) {\n            return StaxUtil.throwXmlAsIOException(e);\n        }\n        FromXmlParser xp = new FromXmlParser(ctxt, _generatorFeatures, _xmlGeneratorFeatures,\n                _objectCodec, sr);\n        if (_cfgNameForTextElement != null) {\n            xp.setXMLTextElementName(_cfgNameForTextElement);\n        }\n        return xp;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+            "class_doc": " Factory used for constructing {@link FromXmlParser} and {@link ToXmlGenerator} instances. <p> Implements {@link JsonFactory} since interface for constructing XML backed parsers and generators is quite similar to dealing with JSON.  ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious, as it involves creating and initializing an XML parser. However, the issue seems to be related to the handling of attributes and their text values, which is more likely to be addressed in the parser itself rather than in the factory method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)",
+            "method_code": "```java\n    protected final XMLStreamReader _initializeXmlReader(XMLStreamReader sr) throws IOException, XMLStreamException\n    {\n        // for now, nothing to do... except let's find the root element\n        while (sr.next() != XMLStreamConstants.START_ELEMENT) {\n            ;\n        }\n        return sr;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+            "class_doc": " Factory used for constructing {@link FromXmlParser} and {@link ToXmlGenerator} instances. <p> Implements {@link JsonFactory} since interface for constructing XML backed parsers and generators is quite similar to dealing with JSON.  ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The `_initializeXmlReader` method is responsible for initializing the XML reader and finding the root element, which does not directly involve handling tokens or attributes. The issue described in the test failure seems to be related to the `nextTextValue` method, which is part of the parser logic rather than the initialization process.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::XmlFactory(ObjectCodec,XMLInputFactory,XMLOutputFactory)",
+            "method_code": "```java\n    public XmlFactory(ObjectCodec oc, XMLInputFactory xmlIn, XMLOutputFactory xmlOut)\n    {\n        this(oc, DEFAULT_XML_PARSER_FEATURE_FLAGS, DEFAULT_XML_GENERATOR_FEATURE_FLAGS,\n                xmlIn, xmlOut, null);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+            "class_doc": " Factory used for constructing {@link FromXmlParser} and {@link ToXmlGenerator} instances. <p> Implements {@link JsonFactory} since interface for constructing XML backed parsers and generators is quite similar to dealing with JSON.  ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The failure in the test case is related to the handling of XML attributes and their text values, which seems to be implemented elsewhere in the codebase rather than in the constructor of the `XmlFactory` class.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 3
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)",
+            "method_code": "```java\n    public void setCurrentName(String name) {\n        _currentName = name;\n    }\n\n```",
+            "method_doc": "This method sets the current property name being processed in the XML context.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of attribute values rather than setting the current name in the context.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "2": 5,
+                "3": 3,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)",
+            "method_code": "```java\n    public XmlReadContext(XmlReadContext parent, int type, int lineNr, int colNr)\n    {\n        super();\n        _type = type;\n        _parent = parent;\n        _lineNr = lineNr;\n        _columnNr = colNr;\n        _index = -1;\n    }\n\n```",
+            "method_doc": "  Instance construction, reuse  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The provided code snippet does not contain any logic related to parsing XML attributes or handling text values. It appears to be a constructor for the `XmlReadContext` class, which is responsible for managing the context of JSON parsing. The issue described in the test failure seems to be related to the `nextTextValue()` method in the `FromXmlParser` class, not the constructor of `XmlReadContext`. Therefore, fixing the constructor alone is unlikely to resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "3": 0,
+                "5": 3
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator",
+            "class_doc": " {@link JsonGenerator} that outputs JAXB-style XML output instead of JSON content. Operation requires calling code (usually either standard Jackson serializers, or in some cases (like <code>BeanSerializer</code>) customised ones) to do additional configuration calls beyond regular {@link JsonGenerator} API, mostly to pass namespace information. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of XML attributes and their text values in the parsing process, rather than the feature collection logic in the serializer generator.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "2": 3,
+                "3": 0,
+                "4": 5,
+                "5": 3
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()",
+            "method_code": "```java\n        @Override public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "This method returns whether the feature is enabled by default, returning the value of `_defaultState`.",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator",
+            "class_doc": " {@link JsonGenerator} that outputs JAXB-style XML output instead of JSON content. Operation requires calling code (usually either standard Jackson serializers, or in some cases (like <code>BeanSerializer</code>) customised ones) to do additional configuration calls beyond regular {@link JsonGenerator} API, mostly to pass namespace information. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of XML attributes and their text values within the `FromXmlParser` class, rather than the default state of features in the `ToXmlGenerator` class.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 3,
+                "3": 0,
+                "4": 3,
+                "5": 3
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public String getCurrentName() throws IOException\n    {\n        // start markers require information from parent\n        String name;\n        if (_currToken == JsonToken.START_OBJECT || _currToken == JsonToken.START_ARRAY) {\n            XmlReadContext parent = _parsingContext.getParent();\n            name = parent.getCurrentName();\n        } else {\n            name = _parsingContext.getCurrentName();\n        }\n        // sanity check\n        if (name == null) {\n            throw new IllegalStateException(\"Missing name, in state: \"+_currToken);\n        }\n        return name;\n    }\n\n```",
+            "method_doc": " Method that can be called to get the name associated with the current event. ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+            "class_doc": " {@link JsonParser} implementation that exposes XML structure as set of JSON events that can be used for data binding. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Incorrect State Management During Parsing\n**Description:** There might be issues with state management during the parsing process, causing the parser to get stuck or return incorrect tokens when processing XML attributes and their text values. For example, the parser might not be resetting its state correctly after processing an attribute.\n\n**Location:** Potentially within the state management logic of the `FromXmlParser` class, particularly around the handling of attribute parsing.\n\n**Observation Support:** The fact that the test passed for some attributes but failed for others (`max` vs. `offset`) suggests that there might be a state-related issue that affects the parser's ability to correctly parse and return text values.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it relies on the `_parsingContext` to retrieve the current name, which could be affected by the state of the parser. However, without further context about the state management logic, it's difficult to pinpoint exactly where the issue lies.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+            "method_code": "```java\n    protected void _initFactories(XMLInputFactory xmlIn, XMLOutputFactory xmlOut)\n    {\n        // Better ensure namespaces get built properly, so:\n        xmlOut.setProperty(XMLOutputFactory.IS_REPAIRING_NAMESPACES, Boolean.TRUE);\n        // and for parser, force coalescing as well (much simpler to use)\n        xmlIn.setProperty(XMLInputFactory.IS_COALESCING, Boolean.TRUE);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+            "class_doc": " Factory used for constructing {@link FromXmlParser} and {@link ToXmlGenerator} instances. <p> Implements {@link JsonFactory} since interface for constructing XML backed parsers and generators is quite similar to dealing with JSON.  ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Inconsistent Tokenization Logic\n**Description:** There might be inconsistent logic in the tokenization process, leading to incorrect identification of tokens when parsing XML attributes and their text values. For example, the parser might be misinterpreting the sequence of tokens, causing it to skip over expected text values.\n\n**Location:** Potentially within the tokenization logic of the `FromXmlParser` class, particularly around the handling of attribute names and their corresponding text values.\n\n**Observation Support:** The fact that the test passed for some attributes but failed for others (`max` vs. `offset`) suggests that there might be a pattern or condition under which the parser fails to correctly tokenize and return text values.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it configures properties on the XML input and output factories, which could potentially affect how tokens are parsed and generated. However, the issue described seems to be related to tokenization logic rather than factory configuration.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public final String getCurrentName() { return _currentName; }\n\n```",
+            "method_doc": "  Abstract method implementation  ",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Inconsistent Tokenization Logic\n**Description:** There might be inconsistent logic in the tokenization process, leading to incorrect identification of tokens when parsing XML attributes and their text values. For example, the parser might be misinterpreting the sequence of tokens, causing it to skip over expected text values.\n\n**Location:** Potentially within the tokenization logic of the `FromXmlParser` class, particularly around the handling of attribute names and their corresponding text values.\n\n**Observation Support:** The fact that the test passed for some attributes but failed for others (`max` vs. `offset`) suggests that there might be a pattern or condition under which the parser fails to correctly tokenize and return text values.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only returns the current name of the property being processed. It does not directly handle the tokenization or parsing of XML attributes and their text values. The issue seems to be related to the way the parser handles these elements, rather than simply returning the current name.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+            "method_code": "```java\n    public static XmlReadContext createRootContext(int lineNr, int colNr) {\n        return new XmlReadContext(null, TYPE_ROOT, lineNr, colNr);\n    }\n\n```",
+            "method_doc": "Factory methods",
+            "class_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+            "class_doc": " Extension of {@link JsonStreamContext}, which implements core methods needed, and adds small amount of additional state data we need. <p> Almost same as standard <code>JsonReaderContext</code>, but custom version needed to be able to keep track of names of properties that need wrapping; this is needed to support wrapped/unwrapped Collection/array values. ",
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "test_failure_causes": "Missing Token Advance in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be missing a necessary call to advance the token stream after identifying an attribute name. Without advancing the token, the method would continue to return the same attribute name instead of moving to the next token.\n\n**Location:** Within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace indicates that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This implies that the method did not correctly advance the token stream, leading to the failure.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to the `nextTextValue()` method within the `FromXmlParser` class, not the `createRootContext(int, int)` method in the `XmlReadContext` class.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+            "method_code": "```java\n    @Override\n    public String nextTextValue() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n\n            // expected case; yes, got a String\n            if (t == JsonToken.VALUE_STRING) {\n                return _currText;\n            }\n            _updateState(t);\n            return null;\n        }\n\n        int token = _xmlTokens.next();\n\n        // mostly copied from 'nextToken()'\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            if (_mayBeLeaf) {\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                _currToken = JsonToken.START_OBJECT;\n                return null;\n            }\n            if (_parsingContext.inArray()) {\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n            _mayBeLeaf = true;\n            _currToken = JsonToken.FIELD_NAME;\n            return null;\n        }\n\n        // Ok; beyond start element, what do we get?\n        switch (token) {\n        case XmlTokenStream.XML_END_ELEMENT:\n            if (_mayBeLeaf) {\n                // NOTE: this is different from nextToken() -- produce \"\", NOT null\n                _mayBeLeaf = false;\n                _currToken = JsonToken.VALUE_STRING;\n                return (_currText = \"\");\n            }\n            _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n            _parsingContext = _parsingContext.getParent();\n            _namesToWrap = _parsingContext.getNamesToWrap();\n            break;\n        case XmlTokenStream.XML_ATTRIBUTE_NAME:\n            // If there was a chance of leaf node, no more...\n            if (_mayBeLeaf) {\n                _mayBeLeaf = false;\n                _nextToken = JsonToken.FIELD_NAME;\n                _currText = _xmlTokens.getText();\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                _currToken = JsonToken.START_OBJECT;\n            } else {\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                _currToken = JsonToken.FIELD_NAME;\n            }\n            break;\n        case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n            _currText = _xmlTokens.getText();\n            _currToken = JsonToken.VALUE_STRING;\n            break;\n        case XmlTokenStream.XML_TEXT:\n            _currText = _xmlTokens.getText();\n            if (_mayBeLeaf) {\n                _mayBeLeaf = false;\n                // Also: must skip following END_ELEMENT\n                _xmlTokens.skipEndElement();\n\n                // NOTE: this is different from nextToken() -- NO work-around\n                // for otherwise empty List/array\n                _currToken = JsonToken.VALUE_STRING;\n                return _currText;\n            }\n            // If not a leaf, need to transform into property...\n            _parsingContext.setCurrentName(_cfgNameForTextElement);\n            _nextToken = JsonToken.VALUE_STRING;\n            _currToken = JsonToken.FIELD_NAME;\n            break;\n        case XmlTokenStream.XML_END:\n            _currToken = null;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": " Method overridden to support more reliable deserialization of String collections. "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        _binaryValue = null;\n        if (_nextToken != null) {\n            JsonToken t = _nextToken;\n            _currToken = t;\n            _nextToken = null;\n            switch (t) {\n            case START_OBJECT:\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                break;\n            case START_ARRAY:\n                _parsingContext = _parsingContext.createChildArrayContext(-1, -1);\n                break;\n            case END_OBJECT:\n            case END_ARRAY:\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                break;\n            case FIELD_NAME:\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                break;\n            default: // VALUE_STRING, VALUE_NULL\n                // should be fine as is?\n            }\n            return t;\n        }\n        int token = _xmlTokens.next();\n\n        // Need to have a loop just because we may have to eat/convert\n        // a start-element that indicates an array element.\n        while (token == XmlTokenStream.XML_START_ELEMENT) {\n            // If we thought we might get leaf, no such luck\n            if (_mayBeLeaf) {\n                // leave _mayBeLeaf set, as we start a new context\n                _nextToken = JsonToken.FIELD_NAME;\n                _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                return (_currToken = JsonToken.START_OBJECT);\n            }\n            if (_parsingContext.inArray()) {\n                // Yup: in array, so this element could be verified; but it won't be\n                // reported anyway, and we need to process following event.\n                token = _xmlTokens.next();\n                _mayBeLeaf = true;\n                continue;\n            }\n            String name = _xmlTokens.getLocalName();\n            _parsingContext.setCurrentName(name);\n\n            // Ok: virtual wrapping can be done by simply repeating current START_ELEMENT.\n            // Couple of ways to do it; but start by making _xmlTokens replay the thing...\n            if (_namesToWrap != null && _namesToWrap.contains(name)) {\n                _xmlTokens.repeatStartElement();\n            }\n\n            _mayBeLeaf = true;\n            // Ok: in array context we need to skip reporting field names.\n            // But what's the best way to find next token?\n            return (_currToken = JsonToken.FIELD_NAME);\n        }\n\n        // Ok; beyond start element, what do we get?\n        while (true) {\n            switch (token) {\n            case XmlTokenStream.XML_END_ELEMENT:\n                // Simple, except that if this is a leaf, need to suppress end:\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    if (_parsingContext.inArray()) {\n                        // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                        //    expose as empty Object, not null\n                        _nextToken = JsonToken.END_OBJECT;\n                        _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                        return (_currToken = JsonToken.START_OBJECT);\n                    }\n                    return (_currToken = JsonToken.VALUE_NULL);\n                }\n                _currToken = _parsingContext.inArray() ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;\n                _parsingContext = _parsingContext.getParent();\n                _namesToWrap = _parsingContext.getNamesToWrap();\n                return _currToken;\n                \n            case XmlTokenStream.XML_ATTRIBUTE_NAME:\n                // If there was a chance of leaf node, no more...\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    _nextToken = JsonToken.FIELD_NAME;\n                    _currText = _xmlTokens.getText();\n                    _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                    return (_currToken = JsonToken.START_OBJECT);\n                }\n                _parsingContext.setCurrentName(_xmlTokens.getLocalName());\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_ATTRIBUTE_VALUE:\n                _currText = _xmlTokens.getText();\n                return (_currToken = JsonToken.VALUE_STRING);\n            case XmlTokenStream.XML_TEXT:\n                _currText = _xmlTokens.getText();\n                if (_mayBeLeaf) {\n                    _mayBeLeaf = false;\n                    // One more refinement (pronunced like \"hack\") is that if\n                    // we had an empty String (or all white space), and we are\n                    // deserializing an array, we better hide the empty text.\n                    // Also: must skip following END_ELEMENT\n                    _xmlTokens.skipEndElement();\n                    if (_parsingContext.inArray()) {\n                        if (_isEmpty(_currText)) {\n                            // 06-Jan-2015, tatu: as per [dataformat-xml#180], need to\n                            //    expose as empty Object, not null (or, worse, as used to\n                            //    be done, by swallowing the token)\n                            _nextToken = JsonToken.END_OBJECT;\n                            _parsingContext = _parsingContext.createChildObjectContext(-1, -1);\n                            return (_currToken = JsonToken.START_OBJECT);\n                        }\n                    }\n                    return (_currToken = JsonToken.VALUE_STRING);\n                } else {\n                    // [dataformat-xml#177]: empty text may also need to be skipped\n                    // but... [dataformat-xml#191]: looks like we can't short-cut, must\n                    // loop over again\n                    if (_parsingContext.inObject()) {\n                        if ((_currToken != JsonToken.FIELD_NAME) && _isEmpty(_currText)) {\n                            token = _xmlTokens.next();\n                            continue;\n                        }\n                    }\n                }\n                // If not a leaf (or otherwise ignorable), need to transform into property...\n                _parsingContext.setCurrentName(_cfgNameForTextElement);\n                _nextToken = JsonToken.VALUE_STRING;\n                return (_currToken = JsonToken.FIELD_NAME);\n            case XmlTokenStream.XML_END:\n                return (_currToken = null);\n            }\n        }\n    }\n\n```",
+            "method_doc": " @Override public JsonToken nextToken() throws IOException { JsonToken t = nextToken0(); if (t != null) { switch (t) { case FIELD_NAME: System.out.println(\"JsonToken: FIELD_NAME '\"+_parsingContext.getCurrentName()+\"'\"); break; case VALUE_STRING: System.out.println(\"JsonToken: VALUE_STRING '\"+getText()+\"'\"); break; default: System.out.println(\"JsonToken: \"+t); } } return t; }  public JsonToken nextToken0() throws IOException "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+            "method_code": "```java\n    private final int _next() throws XMLStreamException\n    {\n        switch (_currentState) {\n        case XML_ATTRIBUTE_VALUE:\n            ++_nextAttributeIndex;\n            // fall through\n        case XML_START_ELEMENT: // attributes to return?\n            if (_nextAttributeIndex < _attributeCount) {\n                _localName = _xmlReader.getAttributeLocalName(_nextAttributeIndex);\n                _namespaceURI = _xmlReader.getAttributeNamespace(_nextAttributeIndex);\n                _textValue = _xmlReader.getAttributeValue(_nextAttributeIndex);\n                return (_currentState = XML_ATTRIBUTE_NAME);\n            }\n            // otherwise need to find START/END_ELEMENT or text\n            String text = _collectUntilTag();\n            // If it's START_ELEMENT, ignore any text\n            if (_xmlReader.getEventType() == XMLStreamReader.START_ELEMENT) {\n                return _initStartElement();\n            }\n            // For END_ELEMENT we will return text, if any\n            if (text != null) {\n                _textValue = text;\n                return (_currentState = XML_TEXT);\n            }\n            return _handleEndElement();\n        case XML_ATTRIBUTE_NAME:\n            // if we just returned name, will need to just send value next\n            return (_currentState = XML_ATTRIBUTE_VALUE);\n        case XML_TEXT:\n            // text is always followed by END_ELEMENT\n            return _handleEndElement();\n        case XML_END:\n            return XML_END;\n//            throw new IllegalStateException(\"No more XML tokens available (end of input)\");\n        }\n\n        // Ok: must be END_ELEMENT; see what tag we get (or end)\n        switch (_skipUntilTag()) {\n        case XMLStreamConstants.END_DOCUMENT:\n            return (_currentState = XML_END);\n        case XMLStreamConstants.END_ELEMENT:\n            return _handleEndElement();\n        }\n        // START_ELEMENT...\n        return _initStartElement();\n    }\n\n```",
+            "method_doc": "  Internal methods, parsing  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+            "method_code": "```java\n    public int next() throws IOException \n    {\n        if (_repeatElement != 0) {\n            return (_currentState = _handleRepeatElement());\n        }\n        try {\n            return _next();\n        } catch (XMLStreamException e) {\n            StaxUtil.throwXmlAsIOException(e);\n            return -1;\n        }\n    }\n\n```",
+            "method_doc": " public int next() throws IOException  { int n = next0(); switch (n) { case XML_START_ELEMENT:  System.out.println(\" XML-token: XML_START_ELEMENT '\"+_localName+\"'\"); break; case XML_END_ELEMENT:  System.out.println(\" XML-token: XML_END_ELEMENT '\"+_localName+\"'\"); break; case XML_ATTRIBUTE_NAME:  System.out.println(\" XML-token: XML_ATTRIBUTE_NAME '\"+_localName+\"'\"); break; case XML_ATTRIBUTE_VALUE:  System.out.println(\" XML-token: XML_ATTRIBUTE_VALUE '\"+_textValue+\"'\"); break; case XML_TEXT:  System.out.println(\" XML-token: XML_TEXT '\"+_textValue+\"'\"); break; case XML_END:  System.out.println(\" XML-token: XML_END\"); break; default: throw new IllegalStateException(); } return n; } "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)",
+            "method_code": "```java\n    public XmlTokenStream(XMLStreamReader xmlReader, Object sourceRef)\n    {\n        _sourceReference = sourceRef;\n        // Let's ensure we point to START_ELEMENT...\n        if (xmlReader.getEventType() != XMLStreamConstants.START_ELEMENT) {\n            throw new IllegalArgumentException(\"Invalid XMLStreamReader passed: should be pointing to START_ELEMENT (\"\n                    +XMLStreamConstants.START_ELEMENT+\"), instead got \"+xmlReader.getEventType());\n        }\n        _xmlReader = Stax2ReaderAdapter.wrapIfNecessary(xmlReader);\n        _currentState = XML_START_ELEMENT;\n        _localName = _xmlReader.getLocalName();\n        _namespaceURI = _xmlReader.getNamespaceURI();\n        _attributeCount = _xmlReader.getAttributeCount();\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+            "method_code": "```java\n    @Override\n    protected FromXmlParser _createParser(Reader r, IOContext ctxt) throws IOException\n    {\n        XMLStreamReader sr;\n        try {\n            sr = _xmlInputFactory.createXMLStreamReader(r);\n            sr = _initializeXmlReader(sr);\n        } catch (XMLStreamException e) {\n            return StaxUtil.throwXmlAsIOException(e);\n        }\n        FromXmlParser xp = new FromXmlParser(ctxt, _generatorFeatures, _xmlGeneratorFeatures,\n                _objectCodec, sr);\n        if (_cfgNameForTextElement != null) {\n            xp.setXMLTextElementName(_cfgNameForTextElement);\n        }\n        return xp;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)",
+            "method_code": "```java\n    protected final XMLStreamReader _initializeXmlReader(XMLStreamReader sr) throws IOException, XMLStreamException\n    {\n        // for now, nothing to do... except let's find the root element\n        while (sr.next() != XMLStreamConstants.START_ELEMENT) {\n            ;\n        }\n        return sr;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlFactory::XmlFactory(ObjectCodec,XMLInputFactory,XMLOutputFactory)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::XmlFactory(ObjectCodec,XMLInputFactory,XMLOutputFactory)",
+            "method_code": "```java\n    public XmlFactory(ObjectCodec oc, XMLInputFactory xmlIn, XMLOutputFactory xmlOut)\n    {\n        this(oc, DEFAULT_XML_PARSER_FEATURE_FLAGS, DEFAULT_XML_GENERATOR_FEATURE_FLAGS,\n                xmlIn, xmlOut, null);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)",
+            "method_code": "```java\n    public void setCurrentName(String name) {\n        _currentName = name;\n    }\n\n```",
+            "method_doc": "This method sets the current property name being processed in the XML context."
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)",
+            "method_code": "```java\n    public XmlReadContext(XmlReadContext parent, int type, int lineNr, int colNr)\n    {\n        super();\n        _type = type;\n        _parent = parent;\n        _lineNr = lineNr;\n        _columnNr = colNr;\n        _index = -1;\n    }\n\n```",
+            "method_doc": "  Instance construction, reuse  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. "
+        },
+        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()",
+            "method_code": "```java\n        @Override public boolean enabledByDefault() { return _defaultState; }\n\n```",
+            "method_doc": "This method returns whether the feature is enabled by default, returning the value of `_defaultState`."
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public String getCurrentName() throws IOException\n    {\n        // start markers require information from parent\n        String name;\n        if (_currToken == JsonToken.START_OBJECT || _currToken == JsonToken.START_ARRAY) {\n            XmlReadContext parent = _parsingContext.getParent();\n            name = parent.getCurrentName();\n        } else {\n            name = _parsingContext.getCurrentName();\n        }\n        // sanity check\n        if (name == null) {\n            throw new IllegalStateException(\"Missing name, in state: \"+_currToken);\n        }\n        return name;\n    }\n\n```",
+            "method_doc": " Method that can be called to get the name associated with the current event. "
+        },
+        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+            "method_code": "```java\n    protected void _initFactories(XMLInputFactory xmlIn, XMLOutputFactory xmlOut)\n    {\n        // Better ensure namespaces get built properly, so:\n        xmlOut.setProperty(XMLOutputFactory.IS_REPAIRING_NAMESPACES, Boolean.TRUE);\n        // and for parser, force coalescing as well (much simpler to use)\n        xmlIn.setProperty(XMLInputFactory.IS_COALESCING, Boolean.TRUE);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+            "method_code": "```java\n    @Override\n    public final String getCurrentName() { return _currentName; }\n\n```",
+            "method_doc": "  Abstract method implementation  "
+        },
+        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)": {
+            "method_name": "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)",
+            "method_code": "```java\n    public static XmlReadContext createRootContext(int lineNr, int colNr) {\n        return new XmlReadContext(null, TYPE_ROOT, lineNr, colNr);\n    }\n\n```",
+            "method_doc": "Factory methods"
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.dataformat.xml.stream.XmlParserNextXxxTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Token Handling in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be incorrectly handling the transition between attribute names and their corresponding text values. Specifically, it might be failing to properly advance the token stream when encountering an attribute name followed immediately by its text value.\n\n**Location:** Likely within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify and return the text value associated with the `max` attribute.",
+                "Inconsistent Tokenization Logic\n**Description:** There might be inconsistent logic in the tokenization process, leading to incorrect identification of tokens when parsing XML attributes and their text values. For example, the parser might be misinterpreting the sequence of tokens, causing it to skip over expected text values.\n\n**Location:** Potentially within the tokenization logic of the `FromXmlParser` class, particularly around the handling of attribute names and their corresponding text values.\n\n**Observation Support:** The fact that the test passed for some attributes but failed for others (`max` vs. `offset`) suggests that there might be a pattern or condition under which the parser fails to correctly tokenize and return text values.",
+                "Missing Token Advance in `nextTextValue()`\n**Description:** The `nextTextValue()` method might be missing a necessary call to advance the token stream after identifying an attribute name. Without advancing the token, the method would continue to return the same attribute name instead of moving to the next token.\n\n**Location:** Within the implementation of `nextTextValue()` in the `FromXmlParser` class.\n\n**Observation Support:** The stack trace indicates that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This implies that the method did not correctly advance the token stream, leading to the failure.",
+                "Incorrect State Management During Parsing\n**Description:** There might be issues with state management during the parsing process, causing the parser to get stuck or return incorrect tokens when processing XML attributes and their text values. For example, the parser might not be resetting its state correctly after processing an attribute.\n\n**Location:** Potentially within the state management logic of the `FromXmlParser` class, particularly around the handling of attribute parsing.\n\n**Observation Support:** The fact that the test passed for some attributes but failed for others (`max` vs. `offset`) suggests that there might be a state-related issue that affects the parser's ability to correctly parse and return text values.",
+                "Bug in Token Type Identification\n**Description:** There might be a bug in the logic used to identify token types, specifically in distinguishing between attribute names and their corresponding text values. The parser might be incorrectly identifying certain tokens as attribute names when they are actually text values.\n\n**Location:** Within the token type identification logic of the `FromXmlParser` class.\n\n**Observation Support:** The stack trace shows that the test failed at `assertEquals(\"7\", xp.nextTextValue())`, indicating that `nextTextValue()` returned `null` instead of the expected text value `\"7\"`. This suggests that the method did not correctly identify the token type, leading to the failure."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    6.0
+                ],
+                "3": [
+                    8,
+                    6.0
+                ],
+                "4": [
+                    8,
+                    6.0
+                ],
+                "5": [
+                    8,
+                    7.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream",
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory",
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext",
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::XmlFactory(ObjectCodec,XMLInputFactory,XMLOutputFactory)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator": [
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator": [
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::createRootContext(int,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator": [
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::getCurrentName()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::getCurrentName()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator": [
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextTextValue()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.FromXmlParser::nextToken()"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::_next()",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlTokenStream::XmlTokenStream(XMLStreamReader,Object)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.XmlFactory": [
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initFactories(XMLInputFactory,XMLOutputFactory)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_createParser(Reader,IOContext)",
+                        "com.fasterxml.jackson.dataformat.xml.XmlFactory::_initializeXmlReader(XMLStreamReader)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext": [
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::setCurrentName(String)",
+                        "com.fasterxml.jackson.dataformat.xml.deser.XmlReadContext::XmlReadContext(XmlReadContext,int,int,int)"
+                    ],
+                    "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator": [
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::collectDefaults()",
+                        "com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator$Feature::enabledByDefault()"
+                    ]
+                }
+            }
+        }
+    ]
+}

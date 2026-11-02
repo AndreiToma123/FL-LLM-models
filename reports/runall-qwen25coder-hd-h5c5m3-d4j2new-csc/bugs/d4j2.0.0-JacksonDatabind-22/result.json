@@ -1,0 +1,818 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.databind.ObjectMapper",
+        "com.fasterxml.jackson.databind.module.SimpleModule",
+        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+        "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+        "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers",
+        "com.fasterxml.jackson.databind.cfg.MapperConfigBase",
+        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector",
+        "com.fasterxml.jackson.databind.ser.std.ToStringSerializer"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+            "method_code": "```java\n    @Override\n    public JsonSerializer<?> createContextual(SerializerProvider provider,\n            BeanProperty property)\n        throws JsonMappingException\n    {\n        JsonSerializer<?> ser = _valueSerializer;\n        if (ser == null) {\n            /* Can only assign serializer statically if the declared type is final:\n             * if not, we don't really know the actual type until we get the instance.\n             */\n            // 10-Mar-2010, tatu: Except if static typing is to be used\n            if (provider.isEnabled(MapperFeature.USE_STATIC_TYPING)\n                    || Modifier.isFinal(_accessorMethod.getReturnType().getModifiers())) {\n                JavaType t = provider.constructType(_accessorMethod.getGenericReturnType());\n                // false -> no need to cache\n                /* 10-Mar-2010, tatu: Ideally we would actually separate out type\n                 *   serializer from value serializer; but, alas, there's no access\n                 *   to serializer factory at this point... \n                 */\n                // 05-Sep-2013, tatu: I _think_ this can be considered a primary property...\n                ser = provider.findPrimaryPropertySerializer(t, property);\n                /* 09-Dec-2010, tatu: Turns out we must add special handling for\n                 *   cases where \"native\" (aka \"natural\") type is being serialized,\n                 *   using standard serializer\n                 */\n                boolean forceTypeInformation = isNaturalTypeWithStdHandling(t.getRawClass(), ser);\n                return withResolved(property, ser, forceTypeInformation);\n            }\n        } else {\n            // 05-Sep-2013, tatu: I _think_ this can be considered a primary property...\n            ser = provider.handlePrimaryContextualization(ser, property);\n            return withResolved(property, ser, _forceTypeInformation);\n        }\n        return this;\n    }\n\n```",
+            "method_doc": " We can try to find the actual serializer for value, if we can statically figure out what the result type must be. ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+            "class_doc": " Serializer class that can serialize Object that have a {@link com.fasterxml.jackson.annotation.JsonValue} annotation to indicate that serialization should be done by calling the method annotated, and serializing result it returns. <p> Implementation note: we will post-process resulting serializer (much like what is done with {@link BeanSerializer}) to figure out actual serializers for final types. This must be done from {@link #createContextual} method, and NOT from constructor; otherwise we could end up with an infinite loop. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for creating contextual serializers, which could potentially override the default behavior when a custom serializer is registered.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+            "method_code": "```java\n    public ObjectMapper registerModule(Module module)\n    {\n        if (isEnabled(MapperFeature.IGNORE_DUPLICATE_MODULE_REGISTRATIONS)) {\n            Object typeId = module.getTypeId();\n            if (typeId != null) {\n                if (_registeredModuleTypes == null) {\n                    _registeredModuleTypes = new HashSet<Object>();\n                }\n                // try adding; if already had it, should skip\n                if (!_registeredModuleTypes.add(typeId)) {\n                    return this;\n                }\n            }\n        }\n        \n        /* Let's ensure we have access to name and version information, \n         * even if we do not have immediate use for either. This way we know\n         * that they will be available from beginning\n         */\n        String name = module.getModuleName();\n        if (name == null) {\n            throw new IllegalArgumentException(\"Module without defined name\");\n        }\n        Version version = module.version();\n        if (version == null) {\n            throw new IllegalArgumentException(\"Module without defined version\");\n        }\n\n        final ObjectMapper mapper = this;\n        \n        // And then call registration\n        module.setupModule(new Module.SetupContext()\n        {\n            // // // Accessors\n\n            @Override\n            public Version getMapperVersion() {\n                return version();\n            }\n\n            @SuppressWarnings(\"unchecked\")\n            @Override\n            public <C extends ObjectCodec> C getOwner() {\n                // why do we need the cast here?!?\n                return (C) mapper;\n            }\n\n            @Override\n            public TypeFactory getTypeFactory() {\n                return _typeFactory;\n            }\n            \n            @Override\n            public boolean isEnabled(MapperFeature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(DeserializationFeature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            @Override\n            public boolean isEnabled(SerializationFeature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(JsonFactory.Feature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(JsonParser.Feature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            @Override\n            public boolean isEnabled(JsonGenerator.Feature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            // // // Methods for registering handlers: deserializers\n            \n            @Override\n            public void addDeserializers(Deserializers d) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAdditionalDeserializers(d);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addKeyDeserializers(KeyDeserializers d) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAdditionalKeyDeserializers(d);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addBeanDeserializerModifier(BeanDeserializerModifier modifier) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withDeserializerModifier(modifier);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n            \n            // // // Methods for registering handlers: serializers\n            \n            @Override\n            public void addSerializers(Serializers s) {\n                mapper._serializerFactory = mapper._serializerFactory.withAdditionalSerializers(s);\n            }\n\n            @Override\n            public void addKeySerializers(Serializers s) {\n                mapper._serializerFactory = mapper._serializerFactory.withAdditionalKeySerializers(s);\n            }\n            \n            @Override\n            public void addBeanSerializerModifier(BeanSerializerModifier modifier) {\n                mapper._serializerFactory = mapper._serializerFactory.withSerializerModifier(modifier);\n            }\n\n            // // // Methods for registering handlers: other\n            \n            @Override\n            public void addAbstractTypeResolver(AbstractTypeResolver resolver) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAbstractTypeResolver(resolver);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addTypeModifier(TypeModifier modifier) {\n                TypeFactory f = mapper._typeFactory;\n                f = f.withModifier(modifier);\n                mapper.setTypeFactory(f);\n            }\n\n            @Override\n            public void addValueInstantiators(ValueInstantiators instantiators) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withValueInstantiators(instantiators);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void setClassIntrospector(ClassIntrospector ci) {\n                mapper._deserializationConfig = mapper._deserializationConfig.with(ci);\n                mapper._serializationConfig = mapper._serializationConfig.with(ci);\n            }\n\n            @Override\n            public void insertAnnotationIntrospector(AnnotationIntrospector ai) {\n                mapper._deserializationConfig = mapper._deserializationConfig.withInsertedAnnotationIntrospector(ai);\n                mapper._serializationConfig = mapper._serializationConfig.withInsertedAnnotationIntrospector(ai);\n            }\n            \n            @Override\n            public void appendAnnotationIntrospector(AnnotationIntrospector ai) {\n                mapper._deserializationConfig = mapper._deserializationConfig.withAppendedAnnotationIntrospector(ai);\n                mapper._serializationConfig = mapper._serializationConfig.withAppendedAnnotationIntrospector(ai);\n            }\n\n            @Override\n            public void registerSubtypes(Class<?>... subtypes) {\n                mapper.registerSubtypes(subtypes);\n            }\n\n            @Override\n            public void registerSubtypes(NamedType... subtypes) {\n                mapper.registerSubtypes(subtypes);\n            }\n            \n            @Override\n            public void setMixInAnnotations(Class<?> target, Class<?> mixinSource) {\n                mapper.addMixIn(target, mixinSource);\n            }\n            \n            @Override\n            public void addDeserializationProblemHandler(DeserializationProblemHandler handler) {\n                mapper.addHandler(handler);\n            }\n\n            @Override\n            public void setNamingStrategy(PropertyNamingStrategy naming) {\n                mapper.setPropertyNamingStrategy(naming);\n            }\n        });\n        return this;\n    }\n\n```",
+            "method_doc": " Method for registering a module that can extend functionality provided by this mapper; for example, by adding providers for custom serializers and deserializers.  @param module Module to register ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the registration of modules, which could potentially affect the behavior of serialization and deserialization processes. However, the issue described in the test case seems to be related to the custom serializer not being applied, which might be due to incorrect setup or configuration rather than a flaw in the `registerModule` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)",
+            "method_code": "```java\n    protected DefaultSerializerProvider _serializerProvider(SerializationConfig config) {\n        return _serializerProvider.createInstance(config, _serializerFactory);\n    }\n\n```",
+            "method_doc": " Overridable helper method used for constructing {@link SerializerProvider} to use for serialization. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves the creation of a `SerializerProvider`, which could potentially affect how serializers are selected and used during serialization. However, the issue described seems to be related to the registration of a custom serializer rather than the internal workings of `_serializerProvider`. Therefore, while this method is part of the serialization process, it is less directly responsible for the observed test failure compared to the registration logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::addSerializer(Class,JsonSerializer)",
+            "method_code": "```java\n    public <T> SimpleModule addSerializer(Class<? extends T> type, JsonSerializer<T> ser)\n    {\n        if (_serializers == null) {\n            _serializers = new SimpleSerializers();\n        }\n        _serializers.addSerializer(type, ser);\n        return this;\n    }\n\n```",
+            "method_doc": "This method adds a serializer for a specific type to the module. If `_serializers` is null, it initializes a new `SimpleSerializers` object. It then adds the serializer to `_serializers` and returns the current module instance.",
+            "class_name": "com.fasterxml.jackson.databind.module.SimpleModule",
+            "class_doc": " Vanilla {@link Module} implementation that allows registration of serializers and deserializers, bean serializer and deserializer modifiers, registration of subtypes and mix-ins as well as some other commonly needed aspects (addition of custom {@link AbstractTypeResolver}s, {@link com.fasterxml.jackson.databind.deser.ValueInstantiator}s). <p> NOTE: although it is not expected that sub-types should need to override {@link #setupModule(SetupContext)} method, if they choose to do so they MUST call <code>super.setupModule(context);</code> to ensure that registration works as expected. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it appears to be responsible for adding serializers to the module. However, the issue seems to lie elsewhere in the test setup rather than in the method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)",
+            "method_code": "```java\n    @Override\n    public void setupModule(SetupContext context)\n    {\n        if (_serializers != null) {\n            context.addSerializers(_serializers);\n        }\n        if (_deserializers != null) {\n            context.addDeserializers(_deserializers);\n        }\n        if (_keySerializers != null) {\n            context.addKeySerializers(_keySerializers);\n        }\n        if (_keyDeserializers != null) {\n            context.addKeyDeserializers(_keyDeserializers);\n        }\n        if (_abstractTypes != null) {\n            context.addAbstractTypeResolver(_abstractTypes);\n        }\n        if (_valueInstantiators != null) {\n            context.addValueInstantiators(_valueInstantiators);\n        }\n        if (_deserializerModifier != null) {\n            context.addBeanDeserializerModifier(_deserializerModifier);\n        }\n        if (_serializerModifier != null) {\n            context.addBeanSerializerModifier(_serializerModifier);\n        }\n        if (_subtypes != null && _subtypes.size() > 0) {\n            context.registerSubtypes(_subtypes.toArray(new NamedType[_subtypes.size()]));\n        }\n        if (_namingStrategy != null) {\n            context.setNamingStrategy(_namingStrategy);\n        }\n        if (_mixins != null) {\n            for (Map.Entry<Class<?>,Class<?>> entry : _mixins.entrySet()) {\n                context.setMixInAnnotations(entry.getKey(), entry.getValue());\n            }\n        }\n    }\n\n```",
+            "method_doc": " Standard implementation handles registration of all configured customizations: it is important that sub-classes call this  implementation (usually before additional custom logic) if they choose to override it; otherwise customizations will not be registered. ",
+            "class_name": "com.fasterxml.jackson.databind.module.SimpleModule",
+            "class_doc": " Vanilla {@link Module} implementation that allows registration of serializers and deserializers, bean serializer and deserializer modifiers, registration of subtypes and mix-ins as well as some other commonly needed aspects (addition of custom {@link AbstractTypeResolver}s, {@link com.fasterxml.jackson.databind.deser.ValueInstantiator}s). <p> NOTE: although it is not expected that sub-types should need to override {@link #setupModule(SetupContext)} method, if they choose to do so they MUST call <code>super.setupModule(context);</code> to ensure that registration works as expected. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the registration of various customizations, including serializers. However, the issue in the test case seems to be related to the registration of a custom serializer for a specific class (`Bean838`). It's possible that the custom serializer is not being added to the context correctly, which could lead to the observed behavior.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+            "method_code": "```java\n    @Override\n    public void serialize(Object bean, JsonGenerator jgen, SerializerProvider prov) throws IOException\n    {\n        try {\n            Object value = _accessorMethod.invoke(bean);\n            if (value == null) {\n                prov.defaultSerializeNull(jgen);\n                return;\n            }\n            JsonSerializer<Object> ser = _valueSerializer;\n            if (ser == null) {\n                Class<?> c = value.getClass();\n                /* 10-Mar-2010, tatu: Ideally we would actually separate out type\n                 *   serializer from value serializer; but, alas, there's no access\n                 *   to serializer factory at this point... \n                 */\n                // let's cache it, may be needed soon again\n                ser = prov.findTypedValueSerializer(c, true, _property);\n            }\n            ser.serialize(value, jgen, prov);\n        } catch (IOException ioe) {\n            throw ioe;\n        } catch (Exception e) {\n            Throwable t = e;\n            // Need to unwrap this specific type, to see infinite recursion...\n            while (t instanceof InvocationTargetException && t.getCause() != null) {\n                t = t.getCause();\n            }\n            // Errors shouldn't be wrapped (and often can't, as well)\n            if (t instanceof Error) {\n                throw (Error) t;\n            }\n            // let's try to indicate the path best we can...\n            throw JsonMappingException.wrapWithPath(t, bean, _accessorMethod.getName() + \"()\");\n        }\n    }\n\n```",
+            "method_doc": "  Actual serialization  ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+            "class_doc": " Serializer class that can serialize Object that have a {@link com.fasterxml.jackson.annotation.JsonValue} annotation to indicate that serialization should be done by calling the method annotated, and serializing result it returns. <p> Implementation note: we will post-process resulting serializer (much like what is done with {@link BeanSerializer}) to figure out actual serializers for final types. This must be done from {@link #createContextual} method, and NOT from constructor; otherwise we could end up with an infinite loop. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the serialization logic for objects with a `@JsonValue` annotation. However, the issue described seems to be related to the registration of a custom serializer rather than the implementation details of `JsonValueSerializer`. Therefore, fixing this method alone may not resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonValueSerializer(Method valueMethod, JsonSerializer<?> ser)\n    {\n        super(valueMethod.getReturnType(), false);\n        _accessorMethod = valueMethod;\n        _valueSerializer = (JsonSerializer<Object>) ser;\n        _property = null;\n        _forceTypeInformation = true; // gets reconsidered when we are contextualized\n    }\n\n```",
+            "method_doc": " @param ser Explicit serializer to use, if caller knows it (which occurs if and only if the \"value method\" was annotated with {@link com.fasterxml.jackson.databind.annotation.JsonSerialize#using}), otherwise null ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+            "class_doc": " Serializer class that can serialize Object that have a {@link com.fasterxml.jackson.annotation.JsonValue} annotation to indicate that serialization should be done by calling the method annotated, and serializing result it returns. <p> Implementation note: we will post-process resulting serializer (much like what is done with {@link BeanSerializer}) to figure out actual serializers for final types. This must be done from {@link #createContextual} method, and NOT from constructor; otherwise we could end up with an infinite loop. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves the creation of a serializer for a method annotated with @JsonValue. However, the issue seems to stem from the registration of the custom serializer rather than the implementation details of this specific constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+            "method_code": "```java\n    @Override\n    public Class<T> handledType() { return _handledType; }\n\n```",
+            "method_doc": "  Accessors  ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+            "class_doc": " Base class used by all standard serializers, and can also be used for custom serializers (in fact, this is the recommended base class to use). Provides convenience methods for implementing {@link SchemaAware} ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue seems to be related to the registration of the custom serializer rather than the implementation of the `handledType()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected StdSerializer(Class<?> t, boolean dummy) {\n        _handledType = (Class<T>) t;\n    }\n\n```",
+            "method_doc": " Alternate constructor that is (alas!) needed to work around kinks of generic type handling ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+            "class_doc": " Base class used by all standard serializers, and can also be used for custom serializers (in fact, this is the recommended base class to use). Provides convenience methods for implementing {@link SchemaAware} ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue in the test case seems to be related to the registration of the custom serializer rather than the implementation of the `StdSerializer` constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+            "method_code": "```java\n    @SuppressWarnings(\"resource\")\n    public String writeValueAsString(Object value)\n        throws JsonProcessingException\n    {        \n        // alas, we have to pull the recycler directly here...\n        SegmentedStringWriter sw = new SegmentedStringWriter(_jsonFactory._getBufferRecycler());\n        try {\n            _configAndWriteValue(_jsonFactory.createGenerator(sw), value);\n        } catch (JsonProcessingException e) { // to support [JACKSON-758]\n            throw e;\n        } catch (IOException e) { // shouldn't really happen, but is declared as possibility so:\n            throw JsonMappingException.fromUnexpectedIOE(e);\n        }\n        return sw.getAndClear();\n    }\n\n```",
+            "method_doc": " Method that can be used to serialize any Java value as a String. Functionally equivalent to calling {@link #writeValue(Writer,Object)} with {@link java.io.StringWriter} and constructing String, but more efficient. <p> Note: prior to version 2.1, throws clause included {@link IOException}; 2.1 removed it. ",
+            "class_name": "com.fasterxml.jackson.databind.ObjectMapper",
+            "class_doc": " ObjectMapper provides functionality for reading and writing JSON, either to and from basic POJOs (Plain Old Java Objects), or to and from a general-purpose JSON Tree Model ({@link JsonNode}), as well as related functionality for performing conversions. It is also highly customizable to work both with different styles of JSON content, and to support more advanced Object concepts such as polymorphism and Object identity. <code>ObjectMapper</code> also acts as a factory for more advanced {@link ObjectReader} and {@link ObjectWriter} classes. Mapper (and {@link ObjectReader}s, {@link ObjectWriter}s it constructs) will use instances of {@link JsonParser} and {@link JsonGenerator} for implementing actual reading/writing of JSON. Note that although most read and write methods are exposed through this class, some of the functionality is only exposed via {@link ObjectReader} and {@link ObjectWriter}: specifically, reading/writing of longer sequences of values is only available through {@link ObjectReader#readValues(InputStream)} and {@link ObjectWriter#writeValues(OutputStream)}. <p> Simplest usage is of form: <pre> final ObjectMapper mapper = new ObjectMapper(); // can use static singleton, inject: just make sure to reuse! MyValue value = new MyValue(); ... and configure File newState = new File(\"my-stuff.json\"); mapper.writeValue(newState, value); // writes JSON serialization of MyValue instance or, read MyValue older = mapper.readValue(new File(\"my-older-stuff.json\"), MyValue.class);  Or if you prefer JSON Tree representation: JsonNode root = mapper.readTree(newState); and find values by, for example, using a {@link com.fasterxml.jackson.core.JsonPointer} expression: int age = root.at(\"/personal/age\").getValueAsInt();  </pre> <p> The main conversion API is defined in {@link ObjectCodec}, so that implementation details of this class need not be exposed to streaming parser and generator classes. Usage via {@link ObjectCodec} is, however, usually only for cases where dependency to {@link ObjectMapper} is either not possible (from Streaming API), or undesireable (when only relying on Streaming API). <p>  Mapper instances are fully thread-safe provided that ALL configuration of the instance occurs before ANY read or write calls. If configuration of a mapper is modified after first usage, changes may or may not take effect, and configuration calls themselves may fail. If you need to use different configuration, you have two main possibilities: <ul> <li>Construct and use {@link ObjectReader} for reading, {@link ObjectWriter} for writing. Both types are fully immutable and you can freely create new instances with different configuration using either factory methods of {@link ObjectMapper}, or readers/writers themselves. Construction of new {@link ObjectReader}s and {@link ObjectWriter}s is a very light-weight operation so it is usually appropriate to create these on per-call basis, as needed, for configuring things like optional indentation of JSON. </li> <li>If the specific kind of configurability is not available via {@link ObjectReader} and {@link ObjectWriter}, you may need to use multiple {@link ObjectMapper} instead (for example: you can not change mix-in annotations on-the-fly; or, set of custom (de)serializers). To help with this usage, you may want to use method {@link #copy()} which creates a clone of the mapper with specific configuration, and allows configuration of the copied instance before it gets used. Note that {@link #copy} operation is as expensive as constructing a new {@link ObjectMapper} instance: if possible, you should still pool and reuse mappers if you intend to use them for multiple operations. </li> </ul> <p> Note on caching: root-level deserializers are always cached, and accessed using full (generics-aware) type information. This is different from caching of referenced types, which is more limited and is done only for a subset of all deserializer types. The main reason for difference is that at root-level there is no incoming reference (and hence no referencing property, no referral information or annotations to produce differing deserializers), and that the performance impact greatest at root level (since it'll essentially cache the full graph of deserializers involved). ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue in the test case is related to the custom serializer not being registered properly, rather than a problem with the `writeValueAsString` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 2,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+            "method_code": "```java\n    protected StdSerializer(Class<T> t) {\n        _handledType = t;\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+            "class_doc": " Base class used by all standard serializers, and can also be used for custom serializers (in fact, this is the recommended base class to use). Provides convenience methods for implementing {@link SchemaAware} ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue lies in the registration of the custom serializer, not in the constructor of `StdSerializer`. The constructor initializes the handled type, which is correct.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers::all()",
+            "method_code": "```java\n    public static Collection<Map.Entry<Class<?>, Object>> all()\n    {\n        HashMap<Class<?>,Object> sers = new HashMap<Class<?>,Object>();\n\n        // First things that 'toString()' can handle\n        final ToStringSerializer sls = ToStringSerializer.instance;\n\n        sers.put(java.net.URL.class, sls);\n        sers.put(java.net.URI.class, sls);\n\n        sers.put(Currency.class, sls);\n        sers.put(UUID.class, new UUIDSerializer());\n        sers.put(java.util.regex.Pattern.class, sls);\n        sers.put(Locale.class, sls);\n\n        sers.put(Locale.class, sls);\n        \n        // then atomic types (note: AtomicReference needs better handling)\n        sers.put(AtomicBoolean.class, AtomicBooleanSerializer.class);\n        sers.put(AtomicInteger.class, AtomicIntegerSerializer.class);\n        sers.put(AtomicLong.class, AtomicLongSerializer.class);\n        \n        // then other types that need specialized serializers\n        sers.put(File.class, FileSerializer.class);\n        sers.put(Class.class, ClassSerializer.class);\n\n        // And then some stranger types... not 100% they are needed but:\n        sers.put(Void.class, NullSerializer.instance);\n        sers.put(Void.TYPE, NullSerializer.instance);\n\n        return sers.entrySet();\n    }\n\n```",
+            "method_doc": " Method called by {@link BasicSerializerFactory} to access all serializers this class provides. ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers",
+            "class_doc": " Class that providers access to serializers user for non-structured JDK types that are serializer as scalars; some using basic {@link ToStringSerializer}, others explicit serializers. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue in the test case is related to the registration of a custom serializer for the `Bean838` class, which is not being applied during serialization. The `StdJdkSerializers::all()` method does not directly involve the registration of custom serializers, so fixing it would not resolve the problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::getTypeId()",
+            "method_code": "```java\n    @Override\n    public Object getTypeId() {\n        if (getClass() == SimpleModule.class) {\n            return null;\n        }\n        return super.getTypeId();\n    }\n\n```",
+            "method_doc": " Since instances are likely to be custom, implementation returns <code>null</code> if (but only if!) this class is directly instantiated; but class name (default impl) for sub-classes. ",
+            "class_name": "com.fasterxml.jackson.databind.module.SimpleModule",
+            "class_doc": " Vanilla {@link Module} implementation that allows registration of serializers and deserializers, bean serializer and deserializer modifiers, registration of subtypes and mix-ins as well as some other commonly needed aspects (addition of custom {@link AbstractTypeResolver}s, {@link com.fasterxml.jackson.databind.deser.ValueInstantiator}s). <p> NOTE: although it is not expected that sub-types should need to override {@link #setupModule(SetupContext)} method, if they choose to do so they MUST call <code>super.setupModule(context);</code> to ensure that registration works as expected. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Version Mismatch\n**Description**: There might be a version mismatch between the Jackson library versions used in the test and the production environment.\n\n**Location**: The Jackson library versions.\n\n**Observation**: Differences in Jackson library versions could lead to unexpected behavior, including issues with custom serializers not being applied correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it returns `null` when an instance of `SimpleModule` is directly created, which might affect the behavior of custom serializers not being registered correctly.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase::findMixInClassFor(Class)",
+            "method_code": "```java\n    @Override\n    public final Class<?> findMixInClassFor(Class<?> cls) {\n        return _mixIns.findMixInClassFor(cls);\n    }\n\n```",
+            "method_doc": " Method that will check if there are \"mix-in\" classes (with mix-in annotations) for given class ",
+            "class_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Conflicting Serializers\n**Description**: There might be another serializer conflicting with the custom serializer, causing the custom serializer to be ignored.\n\n**Location**: Any other serializers registered with the `ObjectMapper`.\n\n**Observation**: If there are other serializers that also handle `Bean838`, they might take precedence over the custom serializer, leading to unexpected behavior.",
+            "score": 5.0,
+            "reason": "#5# The method `findMixInClassFor(Class)` is responsible for finding mix-in classes, which could potentially interfere with custom serializers. However, the issue described seems to be related to a conflict between serializers rather than mix-ins. Therefore, while this method might be part of the problem, it is not the most direct or likely location to fix the issue.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::collectProperties(MapperConfig,JavaType,MixInResolver,boolean,String)",
+            "method_code": "```java\n    protected POJOPropertiesCollector collectProperties(MapperConfig<?> config,\n            JavaType type, MixInResolver r, boolean forSerialization,\n            String mutatorPrefix)\n    {\n        boolean useAnnotations = config.isAnnotationProcessingEnabled();\n        AnnotatedClass ac = AnnotatedClass.construct(type.getRawClass(),\n                (useAnnotations ? config.getAnnotationIntrospector() : null), r);\n        return constructPropertyCollector(config, ac, type, forSerialization, mutatorPrefix);\n    }\n\n```",
+            "method_doc": "  Overridable helper methods  ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Classpath Issue\n**Description**: There might be a classpath issue where the custom serializer class is not being loaded correctly.\n\n**Location**: The classpath configuration.\n\n**Observation**: The assertion failure could be due to the custom serializer class not being found or loaded properly. This would prevent the custom serializer from being registered and used.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue seems to be related to the registration and usage of the custom serializer rather than the property collection process.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::constructPropertyCollector(MapperConfig,AnnotatedClass,JavaType,boolean,String)",
+            "method_code": "```java\n    protected POJOPropertiesCollector constructPropertyCollector(MapperConfig<?> config,\n            AnnotatedClass ac, JavaType type, boolean forSerialization, String mutatorPrefix)\n    {\n        return new POJOPropertiesCollector(config, forSerialization, type, ac, mutatorPrefix);\n    }\n\n```",
+            "method_doc": " Overridable method called for creating {@link POJOPropertiesCollector} instance to use; override is needed if a custom sub-class is to be used. ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Classpath Issue\n**Description**: There might be a classpath issue where the custom serializer class is not being loaded correctly.\n\n**Location**: The classpath configuration.\n\n**Observation**: The assertion failure could be due to the custom serializer class not being found or loaded properly. This would prevent the custom serializer from being registered and used.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because the error occurs due to a misconfiguration in the ObjectMapper rather than an issue within the BasicClassIntrospector's property collector construction.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.ToStringSerializer::ToStringSerializer()",
+            "method_code": "```java\n    public ToStringSerializer() { super(Object.class); }\n\n```",
+            "method_doc": " <p> Note: usually you should NOT create new instances, but instead use {@link #instance} which is stateless and fully thread-safe. However, there are cases where constructor is needed; for example, when using explicit serializer annotations like {@link com.fasterxml.jackson.databind.annotation.JsonSerialize#using}. ",
+            "class_name": "com.fasterxml.jackson.databind.ser.std.ToStringSerializer",
+            "class_doc": " Simple general purpose serializer, useful for any type for which {@link Object#toString} returns the desired JSON value. ",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Version Mismatch\n**Description**: There might be a version mismatch between the Jackson library versions used in the test and the production environment.\n\n**Location**: The Jackson library versions.\n\n**Observation**: Differences in Jackson library versions could lead to unexpected behavior, including issues with custom serializers not being applied correctly.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue in the test failure seems to be related to the custom serializer not being applied correctly, rather than a problem with the `ToStringSerializer` itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase::getFullRootName()",
+            "method_code": "```java\n    public final PropertyName getFullRootName() {\n        return _rootName;\n    }\n\n```",
+            "method_doc": " @since 2.6 ",
+            "class_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Conflicting Serializers\n**Description**: There might be another serializer conflicting with the custom serializer, causing the custom serializer to be ignored.\n\n**Location**: Any other serializers registered with the `ObjectMapper`.\n\n**Observation**: If there are other serializers that also handle `Bean838`, they might take precedence over the custom serializer, leading to unexpected behavior.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the custom serializer not being applied correctly, rather than the root name configuration.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::forSerialization(SerializationConfig,JavaType,MixInResolver)",
+            "method_code": "```java\n    @Override\n    public BasicBeanDescription forSerialization(SerializationConfig cfg,\n            JavaType type, MixInResolver r)\n    {\n        // minor optimization: for some JDK types do minimal introspection\n        BasicBeanDescription desc = _findStdTypeDesc(type);\n        if (desc == null) {\n            // As per [Databind#550], skip full introspection for some of standard\n            // structured types as well\n            desc = _findStdJdkCollectionDesc(cfg, type, r);\n            if (desc == null) {\n                desc = BasicBeanDescription.forSerialization(collectProperties(cfg,\n                        type, r, true, \"set\"));\n            }\n            // Also: this is a superset of \"forClassAnnotations\", so may optimize by optional add:\n            _cachedFCA.putIfAbsent(type, desc);\n        }\n        return desc;\n    }\n\n```",
+            "method_doc": "  Factory method impls  ",
+            "class_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "test_failure_causes": "Classpath Issue\n**Description**: There might be a classpath issue where the custom serializer class is not being loaded correctly.\n\n**Location**: The classpath configuration.\n\n**Observation**: The assertion failure could be due to the custom serializer class not being found or loaded properly. This would prevent the custom serializer from being registered and used.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the registration of the custom serializer rather than the serialization process itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+            "method_code": "```java\n    @Override\n    public JsonSerializer<?> createContextual(SerializerProvider provider,\n            BeanProperty property)\n        throws JsonMappingException\n    {\n        JsonSerializer<?> ser = _valueSerializer;\n        if (ser == null) {\n            /* Can only assign serializer statically if the declared type is final:\n             * if not, we don't really know the actual type until we get the instance.\n             */\n            // 10-Mar-2010, tatu: Except if static typing is to be used\n            if (provider.isEnabled(MapperFeature.USE_STATIC_TYPING)\n                    || Modifier.isFinal(_accessorMethod.getReturnType().getModifiers())) {\n                JavaType t = provider.constructType(_accessorMethod.getGenericReturnType());\n                // false -> no need to cache\n                /* 10-Mar-2010, tatu: Ideally we would actually separate out type\n                 *   serializer from value serializer; but, alas, there's no access\n                 *   to serializer factory at this point... \n                 */\n                // 05-Sep-2013, tatu: I _think_ this can be considered a primary property...\n                ser = provider.findPrimaryPropertySerializer(t, property);\n                /* 09-Dec-2010, tatu: Turns out we must add special handling for\n                 *   cases where \"native\" (aka \"natural\") type is being serialized,\n                 *   using standard serializer\n                 */\n                boolean forceTypeInformation = isNaturalTypeWithStdHandling(t.getRawClass(), ser);\n                return withResolved(property, ser, forceTypeInformation);\n            }\n        } else {\n            // 05-Sep-2013, tatu: I _think_ this can be considered a primary property...\n            ser = provider.handlePrimaryContextualization(ser, property);\n            return withResolved(property, ser, _forceTypeInformation);\n        }\n        return this;\n    }\n\n```",
+            "method_doc": " We can try to find the actual serializer for value, if we can statically figure out what the result type must be. "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+            "method_code": "```java\n    public ObjectMapper registerModule(Module module)\n    {\n        if (isEnabled(MapperFeature.IGNORE_DUPLICATE_MODULE_REGISTRATIONS)) {\n            Object typeId = module.getTypeId();\n            if (typeId != null) {\n                if (_registeredModuleTypes == null) {\n                    _registeredModuleTypes = new HashSet<Object>();\n                }\n                // try adding; if already had it, should skip\n                if (!_registeredModuleTypes.add(typeId)) {\n                    return this;\n                }\n            }\n        }\n        \n        /* Let's ensure we have access to name and version information, \n         * even if we do not have immediate use for either. This way we know\n         * that they will be available from beginning\n         */\n        String name = module.getModuleName();\n        if (name == null) {\n            throw new IllegalArgumentException(\"Module without defined name\");\n        }\n        Version version = module.version();\n        if (version == null) {\n            throw new IllegalArgumentException(\"Module without defined version\");\n        }\n\n        final ObjectMapper mapper = this;\n        \n        // And then call registration\n        module.setupModule(new Module.SetupContext()\n        {\n            // // // Accessors\n\n            @Override\n            public Version getMapperVersion() {\n                return version();\n            }\n\n            @SuppressWarnings(\"unchecked\")\n            @Override\n            public <C extends ObjectCodec> C getOwner() {\n                // why do we need the cast here?!?\n                return (C) mapper;\n            }\n\n            @Override\n            public TypeFactory getTypeFactory() {\n                return _typeFactory;\n            }\n            \n            @Override\n            public boolean isEnabled(MapperFeature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(DeserializationFeature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            @Override\n            public boolean isEnabled(SerializationFeature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(JsonFactory.Feature f) {\n                return mapper.isEnabled(f);\n            }\n\n            @Override\n            public boolean isEnabled(JsonParser.Feature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            @Override\n            public boolean isEnabled(JsonGenerator.Feature f) {\n                return mapper.isEnabled(f);\n            }\n            \n            // // // Methods for registering handlers: deserializers\n            \n            @Override\n            public void addDeserializers(Deserializers d) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAdditionalDeserializers(d);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addKeyDeserializers(KeyDeserializers d) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAdditionalKeyDeserializers(d);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addBeanDeserializerModifier(BeanDeserializerModifier modifier) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withDeserializerModifier(modifier);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n            \n            // // // Methods for registering handlers: serializers\n            \n            @Override\n            public void addSerializers(Serializers s) {\n                mapper._serializerFactory = mapper._serializerFactory.withAdditionalSerializers(s);\n            }\n\n            @Override\n            public void addKeySerializers(Serializers s) {\n                mapper._serializerFactory = mapper._serializerFactory.withAdditionalKeySerializers(s);\n            }\n            \n            @Override\n            public void addBeanSerializerModifier(BeanSerializerModifier modifier) {\n                mapper._serializerFactory = mapper._serializerFactory.withSerializerModifier(modifier);\n            }\n\n            // // // Methods for registering handlers: other\n            \n            @Override\n            public void addAbstractTypeResolver(AbstractTypeResolver resolver) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withAbstractTypeResolver(resolver);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void addTypeModifier(TypeModifier modifier) {\n                TypeFactory f = mapper._typeFactory;\n                f = f.withModifier(modifier);\n                mapper.setTypeFactory(f);\n            }\n\n            @Override\n            public void addValueInstantiators(ValueInstantiators instantiators) {\n                DeserializerFactory df = mapper._deserializationContext._factory.withValueInstantiators(instantiators);\n                mapper._deserializationContext = mapper._deserializationContext.with(df);\n            }\n\n            @Override\n            public void setClassIntrospector(ClassIntrospector ci) {\n                mapper._deserializationConfig = mapper._deserializationConfig.with(ci);\n                mapper._serializationConfig = mapper._serializationConfig.with(ci);\n            }\n\n            @Override\n            public void insertAnnotationIntrospector(AnnotationIntrospector ai) {\n                mapper._deserializationConfig = mapper._deserializationConfig.withInsertedAnnotationIntrospector(ai);\n                mapper._serializationConfig = mapper._serializationConfig.withInsertedAnnotationIntrospector(ai);\n            }\n            \n            @Override\n            public void appendAnnotationIntrospector(AnnotationIntrospector ai) {\n                mapper._deserializationConfig = mapper._deserializationConfig.withAppendedAnnotationIntrospector(ai);\n                mapper._serializationConfig = mapper._serializationConfig.withAppendedAnnotationIntrospector(ai);\n            }\n\n            @Override\n            public void registerSubtypes(Class<?>... subtypes) {\n                mapper.registerSubtypes(subtypes);\n            }\n\n            @Override\n            public void registerSubtypes(NamedType... subtypes) {\n                mapper.registerSubtypes(subtypes);\n            }\n            \n            @Override\n            public void setMixInAnnotations(Class<?> target, Class<?> mixinSource) {\n                mapper.addMixIn(target, mixinSource);\n            }\n            \n            @Override\n            public void addDeserializationProblemHandler(DeserializationProblemHandler handler) {\n                mapper.addHandler(handler);\n            }\n\n            @Override\n            public void setNamingStrategy(PropertyNamingStrategy naming) {\n                mapper.setPropertyNamingStrategy(naming);\n            }\n        });\n        return this;\n    }\n\n```",
+            "method_doc": " Method for registering a module that can extend functionality provided by this mapper; for example, by adding providers for custom serializers and deserializers.  @param module Module to register "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)",
+            "method_code": "```java\n    protected DefaultSerializerProvider _serializerProvider(SerializationConfig config) {\n        return _serializerProvider.createInstance(config, _serializerFactory);\n    }\n\n```",
+            "method_doc": " Overridable helper method used for constructing {@link SerializerProvider} to use for serialization. "
+        },
+        "com.fasterxml.jackson.databind.module.SimpleModule::addSerializer(Class,JsonSerializer)": {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::addSerializer(Class,JsonSerializer)",
+            "method_code": "```java\n    public <T> SimpleModule addSerializer(Class<? extends T> type, JsonSerializer<T> ser)\n    {\n        if (_serializers == null) {\n            _serializers = new SimpleSerializers();\n        }\n        _serializers.addSerializer(type, ser);\n        return this;\n    }\n\n```",
+            "method_doc": "This method adds a serializer for a specific type to the module. If `_serializers` is null, it initializes a new `SimpleSerializers` object. It then adds the serializer to `_serializers` and returns the current module instance."
+        },
+        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)": {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)",
+            "method_code": "```java\n    @Override\n    public void setupModule(SetupContext context)\n    {\n        if (_serializers != null) {\n            context.addSerializers(_serializers);\n        }\n        if (_deserializers != null) {\n            context.addDeserializers(_deserializers);\n        }\n        if (_keySerializers != null) {\n            context.addKeySerializers(_keySerializers);\n        }\n        if (_keyDeserializers != null) {\n            context.addKeyDeserializers(_keyDeserializers);\n        }\n        if (_abstractTypes != null) {\n            context.addAbstractTypeResolver(_abstractTypes);\n        }\n        if (_valueInstantiators != null) {\n            context.addValueInstantiators(_valueInstantiators);\n        }\n        if (_deserializerModifier != null) {\n            context.addBeanDeserializerModifier(_deserializerModifier);\n        }\n        if (_serializerModifier != null) {\n            context.addBeanSerializerModifier(_serializerModifier);\n        }\n        if (_subtypes != null && _subtypes.size() > 0) {\n            context.registerSubtypes(_subtypes.toArray(new NamedType[_subtypes.size()]));\n        }\n        if (_namingStrategy != null) {\n            context.setNamingStrategy(_namingStrategy);\n        }\n        if (_mixins != null) {\n            for (Map.Entry<Class<?>,Class<?>> entry : _mixins.entrySet()) {\n                context.setMixInAnnotations(entry.getKey(), entry.getValue());\n            }\n        }\n    }\n\n```",
+            "method_doc": " Standard implementation handles registration of all configured customizations: it is important that sub-classes call this  implementation (usually before additional custom logic) if they choose to override it; otherwise customizations will not be registered. "
+        },
+        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+            "method_code": "```java\n    @Override\n    public void serialize(Object bean, JsonGenerator jgen, SerializerProvider prov) throws IOException\n    {\n        try {\n            Object value = _accessorMethod.invoke(bean);\n            if (value == null) {\n                prov.defaultSerializeNull(jgen);\n                return;\n            }\n            JsonSerializer<Object> ser = _valueSerializer;\n            if (ser == null) {\n                Class<?> c = value.getClass();\n                /* 10-Mar-2010, tatu: Ideally we would actually separate out type\n                 *   serializer from value serializer; but, alas, there's no access\n                 *   to serializer factory at this point... \n                 */\n                // let's cache it, may be needed soon again\n                ser = prov.findTypedValueSerializer(c, true, _property);\n            }\n            ser.serialize(value, jgen, prov);\n        } catch (IOException ioe) {\n            throw ioe;\n        } catch (Exception e) {\n            Throwable t = e;\n            // Need to unwrap this specific type, to see infinite recursion...\n            while (t instanceof InvocationTargetException && t.getCause() != null) {\n                t = t.getCause();\n            }\n            // Errors shouldn't be wrapped (and often can't, as well)\n            if (t instanceof Error) {\n                throw (Error) t;\n            }\n            // let's try to indicate the path best we can...\n            throw JsonMappingException.wrapWithPath(t, bean, _accessorMethod.getName() + \"()\");\n        }\n    }\n\n```",
+            "method_doc": "  Actual serialization  "
+        },
+        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    public JsonValueSerializer(Method valueMethod, JsonSerializer<?> ser)\n    {\n        super(valueMethod.getReturnType(), false);\n        _accessorMethod = valueMethod;\n        _valueSerializer = (JsonSerializer<Object>) ser;\n        _property = null;\n        _forceTypeInformation = true; // gets reconsidered when we are contextualized\n    }\n\n```",
+            "method_doc": " @param ser Explicit serializer to use, if caller knows it (which occurs if and only if the \"value method\" was annotated with {@link com.fasterxml.jackson.databind.annotation.JsonSerialize#using}), otherwise null "
+        },
+        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+            "method_code": "```java\n    @Override\n    public Class<T> handledType() { return _handledType; }\n\n```",
+            "method_doc": "  Accessors  "
+        },
+        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)",
+            "method_code": "```java\n    @SuppressWarnings(\"unchecked\")\n    protected StdSerializer(Class<?> t, boolean dummy) {\n        _handledType = (Class<T>) t;\n    }\n\n```",
+            "method_doc": " Alternate constructor that is (alas!) needed to work around kinks of generic type handling "
+        },
+        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)": {
+            "method_name": "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+            "method_code": "```java\n    @SuppressWarnings(\"resource\")\n    public String writeValueAsString(Object value)\n        throws JsonProcessingException\n    {        \n        // alas, we have to pull the recycler directly here...\n        SegmentedStringWriter sw = new SegmentedStringWriter(_jsonFactory._getBufferRecycler());\n        try {\n            _configAndWriteValue(_jsonFactory.createGenerator(sw), value);\n        } catch (JsonProcessingException e) { // to support [JACKSON-758]\n            throw e;\n        } catch (IOException e) { // shouldn't really happen, but is declared as possibility so:\n            throw JsonMappingException.fromUnexpectedIOE(e);\n        }\n        return sw.getAndClear();\n    }\n\n```",
+            "method_doc": " Method that can be used to serialize any Java value as a String. Functionally equivalent to calling {@link #writeValue(Writer,Object)} with {@link java.io.StringWriter} and constructing String, but more efficient. <p> Note: prior to version 2.1, throws clause included {@link IOException}; 2.1 removed it. "
+        },
+        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+            "method_code": "```java\n    protected StdSerializer(Class<T> t) {\n        _handledType = t;\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers::all()": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers::all()",
+            "method_code": "```java\n    public static Collection<Map.Entry<Class<?>, Object>> all()\n    {\n        HashMap<Class<?>,Object> sers = new HashMap<Class<?>,Object>();\n\n        // First things that 'toString()' can handle\n        final ToStringSerializer sls = ToStringSerializer.instance;\n\n        sers.put(java.net.URL.class, sls);\n        sers.put(java.net.URI.class, sls);\n\n        sers.put(Currency.class, sls);\n        sers.put(UUID.class, new UUIDSerializer());\n        sers.put(java.util.regex.Pattern.class, sls);\n        sers.put(Locale.class, sls);\n\n        sers.put(Locale.class, sls);\n        \n        // then atomic types (note: AtomicReference needs better handling)\n        sers.put(AtomicBoolean.class, AtomicBooleanSerializer.class);\n        sers.put(AtomicInteger.class, AtomicIntegerSerializer.class);\n        sers.put(AtomicLong.class, AtomicLongSerializer.class);\n        \n        // then other types that need specialized serializers\n        sers.put(File.class, FileSerializer.class);\n        sers.put(Class.class, ClassSerializer.class);\n\n        // And then some stranger types... not 100% they are needed but:\n        sers.put(Void.class, NullSerializer.instance);\n        sers.put(Void.TYPE, NullSerializer.instance);\n\n        return sers.entrySet();\n    }\n\n```",
+            "method_doc": " Method called by {@link BasicSerializerFactory} to access all serializers this class provides. "
+        },
+        "com.fasterxml.jackson.databind.module.SimpleModule::getTypeId()": {
+            "method_name": "com.fasterxml.jackson.databind.module.SimpleModule::getTypeId()",
+            "method_code": "```java\n    @Override\n    public Object getTypeId() {\n        if (getClass() == SimpleModule.class) {\n            return null;\n        }\n        return super.getTypeId();\n    }\n\n```",
+            "method_doc": " Since instances are likely to be custom, implementation returns <code>null</code> if (but only if!) this class is directly instantiated; but class name (default impl) for sub-classes. "
+        },
+        "com.fasterxml.jackson.databind.cfg.MapperConfigBase::findMixInClassFor(Class)": {
+            "method_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase::findMixInClassFor(Class)",
+            "method_code": "```java\n    @Override\n    public final Class<?> findMixInClassFor(Class<?> cls) {\n        return _mixIns.findMixInClassFor(cls);\n    }\n\n```",
+            "method_doc": " Method that will check if there are \"mix-in\" classes (with mix-in annotations) for given class "
+        },
+        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::collectProperties(MapperConfig,JavaType,MixInResolver,boolean,String)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::collectProperties(MapperConfig,JavaType,MixInResolver,boolean,String)",
+            "method_code": "```java\n    protected POJOPropertiesCollector collectProperties(MapperConfig<?> config,\n            JavaType type, MixInResolver r, boolean forSerialization,\n            String mutatorPrefix)\n    {\n        boolean useAnnotations = config.isAnnotationProcessingEnabled();\n        AnnotatedClass ac = AnnotatedClass.construct(type.getRawClass(),\n                (useAnnotations ? config.getAnnotationIntrospector() : null), r);\n        return constructPropertyCollector(config, ac, type, forSerialization, mutatorPrefix);\n    }\n\n```",
+            "method_doc": "  Overridable helper methods  "
+        },
+        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::constructPropertyCollector(MapperConfig,AnnotatedClass,JavaType,boolean,String)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::constructPropertyCollector(MapperConfig,AnnotatedClass,JavaType,boolean,String)",
+            "method_code": "```java\n    protected POJOPropertiesCollector constructPropertyCollector(MapperConfig<?> config,\n            AnnotatedClass ac, JavaType type, boolean forSerialization, String mutatorPrefix)\n    {\n        return new POJOPropertiesCollector(config, forSerialization, type, ac, mutatorPrefix);\n    }\n\n```",
+            "method_doc": " Overridable method called for creating {@link POJOPropertiesCollector} instance to use; override is needed if a custom sub-class is to be used. "
+        },
+        "com.fasterxml.jackson.databind.ser.std.ToStringSerializer::ToStringSerializer()": {
+            "method_name": "com.fasterxml.jackson.databind.ser.std.ToStringSerializer::ToStringSerializer()",
+            "method_code": "```java\n    public ToStringSerializer() { super(Object.class); }\n\n```",
+            "method_doc": " <p> Note: usually you should NOT create new instances, but instead use {@link #instance} which is stateless and fully thread-safe. However, there are cases where constructor is needed; for example, when using explicit serializer annotations like {@link com.fasterxml.jackson.databind.annotation.JsonSerialize#using}. "
+        },
+        "com.fasterxml.jackson.databind.cfg.MapperConfigBase::getFullRootName()": {
+            "method_name": "com.fasterxml.jackson.databind.cfg.MapperConfigBase::getFullRootName()",
+            "method_code": "```java\n    public final PropertyName getFullRootName() {\n        return _rootName;\n    }\n\n```",
+            "method_doc": " @since 2.6 "
+        },
+        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::forSerialization(SerializationConfig,JavaType,MixInResolver)": {
+            "method_name": "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::forSerialization(SerializationConfig,JavaType,MixInResolver)",
+            "method_code": "```java\n    @Override\n    public BasicBeanDescription forSerialization(SerializationConfig cfg,\n            JavaType type, MixInResolver r)\n    {\n        // minor optimization: for some JDK types do minimal introspection\n        BasicBeanDescription desc = _findStdTypeDesc(type);\n        if (desc == null) {\n            // As per [Databind#550], skip full introspection for some of standard\n            // structured types as well\n            desc = _findStdJdkCollectionDesc(cfg, type, r);\n            if (desc == null) {\n                desc = BasicBeanDescription.forSerialization(collectProperties(cfg,\n                        type, r, true, \"set\"));\n            }\n            // Also: this is a superset of \"forClassAnnotations\", so may optimize by optional add:\n            _cachedFCA.putIfAbsent(type, desc);\n        }\n        return desc;\n    }\n\n```",
+            "method_doc": "  Factory method impls  "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.databind.ser.TestJsonValue",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Custom Serializer Not Registered Properly\n**Description**: The custom serializer for `Bean838` might not be registered properly with the `ObjectMapper`.\n\n**Location**: The registration of the custom serializer within the test code.\n\n**Observation**: The assertion failure indicates that the custom serializer is not being applied during serialization. This suggests that the custom serializer might not be registered correctly.",
+                "Custom Serializer Implementation Error\n**Description**: There might be an error in the implementation of the custom serializer `Bean838Serializer`.\n\n**Location**: The `Bean838Serializer` class.\n\n**Observation**: The assertion failure implies that the custom serializer is not producing the expected output. This could indicate a bug in the serializer's logic.",
+                "Conflicting Serializers\n**Description**: There might be another serializer conflicting with the custom serializer, causing the custom serializer to be ignored.\n\n**Location**: Any other serializers registered with the `ObjectMapper`.\n\n**Observation**: If there are other serializers that also handle `Bean838`, they might take precedence over the custom serializer, leading to unexpected behavior.",
+                "Classpath Issue\n**Description**: There might be a classpath issue where the custom serializer class is not being loaded correctly.\n\n**Location**: The classpath configuration.\n\n**Observation**: The assertion failure could be due to the custom serializer class not being found or loaded properly. This would prevent the custom serializer from being registered and used.",
+                "Version Mismatch\n**Description**: There might be a version mismatch between the Jackson library versions used in the test and the production environment.\n\n**Location**: The Jackson library versions.\n\n**Observation**: Differences in Jackson library versions could lead to unexpected behavior, including issues with custom serializers not being applied correctly."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    6.0
+                ],
+                "2": [
+                    8,
+                    6.0
+                ],
+                "3": [
+                    8,
+                    6.0
+                ],
+                "4": [
+                    8,
+                    6.0
+                ],
+                "5": [
+                    8,
+                    6.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.module.SimpleModule",
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+                    "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.module.SimpleModule",
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.module.SimpleModule",
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+                    "com.fasterxml.jackson.databind.cfg.MapperConfigBase"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.module.SimpleModule",
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+                    "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector",
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.databind.ObjectMapper",
+                    "com.fasterxml.jackson.databind.module.SimpleModule",
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer",
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer",
+                    "com.fasterxml.jackson.databind.ser.std.ToStringSerializer"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.module.SimpleModule": [
+                        "com.fasterxml.jackson.databind.module.SimpleModule::addSerializer(Class,JsonSerializer)",
+                        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers": [
+                        "com.fasterxml.jackson.databind.ser.std.StdJdkSerializers::all()"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)"
+                    ],
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.module.SimpleModule": [
+                        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.module.SimpleModule": [
+                        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)"
+                    ],
+                    "com.fasterxml.jackson.databind.cfg.MapperConfigBase": [
+                        "com.fasterxml.jackson.databind.cfg.MapperConfigBase::getFullRootName()",
+                        "com.fasterxml.jackson.databind.cfg.MapperConfigBase::findMixInClassFor(Class)"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.module.SimpleModule": [
+                        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)"
+                    ],
+                    "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector": [
+                        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::forSerialization(SerializationConfig,JavaType,MixInResolver)",
+                        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::collectProperties(MapperConfig,JavaType,MixInResolver,boolean,String)",
+                        "com.fasterxml.jackson.databind.introspect.BasicClassIntrospector::constructPropertyCollector(MapperConfig,AnnotatedClass,JavaType,boolean,String)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.databind.ObjectMapper": [
+                        "com.fasterxml.jackson.databind.ObjectMapper::registerModule(Module)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::writeValueAsString(Object)",
+                        "com.fasterxml.jackson.databind.ObjectMapper::_serializerProvider(SerializationConfig)"
+                    ],
+                    "com.fasterxml.jackson.databind.module.SimpleModule": [
+                        "com.fasterxml.jackson.databind.module.SimpleModule::setupModule(SetupContext)",
+                        "com.fasterxml.jackson.databind.module.SimpleModule::addSerializer(Class,JsonSerializer)",
+                        "com.fasterxml.jackson.databind.module.SimpleModule::getTypeId()"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::createContextual(SerializerProvider,BeanProperty)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::serialize(Object,JsonGenerator,SerializerProvider)",
+                        "com.fasterxml.jackson.databind.ser.std.JsonValueSerializer::JsonValueSerializer(Method,JsonSerializer)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.StdSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::handledType()",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class)",
+                        "com.fasterxml.jackson.databind.ser.std.StdSerializer::StdSerializer(Class,boolean)"
+                    ],
+                    "com.fasterxml.jackson.databind.ser.std.ToStringSerializer": [
+                        "com.fasterxml.jackson.databind.ser.std.ToStringSerializer::ToStringSerializer()"
+                    ]
+                }
+            }
+        }
+    ]
+}

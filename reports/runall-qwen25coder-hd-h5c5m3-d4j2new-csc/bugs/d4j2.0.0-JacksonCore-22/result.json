@@ -1,0 +1,975 @@
+{
+    "buggy_classes": [
+        "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+        "com.fasterxml.jackson.core.JsonParser",
+        "com.fasterxml.jackson.core.io.SerializedString",
+        "com.fasterxml.jackson.core.JsonToken",
+        "com.fasterxml.jackson.core.io.CharTypes",
+        "com.fasterxml.jackson.core.util.TextBuffer",
+        "com.fasterxml.jackson.core.filter.TokenFilterContext",
+        "com.fasterxml.jackson.core.filter.TokenFilter"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+            "method_code": "```java\n    public int getMatchCount() {\n        return _matchCount;\n    }\n\n```",
+            "method_doc": " Accessor for finding number of matches, where specific token and sub-tree starting (if structured type) are passed. ",
+            "class_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+            "class_doc": " Specialized {@link JsonParserDelegate} that allows use of {@link TokenFilter} for outputting a subset of content that is visible to caller  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 10.0,
+            "reason": "#10# This method is very likely to be the best location that need to be fixed, because it directly returns the `_matchCount` variable without incrementing it when a match is found. This would explain why the match count is always zero in the failing tests.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 10,
+                "2": 8,
+                "3": 10,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                10.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        // 23-May-2017, tatu: To be honest, code here is rather hairy and I don't like all\n        //    conditionals; and it seems odd to return `null` but NOT considering input\n        //    as closed... would love a rewrite to simplify/clear up logic here.\n        \n        // Check for _allowMultipleMatches - false and at least there is one token - which is _currToken\n        // check for no buffered context _exposedContext - null\n        // If all the conditions matches then check for scalar / non-scalar property\n\n        if (!_allowMultipleMatches && (_currToken != null) && (_exposedContext == null)) {\n            // if scalar, and scalar not present in obj/array and !includePath and INCLUDE_ALL\n            // matched once, return null\n            if (_currToken.isScalarValue() && !_headContext.isStartHandled() && !_includePath\n                    && (_itemFilter == TokenFilter.INCLUDE_ALL)) {\n                return (_currToken = null);\n            }\n        }\n        // Anything buffered?\n        TokenFilterContext ctxt = _exposedContext;\n\n        if (ctxt != null) {\n            while (true) {\n                JsonToken t = ctxt.nextTokenToRead();\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n                // all done with buffered stuff?\n                if (ctxt == _headContext) {\n                    _exposedContext = null;\n                    if (ctxt.inArray()) {\n                        t = delegate.getCurrentToken();\n// Is this guaranteed to work without further checks?\n//                        if (t != JsonToken.START_ARRAY) {\n                        _currToken = t;\n                        return t;\n                    }\n\n                    // Almost! Most likely still have the current token;\n                    // with the sole exception of \n                    /*\n                    t = delegate.getCurrentToken();\n                    if (t != JsonToken.FIELD_NAME) {\n                        _currToken = t;\n                        return t;\n                    }\n                    */\n                    break;\n                }\n                // If not, traverse down the context chain\n                ctxt = _headContext.findChildOf(ctxt);\n                _exposedContext = ctxt;\n                if (ctxt == null) { // should never occur\n                    throw _constructError(\"Unexpected problem: chain of filtered context broken\");\n                }\n            }\n        }\n\n        // If not, need to read more. If we got any:\n        JsonToken t = delegate.nextToken();\n        if (t == null) {\n            // no strict need to close, since we have no state here\n            _currToken = t;\n            return t;\n        }\n\n        // otherwise... to include or not?\n        TokenFilter f;\n        \n        switch (t.id()) {\n        case ID_START_ARRAY:\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildArrayContext(f, true);\n                return (_currToken = t);\n            }\n            if (f == null) { // does this occur?\n                delegate.skipChildren();\n                break;\n            }\n            // Otherwise still iffy, need to check\n            f = _headContext.checkValue(f);\n            if (f == null) {\n                delegate.skipChildren();\n                break;\n            }\n            if (f != TokenFilter.INCLUDE_ALL) {\n                f = f.filterStartArray();\n            }\n            _itemFilter = f;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildArrayContext(f, true);\n                return (_currToken = t);\n            }\n            _headContext = _headContext.createChildArrayContext(f, false);\n            \n            // Also: only need buffering if parent path to be included\n            if (_includePath) {\n                t = _nextTokenWithBuffering(_headContext);\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n            }\n            break;\n\n        case ID_START_OBJECT:\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildObjectContext(f, true);\n                return (_currToken = t);\n            }\n            if (f == null) { // does this occur?\n                delegate.skipChildren();\n                break;\n            }\n            // Otherwise still iffy, need to check\n            f = _headContext.checkValue(f);\n            if (f == null) {\n                delegate.skipChildren();\n                break;\n            }\n            if (f != TokenFilter.INCLUDE_ALL) {\n                f = f.filterStartObject();\n            }\n            _itemFilter = f;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildObjectContext(f, true);\n                return (_currToken = t);\n            }\n            _headContext = _headContext.createChildObjectContext(f, false);\n            // Also: only need buffering if parent path to be included\n            if (_includePath) {\n                t = _nextTokenWithBuffering(_headContext);\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n            }\n            // note: inclusion of surrounding Object handled separately via\n            // FIELD_NAME\n            break;\n\n        case ID_END_ARRAY:\n        case ID_END_OBJECT:\n            {\n                boolean returnEnd = _headContext.isStartHandled();\n                f = _headContext.getFilter();\n                if ((f != null) && (f != TokenFilter.INCLUDE_ALL)) {\n                    f.filterFinishArray();\n                }\n                _headContext = _headContext.getParent();\n                _itemFilter = _headContext.getFilter();\n                if (returnEnd) {\n                    return (_currToken = t);\n                }\n            }\n            break;\n\n        case ID_FIELD_NAME:\n            {\n                final String name = delegate.getCurrentName();\n                // note: this will also set 'needToHandleName'\n                f = _headContext.setFieldName(name);\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _itemFilter = f;\n                    if (!_includePath) {\n                        // Minor twist here: if parent NOT included, may need to induce output of\n                        // surrounding START_OBJECT/END_OBJECT\n                        if (_includeImmediateParent && !_headContext.isStartHandled()) {\n                            t = _headContext.nextTokenToRead(); // returns START_OBJECT but also marks it handled\n                            _exposedContext = _headContext;\n                        }\n                    }\n                    return (_currToken = t);\n                }\n                if (f == null) {\n                    delegate.nextToken();\n                    delegate.skipChildren();\n                    break;\n                }\n                f = f.includeProperty(name);\n                if (f == null) {\n                    delegate.nextToken();\n                    delegate.skipChildren();\n                    break;\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    if (_includePath) {\n                        return (_currToken = t);\n                    }\n                }\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                break;\n            }\n\n        default: // scalar value\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                return (_currToken = t);\n            }\n            if (f != null) {\n                f = _headContext.checkValue(f);\n                if ((f == TokenFilter.INCLUDE_ALL)\n                        || ((f != null) && f.includeValue(delegate))) {\n                        return (_currToken = t);\n                }\n            }\n            // Otherwise not included (leaves must be explicitly included)\n            break;\n        }\n\n        // We get here if token was not yet found; offlined handling\n        return _nextToken2();\n    }\n\n```",
+            "method_doc": "  Public API, traversal  ",
+            "class_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+            "class_doc": " Specialized {@link JsonParserDelegate} that allows use of {@link TokenFilter} for outputting a subset of content that is visible to caller  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the token filtering logic, including the incrementation of the match count. The failure in these tests indicates that the match count is not being updated correctly, suggesting a bug in the logic within this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()",
+            "method_code": "```java\n    protected final JsonToken _nextToken2() throws IOException\n    {\n        main_loop:\n        while (true) {\n            JsonToken t = delegate.nextToken();\n            if (t == null) { // is this even legal?\n                _currToken = t;\n                return t;\n            }\n            TokenFilter f;\n\n            switch (t.id()) {\n            case ID_START_ARRAY:\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildArrayContext(f, true);\n                    return (_currToken = t);\n                }\n                if (f == null) { // does this occur?\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                // Otherwise still iffy, need to check\n                f = _headContext.checkValue(f);\n                if (f == null) {\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                if (f != TokenFilter.INCLUDE_ALL) {\n                    f = f.filterStartArray();\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildArrayContext(f, true);\n                    return (_currToken = t);\n                }\n                _headContext = _headContext.createChildArrayContext(f, false);\n                // but if we didn't figure it out yet, need to buffer possible events\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                continue main_loop;\n\n            case ID_START_OBJECT:\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildObjectContext(f, true);\n                    return (_currToken = t);\n                }\n                if (f == null) { // does this occur?\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                // Otherwise still iffy, need to check\n                f = _headContext.checkValue(f);\n                if (f == null) {\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                if (f != TokenFilter.INCLUDE_ALL) {\n                    f = f.filterStartObject();\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildObjectContext(f, true);\n                    return (_currToken = t);\n                }\n                _headContext = _headContext.createChildObjectContext(f, false);\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                continue main_loop;\n\n            case ID_END_ARRAY:\n            case ID_END_OBJECT:\n                {\n                    boolean returnEnd = _headContext.isStartHandled();\n                    f = _headContext.getFilter();\n                    if ((f != null) && (f != TokenFilter.INCLUDE_ALL)) {\n                        f.filterFinishArray();\n                    }\n                    _headContext = _headContext.getParent();\n                    _itemFilter = _headContext.getFilter();\n                    if (returnEnd) {\n                        return (_currToken = t);\n                    }\n                }\n                continue main_loop;\n\n            case ID_FIELD_NAME:\n                {\n                    final String name = delegate.getCurrentName();\n                    f = _headContext.setFieldName(name);\n                    if (f == TokenFilter.INCLUDE_ALL) {\n                        _itemFilter = f;\n                        return (_currToken = t);\n                    }\n                    if (f == null) { // filter out the value\n                        delegate.nextToken();\n                        delegate.skipChildren();\n                        continue main_loop;\n                    }\n                    f = f.includeProperty(name);\n                    if (f == null) { // filter out the value\n                        delegate.nextToken();\n                        delegate.skipChildren();\n                        continue main_loop;\n                    }\n                    _itemFilter = f;\n                    if (f == TokenFilter.INCLUDE_ALL) {\n                        if (_includePath) {\n                            return (_currToken = t);\n                        }\n//                        if (_includeImmediateParent) { ...\n                        continue main_loop;\n                    }\n                    if (_includePath) {\n                        t = _nextTokenWithBuffering(_headContext);\n                        if (t != null) {\n                            _currToken = t;\n                            return t;\n                        }\n                    }\n                }\n                continue main_loop;\n\n            default: // scalar value\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    return (_currToken = t);\n                }\n                if (f != null) {\n                    f = _headContext.checkValue(f);\n                    if ((f == TokenFilter.INCLUDE_ALL)\n                            || ((f != null) && f.includeValue(delegate))) {\n                            return (_currToken = t);\n                    }\n                }\n                // Otherwise not included (leaves must be explicitly included)\n                break;\n            }\n        }\n    }\n\n```",
+            "method_doc": " Offlined handling for cases where there was no buffered token to return, and the token read next could not be returned as-is, at least not yet, but where we have not yet established that buffering is needed. ",
+            "class_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+            "class_doc": " Specialized {@link JsonParserDelegate} that allows use of {@link TokenFilter} for outputting a subset of content that is visible to caller  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the core logic of token filtering and parsing. The failure in the test cases indicates that the match count is not being updated correctly, which is a critical part of the functionality provided by this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+            "method_code": "```java\n    protected JsonParser() { }\n\n```",
+            "method_doc": "  Construction, configuration, initialization  ",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the implementation of the `FilteringParserDelegate` class rather than the constructor of `JsonParser`. The constructor is responsible for initializing the parser, which does not directly involve counting matches.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+            "method_code": "```java\n    protected JsonParser(int features) { _features = features; }\n\n```",
+            "method_doc": "This constructor initializes a new `JsonParser` instance with specified features. It sets the `_features` field to the provided value.",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the `FilteringParserDelegate` class rather than the `JsonParser` constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. ",
+            "class_name": "com.fasterxml.jackson.core.JsonParser",
+            "class_doc": " Base class that defines public API for reading JSON content. Instances are created using factory methods of a {@link JsonFactory} instance.  ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the implementation of the `FilteringParserDelegate` class rather than the `collectDefaults()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)",
+            "method_code": "```java\n    public SerializedString(String v) {\n        if (v == null) {\n            throw new IllegalStateException(\"Null String illegal for SerializedString\");\n        }\n        _value = v;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `SerializedString` with the provided non-null string value. If the input string is null, it throws an `IllegalStateException`.",
+            "class_name": "com.fasterxml.jackson.core.io.SerializedString",
+            "class_doc": " String token that can lazily serialize String contained and then reuse that serialization later on. This is similar to JDBC prepared statements, for example, in that instances should only be created when they are used more than use; prime candidates are various serializers. <p> Class is final for performance reasons and since this is not designed to be extensible or customizable (customizations would occur in calling code) ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the `FilteringParserDelegate` class's implementation of the `getMatchCount()` method, rather than the `SerializedString` constructor.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::getValue()",
+            "method_code": "```java\n    @Override\n    public final String getValue() { return _value; }\n\n```",
+            "method_doc": "  API  ",
+            "class_name": "com.fasterxml.jackson.core.io.SerializedString",
+            "class_doc": " String token that can lazily serialize String contained and then reuse that serialization later on. This is similar to JDBC prepared statements, for example, in that instances should only be created when they are used more than use; prime candidates are various serializers. <p> Class is final for performance reasons and since this is not designed to be extensible or customizable (customizations would occur in calling code) ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the `FilteringParserDelegate` class's implementation of the `getMatchCount()` method, rather than the `SerializedString::getValue()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonToken::id()",
+            "method_code": "```java\n    public final int id() { return _id; }\n\n```",
+            "method_doc": "Returns the ID of the JSON token.",
+            "class_name": "com.fasterxml.jackson.core.JsonToken",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to lie within the `FilteringParserDelegate` class rather than the `JsonToken::id()` method. The `id()` method simply returns the ID of the JSON token and does not directly impact the match counting logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.JsonToken::isScalarValue()",
+            "method_code": "```java\n    public final boolean isScalarValue() { return _isScalar; }\n\n```",
+            "method_doc": " Method that can be used to check whether this token represents a valid non-structured value. This means all tokens other than Object/Array start/end markers all field names. ",
+            "class_name": "com.fasterxml.jackson.core.JsonToken",
+            "class_doc": "",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to lie in the `FilteringParserDelegate` class rather than the `JsonToken::isScalarValue()` method. The `isScalarValue()` method simply checks if the current token is a scalar value, which does not directly affect the match counting logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextBuffered(TokenFilterContext)",
+            "method_code": "```java\n    private JsonToken _nextBuffered(TokenFilterContext buffRoot) throws IOException\n    {\n        _exposedContext = buffRoot;\n        TokenFilterContext ctxt = buffRoot;\n        JsonToken t = ctxt.nextTokenToRead();\n        if (t != null) {\n            return t;\n        }\n        while (true) {\n            // all done with buffered stuff?\n            if (ctxt == _headContext) {\n                throw _constructError(\"Internal error: failed to locate expected buffered tokens\");\n                /*\n                _exposedContext = null;\n                break;\n                */\n            }\n            // If not, traverse down the context chain\n            ctxt = _exposedContext.findChildOf(ctxt);\n            _exposedContext = ctxt;\n            if (ctxt == null) { // should never occur\n                throw _constructError(\"Unexpected problem: chain of filtered context broken\");\n            }\n            t = _exposedContext.nextTokenToRead();\n            if (t != null) {\n                return t;\n            }\n        }\n    }\n\n```",
+            "method_doc": "This method continues reading buffered tokens until a valid token is found. It calls `_nextTokenToRead()` repeatedly.",
+            "class_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+            "class_doc": " Specialized {@link JsonParserDelegate} that allows use of {@link TokenFilter} for outputting a subset of content that is visible to caller  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Filter Logic Not Applying Correctly\n**Description:** The filter logic itself might not be applying correctly to the JSON data. This could result in matches not being detected even though they exist.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the logic that determines whether a value should be included based on the filter criteria.\n\n**Observation:** Tests like `testSingleMatchFilteringWithPath` and `testAllowMultipleMatchesWithoutPath` expect specific keys to be matched, but no matches are found. This indicates that the filter logic might be missing some matches or not functioning as intended.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for continuing to read buffered tokens until a valid token is found. Given that the tests are failing due to incorrect match detection, there is a high likelihood that the issue lies within the logic of identifying and processing these tokens.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::checkValue(TokenFilter)",
+            "method_code": "```java\n    public TokenFilter checkValue(TokenFilter filter) {\n        // First, checks for Object properties have been made earlier:\n        if (_type == TYPE_OBJECT) {\n            return filter;\n        }\n        // We increase it first because at the beginning of array, value is -1\n        int ix = ++_index;\n        if (_type == TYPE_ARRAY) {\n            return filter.includeElement(ix);\n        }\n        return filter.includeRootValue(ix);\n    }\n\n```",
+            "method_doc": " Method called to check whether value is to be included at current output position, either as Object property, Array element, or root value. ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilterContext",
+            "class_doc": " Alternative variant of {@link JsonStreamContext}, used when filtering content being read or written (based on {@link TokenFilter}).  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly interacts with the filtering logic and determines whether values should be included in the output. The issue observed in the test cases suggests that there might be an error in how the path inclusion logic is implemented within this method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::includeValue(JsonParser)",
+            "method_code": "```java\n    public boolean includeValue(JsonParser p) throws IOException {\n        return _includeScalar();\n    }\n\n```",
+            "method_doc": " Call made when verifying whether a scaler value is being read from a parser. <p> Default action is to call <code>_includeScalar()</code> and return whatever it indicates. ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilter",
+            "class_doc": " Strategy class that can be implemented to specify actual inclusion/exclusion criteria for filtering, used by {@link FilteringGeneratorDelegate}.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Filter Logic Not Applying Correctly\n**Description:** The filter logic itself might not be applying correctly to the JSON data. This could result in matches not being detected even though they exist.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the logic that determines whether a value should be included based on the filter criteria.\n\n**Observation:** Tests like `testSingleMatchFilteringWithPath` and `testAllowMultipleMatchesWithoutPath` expect specific keys to be matched, but no matches are found. This indicates that the filter logic might be missing some matches or not functioning as intended.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly controls whether a scalar value is included in the filtered output. Given that the tests are failing due to incorrect match counts, it's reasonable to suspect that the logic within this method is not handling the filtering criteria as expected.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::resetWithShared(char[],int,int)",
+            "method_code": "```java\n    public void resetWithShared(char[] buf, int start, int len)\n    {\n        // First, let's clear intermediate values, if any:\n        _resultString = null;\n        _resultArray = null;\n\n        // Then let's mark things we need about input buffer\n        _inputBuffer = buf;\n        _inputStart = start;\n        _inputLen = len;\n\n        // And then reset internal input buffers, if necessary:\n        if (_hasSegments) {\n            clearSegments();\n        }\n    }\n\n```",
+            "method_doc": " Method called to initialize the buffer with a shared copy of data; this means that buffer will just have pointers to actual data. It also means that if anything is to be appended to the buffer, it will first have to unshare it (make a local copy). ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Inconsistent Handling of Multiple Matches\n**Description:** There might be an inconsistency in how the `FilteringParserDelegate` handles multiple matches when `multipleMatches` is set to `true`. Specifically, it could be failing to properly track or return the count of multiple matches.\n\n**Location:** Within the `FilteringParserDelegate` class, particularly in the logic that processes matches when `multipleMatches` is enabled.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect multiple matches to be counted, but the actual count is zero. This indicates a potential flaw in how multiple matches are being processed.",
+            "score": 6.0,
+            "reason": "#6# The method `resetWithShared(char[],int,int)` is responsible for initializing the buffer with a shared copy of data. Given that the issue seems to be related to inconsistent handling of multiple matches, it is plausible that the problem lies within the way the buffer is managed or reset during the filtering process. However, since the method itself does not directly handle match counting, further investigation into how the buffer interacts with the `FilteringParserDelegate` would be necessary to pinpoint the exact cause.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::size()",
+            "method_code": "```java\n    public int size() {\n        if (_inputStart >= 0) { // shared copy from input buf\n            return _inputLen;\n        }\n        if (_resultArray != null) {\n            return _resultArray.length;\n        }\n        if (_resultString != null) {\n            return _resultString.length();\n        }\n        // local segmented buffers\n        return _segmentSize + _currentSize;\n    }\n\n```",
+            "method_doc": " @return Number of characters currently stored by this collector ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Issue with `readAndWrite` Method\n**Description:** The `readAndWrite` method used to convert the filtered JSON back into a string might be causing issues. It could be misinterpreting the filtered JSON or not accurately reflecting the match count.\n\n**Location:** Within the `readAndWrite` method or related classes/methods.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testSingleMatchFilteringWithPath` expect specific outputs, but the actual output does not match the expected results. This suggests that there might be an issue with how the filtered JSON is being handled or converted back into a string.\n\nThese hypotheses collectively address the core issue of incorrect match counts across multiple tests, covering potential flaws in match counting, filter logic, path handling, and the conversion of filtered JSON back into strings.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it returns the length of the buffer, which might not directly relate to the number of matches found during filtering. However, since the failure is in the assertion of match counts, it's plausible that the size of the buffer affects how matches are counted or reported.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::getTextBuffer()",
+            "method_code": "```java\n    public char[] getTextBuffer()\n    {\n        // Are we just using shared input buffer?\n        if (_inputStart >= 0) return _inputBuffer;\n        if (_resultArray != null)  return _resultArray;\n        if (_resultString != null) {\n            return (_resultArray = _resultString.toCharArray());\n        }\n        // Nope; but does it fit in just one segment?\n        if (!_hasSegments) {\n            return (_currentSegment == null) ? NO_CHARS : _currentSegment;\n        }\n        // Nope, need to have/create a non-segmented array and return it\n        return contentsAsArray();\n    }\n\n```",
+            "method_doc": " Accessor that may be used to get the contents of this buffer in a single <code>char</code> array regardless of whether they were collected in a segmented fashion or not. ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Issue with `readAndWrite` Method\n**Description:** The `readAndWrite` method used to convert the filtered JSON back into a string might be causing issues. It could be misinterpreting the filtered JSON or not accurately reflecting the match count.\n\n**Location:** Within the `readAndWrite` method or related classes/methods.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testSingleMatchFilteringWithPath` expect specific outputs, but the actual output does not match the expected results. This suggests that there might be an issue with how the filtered JSON is being handled or converted back into a string.\n\nThese hypotheses collectively address the core issue of incorrect match counts across multiple tests, covering potential flaws in match counting, filter logic, path handling, and the conversion of filtered JSON back into strings.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it returns different types of data (char[], String), which could lead to inconsistencies in how the filtered JSON is handled and converted back into a string.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::isStartHandled()",
+            "method_code": "```java\n    public boolean isStartHandled() { return _startHandled; }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilterContext",
+            "class_doc": " Alternative variant of {@link JsonStreamContext}, used when filtering content being read or written (based on {@link TokenFilter}).  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only indicates whether the start of a token has been handled, which does not directly affect the match count calculation.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::nextTokenToRead()",
+            "method_code": "```java\n    public JsonToken nextTokenToRead() {\n        if (!_startHandled) {\n            _startHandled = true;\n            if (_type == TYPE_OBJECT) {\n                return JsonToken.START_OBJECT;\n            }\n            // Note: root should never be unhandled\n            return JsonToken.START_ARRAY;\n        }\n        // But otherwise at most might have FIELD_NAME\n        if (_needToHandleName && (_type == TYPE_OBJECT)) {\n            _needToHandleName = false;\n            return JsonToken.FIELD_NAME;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilterContext",
+            "class_doc": " Alternative variant of {@link JsonStreamContext}, used when filtering content being read or written (based on {@link TokenFilter}).  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles token reading logic, which could indirectly affect the match counting mechanism in the `FilteringParserDelegate`. However, it's unlikely to be the direct cause of the issue since it primarily deals with token types rather than specific filter conditions.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::TokenFilterContext(int,TokenFilterContext,TokenFilter,boolean)",
+            "method_code": "```java\n    protected TokenFilterContext(int type, TokenFilterContext parent,\n            TokenFilter filter, boolean startHandled)\n    {\n        super();\n        _type = type;\n        _parent = parent;\n        _filter = filter;\n        _index = -1;\n        _startHandled = startHandled;\n        _needToHandleName = false;\n    }\n\n```",
+            "method_doc": "  Life-cycle  ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilterContext",
+            "class_doc": " Alternative variant of {@link JsonStreamContext}, used when filtering content being read or written (based on {@link TokenFilter}).  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Filter Logic Not Applying Correctly\n**Description:** The filter logic itself might not be applying correctly to the JSON data. This could result in matches not being detected even though they exist.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the logic that determines whether a value should be included based on the filter criteria.\n\n**Observation:** Tests like `testSingleMatchFilteringWithPath` and `testAllowMultipleMatchesWithoutPath` expect specific keys to be matched, but no matches are found. This indicates that the filter logic might be missing some matches or not functioning as intended.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only initializes the context and does not directly handle the filtering logic. The issue seems to lie within the `FilteringParserDelegate` class where the actual filtering logic is applied.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::reset(int,TokenFilter,boolean)",
+            "method_code": "```java\n    protected TokenFilterContext reset(int type,\n            TokenFilter filter, boolean startWritten)\n    {\n        _type = type;\n        _filter = filter;\n        _index = -1;\n        _currentName = null;\n        _startHandled = startWritten;\n        _needToHandleName = false;\n        return this;\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilterContext",
+            "class_doc": " Alternative variant of {@link JsonStreamContext}, used when filtering content being read or written (based on {@link TokenFilter}).  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Filter Logic Not Applying Correctly\n**Description:** The filter logic itself might not be applying correctly to the JSON data. This could result in matches not being detected even though they exist.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the logic that determines whether a value should be included based on the filter criteria.\n\n**Observation:** Tests like `testSingleMatchFilteringWithPath` and `testAllowMultipleMatchesWithoutPath` expect specific keys to be matched, but no matches are found. This indicates that the filter logic might be missing some matches or not functioning as intended.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only resets the context variables and does not directly involve the filtering logic. The issue seems to lie within the `FilteringParserDelegate` class where the actual filtering decisions are made.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterStartObject()",
+            "method_code": "```java\n    public TokenFilter filterStartObject() {\n        return this;\n    }\n\n```",
+            "method_doc": " Method called to check whether Object value at current output location should be included in output. Three kinds of return values may be used as follows: <ul> <li><code>null</code> to indicate that the Object should be skipped </li> <li>{@link #INCLUDE_ALL} to indicate that the Object should be included completely in output </li> <li>Any other {@link TokenFilter} implementation (possibly this one) to mean that further inclusion calls on return filter object need to be made on contained properties, as necessary. {@link #filterFinishObject()} will also be called on returned filter object </li> </ul> <p> Default implementation returns <code>this</code>, which means that checks are made recursively for properties of the Object to determine possible inclusion.  @return TokenFilter to use for further calls within Array, unless return value is <code>null</code> or {@link #INCLUDE_ALL} (which have simpler semantics) ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilter",
+            "class_doc": " Strategy class that can be implemented to specify actual inclusion/exclusion criteria for filtering, used by {@link FilteringGeneratorDelegate}.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns 'this', indicating that further checks are needed for properties of the Object. However, the issue seems to lie elsewhere in the path inclusion logic rather than in this method itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterStartArray()",
+            "method_code": "```java\n    public TokenFilter filterStartArray() {\n        return this;\n    }\n\n```",
+            "method_doc": " Method called to check whether Array value at current output location should be included in output. Three kinds of return values may be used as follows: <ul> <li><code>null</code> to indicate that the Array should be skipped </li> <li>{@link #INCLUDE_ALL} to indicate that the Array should be included completely in output </li> <li>Any other {@link TokenFilter} implementation (possibly this one) to mean that further inclusion calls on return filter object need to be made on contained element values, as necessary. {@link #filterFinishArray()} will also be called on returned filter object </li> </ul> <p> Default implementation returns <code>this</code>, which means that checks are made recursively for elements of the array to determine possible inclusion.  @return TokenFilter to use for further calls within Array, unless return value is <code>null</code> or {@link #INCLUDE_ALL} (which have simpler semantics) ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilter",
+            "class_doc": " Strategy class that can be implemented to specify actual inclusion/exclusion criteria for filtering, used by {@link FilteringGeneratorDelegate}.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns 'this', indicating that further checks are needed for elements within the array. However, the issue seems to lie elsewhere in the path inclusion logic rather than in this specific method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterFinishArray()",
+            "method_code": "```java\n    public void filterFinishArray() { }\n\n```",
+            "method_doc": " Method called to indicate that output of non-filtered Array (one that may have been included either completely, or in part) is completed, in cases where filter other that {@link #INCLUDE_ALL} was returned. This occurs when {@link JsonGenerator#writeEndArray()} is called. ",
+            "class_name": "com.fasterxml.jackson.core.filter.TokenFilter",
+            "class_doc": " Strategy class that can be implemented to specify actual inclusion/exclusion criteria for filtering, used by {@link FilteringGeneratorDelegate}.  @since 2.6 ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it does not directly handle the match counting or path inclusion logic. The issue seems to be related to how the path inclusion logic is implemented within the `FilteringParserDelegate` class.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+            "method_code": "```java\n    public void releaseBuffers()\n    {\n        if (_allocator == null) {\n            resetWithEmpty();\n        } else {\n            if (_currentSegment != null) {\n                // First, let's get rid of all but the largest char array\n                resetWithEmpty();\n                // And then return that array\n                char[] buf = _currentSegment;\n                _currentSegment = null;\n                _allocator.releaseCharBuffer(BufferRecycler.CHAR_TEXT_BUFFER, buf);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to indicate that the underlying buffers should now be recycled if they haven't yet been recycled. Although caller can still use this text buffer, it is not advisable to call this method if that is likely, since next time a buffer is needed, buffers need to reallocated. Note: calling this method automatically also clears contents of the buffer. ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Inconsistent Handling of Multiple Matches\n**Description:** There might be an inconsistency in how the `FilteringParserDelegate` handles multiple matches when `multipleMatches` is set to `true`. Specifically, it could be failing to properly track or return the count of multiple matches.\n\n**Location:** Within the `FilteringParserDelegate` class, particularly in the logic that processes matches when `multipleMatches` is enabled.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect multiple matches to be counted, but the actual count is zero. This indicates a potential flaw in how multiple matches are being processed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to lie within the handling of multiple matches in the `FilteringParserDelegate` class rather than the `TextBuffer` class.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::contentsAsInt(boolean)",
+            "method_code": "```java\n    public int contentsAsInt(boolean neg) {\n        if ((_inputStart >= 0) && (_inputBuffer != null)) {\n            if (neg) {\n                return -NumberInput.parseInt(_inputBuffer, _inputStart+1, _inputLen-1);\n            }\n            return NumberInput.parseInt(_inputBuffer, _inputStart, _inputLen);\n        }\n        if (neg) {\n            return -NumberInput.parseInt(_currentSegment, 1, _currentSize-1);\n        }\n        return NumberInput.parseInt(_currentSegment, 0, _currentSize);\n    }\n\n```",
+            "method_doc": " Specialized convenience method that will decode a 32-bit int, of at most 9 digits (and possible leading minus sign).  @param neg Whether contents start with a minus sign  @since 2.9 ",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Inconsistent Handling of Multiple Matches\n**Description:** There might be an inconsistency in how the `FilteringParserDelegate` handles multiple matches when `multipleMatches` is set to `true`. Specifically, it could be failing to properly track or return the count of multiple matches.\n\n**Location:** Within the `FilteringParserDelegate` class, particularly in the logic that processes matches when `multipleMatches` is enabled.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect multiple matches to be counted, but the actual count is zero. This indicates a potential flaw in how multiple matches are being processed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the handling of multiple matches in the `FilteringParserDelegate` class, rather than the `contentsAsInt` method in the `TextBuffer` class.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::getTextOffset()",
+            "method_code": "```java\n    public int getTextOffset() {\n        /* Only shared input buffer can have non-zero offset; buffer\n         * segments start at 0, and if we have to create a combo buffer,\n         * that too will start from beginning of the buffer\n         */\n        return (_inputStart >= 0) ? _inputStart : 0;\n    }\n\n```",
+            "method_doc": "This method returns the text offset. For a shared input buffer, it returns the start index; otherwise, it returns 0.",
+            "class_name": "com.fasterxml.jackson.core.util.TextBuffer",
+            "class_doc": " TextBuffer is a class similar to {@link StringBuffer}, with following differences: <ul> <li>TextBuffer uses segments character arrays, to avoid having to do additional array copies when array is not big enough. This means that only reallocating that is necessary is done only once: if and when caller wants to access contents in a linear array (char[], String). </li> <li>TextBuffer can also be initialized in \"shared mode\", in which it will just act as a wrapper to a single char array managed by another object (like parser that owns it) </li> <li>TextBuffer is not synchronized. </li> </ul> ",
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "test_failure_causes": "Issue with `readAndWrite` Method\n**Description:** The `readAndWrite` method used to convert the filtered JSON back into a string might be causing issues. It could be misinterpreting the filtered JSON or not accurately reflecting the match count.\n\n**Location:** Within the `readAndWrite` method or related classes/methods.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testSingleMatchFilteringWithPath` expect specific outputs, but the actual output does not match the expected results. This suggests that there might be an issue with how the filtered JSON is being handled or converted back into a string.\n\nThese hypotheses collectively address the core issue of incorrect match counts across multiple tests, covering potential flaws in match counting, filter logic, path handling, and the conversion of filtered JSON back into strings.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to lie elsewhere in the filtering logic or the way the filtered JSON is being processed and compared.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()": {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+            "method_code": "```java\n    public int getMatchCount() {\n        return _matchCount;\n    }\n\n```",
+            "method_doc": " Accessor for finding number of matches, where specific token and sub-tree starting (if structured type) are passed. "
+        },
+        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()": {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+            "method_code": "```java\n    @Override\n    public JsonToken nextToken() throws IOException\n    {\n        // 23-May-2017, tatu: To be honest, code here is rather hairy and I don't like all\n        //    conditionals; and it seems odd to return `null` but NOT considering input\n        //    as closed... would love a rewrite to simplify/clear up logic here.\n        \n        // Check for _allowMultipleMatches - false and at least there is one token - which is _currToken\n        // check for no buffered context _exposedContext - null\n        // If all the conditions matches then check for scalar / non-scalar property\n\n        if (!_allowMultipleMatches && (_currToken != null) && (_exposedContext == null)) {\n            // if scalar, and scalar not present in obj/array and !includePath and INCLUDE_ALL\n            // matched once, return null\n            if (_currToken.isScalarValue() && !_headContext.isStartHandled() && !_includePath\n                    && (_itemFilter == TokenFilter.INCLUDE_ALL)) {\n                return (_currToken = null);\n            }\n        }\n        // Anything buffered?\n        TokenFilterContext ctxt = _exposedContext;\n\n        if (ctxt != null) {\n            while (true) {\n                JsonToken t = ctxt.nextTokenToRead();\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n                // all done with buffered stuff?\n                if (ctxt == _headContext) {\n                    _exposedContext = null;\n                    if (ctxt.inArray()) {\n                        t = delegate.getCurrentToken();\n// Is this guaranteed to work without further checks?\n//                        if (t != JsonToken.START_ARRAY) {\n                        _currToken = t;\n                        return t;\n                    }\n\n                    // Almost! Most likely still have the current token;\n                    // with the sole exception of \n                    /*\n                    t = delegate.getCurrentToken();\n                    if (t != JsonToken.FIELD_NAME) {\n                        _currToken = t;\n                        return t;\n                    }\n                    */\n                    break;\n                }\n                // If not, traverse down the context chain\n                ctxt = _headContext.findChildOf(ctxt);\n                _exposedContext = ctxt;\n                if (ctxt == null) { // should never occur\n                    throw _constructError(\"Unexpected problem: chain of filtered context broken\");\n                }\n            }\n        }\n\n        // If not, need to read more. If we got any:\n        JsonToken t = delegate.nextToken();\n        if (t == null) {\n            // no strict need to close, since we have no state here\n            _currToken = t;\n            return t;\n        }\n\n        // otherwise... to include or not?\n        TokenFilter f;\n        \n        switch (t.id()) {\n        case ID_START_ARRAY:\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildArrayContext(f, true);\n                return (_currToken = t);\n            }\n            if (f == null) { // does this occur?\n                delegate.skipChildren();\n                break;\n            }\n            // Otherwise still iffy, need to check\n            f = _headContext.checkValue(f);\n            if (f == null) {\n                delegate.skipChildren();\n                break;\n            }\n            if (f != TokenFilter.INCLUDE_ALL) {\n                f = f.filterStartArray();\n            }\n            _itemFilter = f;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildArrayContext(f, true);\n                return (_currToken = t);\n            }\n            _headContext = _headContext.createChildArrayContext(f, false);\n            \n            // Also: only need buffering if parent path to be included\n            if (_includePath) {\n                t = _nextTokenWithBuffering(_headContext);\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n            }\n            break;\n\n        case ID_START_OBJECT:\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildObjectContext(f, true);\n                return (_currToken = t);\n            }\n            if (f == null) { // does this occur?\n                delegate.skipChildren();\n                break;\n            }\n            // Otherwise still iffy, need to check\n            f = _headContext.checkValue(f);\n            if (f == null) {\n                delegate.skipChildren();\n                break;\n            }\n            if (f != TokenFilter.INCLUDE_ALL) {\n                f = f.filterStartObject();\n            }\n            _itemFilter = f;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                _headContext = _headContext.createChildObjectContext(f, true);\n                return (_currToken = t);\n            }\n            _headContext = _headContext.createChildObjectContext(f, false);\n            // Also: only need buffering if parent path to be included\n            if (_includePath) {\n                t = _nextTokenWithBuffering(_headContext);\n                if (t != null) {\n                    _currToken = t;\n                    return t;\n                }\n            }\n            // note: inclusion of surrounding Object handled separately via\n            // FIELD_NAME\n            break;\n\n        case ID_END_ARRAY:\n        case ID_END_OBJECT:\n            {\n                boolean returnEnd = _headContext.isStartHandled();\n                f = _headContext.getFilter();\n                if ((f != null) && (f != TokenFilter.INCLUDE_ALL)) {\n                    f.filterFinishArray();\n                }\n                _headContext = _headContext.getParent();\n                _itemFilter = _headContext.getFilter();\n                if (returnEnd) {\n                    return (_currToken = t);\n                }\n            }\n            break;\n\n        case ID_FIELD_NAME:\n            {\n                final String name = delegate.getCurrentName();\n                // note: this will also set 'needToHandleName'\n                f = _headContext.setFieldName(name);\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _itemFilter = f;\n                    if (!_includePath) {\n                        // Minor twist here: if parent NOT included, may need to induce output of\n                        // surrounding START_OBJECT/END_OBJECT\n                        if (_includeImmediateParent && !_headContext.isStartHandled()) {\n                            t = _headContext.nextTokenToRead(); // returns START_OBJECT but also marks it handled\n                            _exposedContext = _headContext;\n                        }\n                    }\n                    return (_currToken = t);\n                }\n                if (f == null) {\n                    delegate.nextToken();\n                    delegate.skipChildren();\n                    break;\n                }\n                f = f.includeProperty(name);\n                if (f == null) {\n                    delegate.nextToken();\n                    delegate.skipChildren();\n                    break;\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    if (_includePath) {\n                        return (_currToken = t);\n                    }\n                }\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                break;\n            }\n\n        default: // scalar value\n            f = _itemFilter;\n            if (f == TokenFilter.INCLUDE_ALL) {\n                return (_currToken = t);\n            }\n            if (f != null) {\n                f = _headContext.checkValue(f);\n                if ((f == TokenFilter.INCLUDE_ALL)\n                        || ((f != null) && f.includeValue(delegate))) {\n                        return (_currToken = t);\n                }\n            }\n            // Otherwise not included (leaves must be explicitly included)\n            break;\n        }\n\n        // We get here if token was not yet found; offlined handling\n        return _nextToken2();\n    }\n\n```",
+            "method_doc": "  Public API, traversal  "
+        },
+        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()": {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()",
+            "method_code": "```java\n    protected final JsonToken _nextToken2() throws IOException\n    {\n        main_loop:\n        while (true) {\n            JsonToken t = delegate.nextToken();\n            if (t == null) { // is this even legal?\n                _currToken = t;\n                return t;\n            }\n            TokenFilter f;\n\n            switch (t.id()) {\n            case ID_START_ARRAY:\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildArrayContext(f, true);\n                    return (_currToken = t);\n                }\n                if (f == null) { // does this occur?\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                // Otherwise still iffy, need to check\n                f = _headContext.checkValue(f);\n                if (f == null) {\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                if (f != TokenFilter.INCLUDE_ALL) {\n                    f = f.filterStartArray();\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildArrayContext(f, true);\n                    return (_currToken = t);\n                }\n                _headContext = _headContext.createChildArrayContext(f, false);\n                // but if we didn't figure it out yet, need to buffer possible events\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                continue main_loop;\n\n            case ID_START_OBJECT:\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildObjectContext(f, true);\n                    return (_currToken = t);\n                }\n                if (f == null) { // does this occur?\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                // Otherwise still iffy, need to check\n                f = _headContext.checkValue(f);\n                if (f == null) {\n                    delegate.skipChildren();\n                    continue main_loop;\n                }\n                if (f != TokenFilter.INCLUDE_ALL) {\n                    f = f.filterStartObject();\n                }\n                _itemFilter = f;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    _headContext = _headContext.createChildObjectContext(f, true);\n                    return (_currToken = t);\n                }\n                _headContext = _headContext.createChildObjectContext(f, false);\n                if (_includePath) {\n                    t = _nextTokenWithBuffering(_headContext);\n                    if (t != null) {\n                        _currToken = t;\n                        return t;\n                    }\n                }\n                continue main_loop;\n\n            case ID_END_ARRAY:\n            case ID_END_OBJECT:\n                {\n                    boolean returnEnd = _headContext.isStartHandled();\n                    f = _headContext.getFilter();\n                    if ((f != null) && (f != TokenFilter.INCLUDE_ALL)) {\n                        f.filterFinishArray();\n                    }\n                    _headContext = _headContext.getParent();\n                    _itemFilter = _headContext.getFilter();\n                    if (returnEnd) {\n                        return (_currToken = t);\n                    }\n                }\n                continue main_loop;\n\n            case ID_FIELD_NAME:\n                {\n                    final String name = delegate.getCurrentName();\n                    f = _headContext.setFieldName(name);\n                    if (f == TokenFilter.INCLUDE_ALL) {\n                        _itemFilter = f;\n                        return (_currToken = t);\n                    }\n                    if (f == null) { // filter out the value\n                        delegate.nextToken();\n                        delegate.skipChildren();\n                        continue main_loop;\n                    }\n                    f = f.includeProperty(name);\n                    if (f == null) { // filter out the value\n                        delegate.nextToken();\n                        delegate.skipChildren();\n                        continue main_loop;\n                    }\n                    _itemFilter = f;\n                    if (f == TokenFilter.INCLUDE_ALL) {\n                        if (_includePath) {\n                            return (_currToken = t);\n                        }\n//                        if (_includeImmediateParent) { ...\n                        continue main_loop;\n                    }\n                    if (_includePath) {\n                        t = _nextTokenWithBuffering(_headContext);\n                        if (t != null) {\n                            _currToken = t;\n                            return t;\n                        }\n                    }\n                }\n                continue main_loop;\n\n            default: // scalar value\n                f = _itemFilter;\n                if (f == TokenFilter.INCLUDE_ALL) {\n                    return (_currToken = t);\n                }\n                if (f != null) {\n                    f = _headContext.checkValue(f);\n                    if ((f == TokenFilter.INCLUDE_ALL)\n                            || ((f != null) && f.includeValue(delegate))) {\n                            return (_currToken = t);\n                    }\n                }\n                // Otherwise not included (leaves must be explicitly included)\n                break;\n            }\n        }\n    }\n\n```",
+            "method_doc": " Offlined handling for cases where there was no buffered token to return, and the token read next could not be returned as-is, at least not yet, but where we have not yet established that buffering is needed. "
+        },
+        "com.fasterxml.jackson.core.JsonParser::JsonParser()": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+            "method_code": "```java\n    protected JsonParser() { }\n\n```",
+            "method_doc": "  Construction, configuration, initialization  "
+        },
+        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+            "method_code": "```java\n    protected JsonParser(int features) { _features = features; }\n\n```",
+            "method_doc": "This constructor initializes a new `JsonParser` instance with specified features. It sets the `_features` field to the provided value."
+        },
+        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()": {
+            "method_name": "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()",
+            "method_code": "```java\n        public static int collectDefaults()\n        {\n            int flags = 0;\n            for (Feature f : values()) {\n                if (f.enabledByDefault()) {\n                    flags |= f.getMask();\n                }\n            }\n            return flags;\n        }\n\n```",
+            "method_doc": " Method that calculates bit set (flags) of all features that are enabled by default. "
+        },
+        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)": {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)",
+            "method_code": "```java\n    public SerializedString(String v) {\n        if (v == null) {\n            throw new IllegalStateException(\"Null String illegal for SerializedString\");\n        }\n        _value = v;\n    }\n\n```",
+            "method_doc": "Initializes a new instance of `SerializedString` with the provided non-null string value. If the input string is null, it throws an `IllegalStateException`."
+        },
+        "com.fasterxml.jackson.core.io.SerializedString::getValue()": {
+            "method_name": "com.fasterxml.jackson.core.io.SerializedString::getValue()",
+            "method_code": "```java\n    @Override\n    public final String getValue() { return _value; }\n\n```",
+            "method_doc": "  API  "
+        },
+        "com.fasterxml.jackson.core.JsonToken::id()": {
+            "method_name": "com.fasterxml.jackson.core.JsonToken::id()",
+            "method_code": "```java\n    public final int id() { return _id; }\n\n```",
+            "method_doc": "Returns the ID of the JSON token."
+        },
+        "com.fasterxml.jackson.core.JsonToken::isScalarValue()": {
+            "method_name": "com.fasterxml.jackson.core.JsonToken::isScalarValue()",
+            "method_code": "```java\n    public final boolean isScalarValue() { return _isScalar; }\n\n```",
+            "method_doc": " Method that can be used to check whether this token represents a valid non-structured value. This means all tokens other than Object/Array start/end markers all field names. "
+        },
+        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextBuffered(TokenFilterContext)": {
+            "method_name": "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextBuffered(TokenFilterContext)",
+            "method_code": "```java\n    private JsonToken _nextBuffered(TokenFilterContext buffRoot) throws IOException\n    {\n        _exposedContext = buffRoot;\n        TokenFilterContext ctxt = buffRoot;\n        JsonToken t = ctxt.nextTokenToRead();\n        if (t != null) {\n            return t;\n        }\n        while (true) {\n            // all done with buffered stuff?\n            if (ctxt == _headContext) {\n                throw _constructError(\"Internal error: failed to locate expected buffered tokens\");\n                /*\n                _exposedContext = null;\n                break;\n                */\n            }\n            // If not, traverse down the context chain\n            ctxt = _exposedContext.findChildOf(ctxt);\n            _exposedContext = ctxt;\n            if (ctxt == null) { // should never occur\n                throw _constructError(\"Unexpected problem: chain of filtered context broken\");\n            }\n            t = _exposedContext.nextTokenToRead();\n            if (t != null) {\n                return t;\n            }\n        }\n    }\n\n```",
+            "method_doc": "This method continues reading buffered tokens until a valid token is found. It calls `_nextTokenToRead()` repeatedly."
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilterContext::checkValue(TokenFilter)": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::checkValue(TokenFilter)",
+            "method_code": "```java\n    public TokenFilter checkValue(TokenFilter filter) {\n        // First, checks for Object properties have been made earlier:\n        if (_type == TYPE_OBJECT) {\n            return filter;\n        }\n        // We increase it first because at the beginning of array, value is -1\n        int ix = ++_index;\n        if (_type == TYPE_ARRAY) {\n            return filter.includeElement(ix);\n        }\n        return filter.includeRootValue(ix);\n    }\n\n```",
+            "method_doc": " Method called to check whether value is to be included at current output position, either as Object property, Array element, or root value. "
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilter::includeValue(JsonParser)": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::includeValue(JsonParser)",
+            "method_code": "```java\n    public boolean includeValue(JsonParser p) throws IOException {\n        return _includeScalar();\n    }\n\n```",
+            "method_doc": " Call made when verifying whether a scaler value is being read from a parser. <p> Default action is to call <code>_includeScalar()</code> and return whatever it indicates. "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::resetWithShared(char[],int,int)": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::resetWithShared(char[],int,int)",
+            "method_code": "```java\n    public void resetWithShared(char[] buf, int start, int len)\n    {\n        // First, let's clear intermediate values, if any:\n        _resultString = null;\n        _resultArray = null;\n\n        // Then let's mark things we need about input buffer\n        _inputBuffer = buf;\n        _inputStart = start;\n        _inputLen = len;\n\n        // And then reset internal input buffers, if necessary:\n        if (_hasSegments) {\n            clearSegments();\n        }\n    }\n\n```",
+            "method_doc": " Method called to initialize the buffer with a shared copy of data; this means that buffer will just have pointers to actual data. It also means that if anything is to be appended to the buffer, it will first have to unshare it (make a local copy). "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::size()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::size()",
+            "method_code": "```java\n    public int size() {\n        if (_inputStart >= 0) { // shared copy from input buf\n            return _inputLen;\n        }\n        if (_resultArray != null) {\n            return _resultArray.length;\n        }\n        if (_resultString != null) {\n            return _resultString.length();\n        }\n        // local segmented buffers\n        return _segmentSize + _currentSize;\n    }\n\n```",
+            "method_doc": " @return Number of characters currently stored by this collector "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::getTextBuffer()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::getTextBuffer()",
+            "method_code": "```java\n    public char[] getTextBuffer()\n    {\n        // Are we just using shared input buffer?\n        if (_inputStart >= 0) return _inputBuffer;\n        if (_resultArray != null)  return _resultArray;\n        if (_resultString != null) {\n            return (_resultArray = _resultString.toCharArray());\n        }\n        // Nope; but does it fit in just one segment?\n        if (!_hasSegments) {\n            return (_currentSegment == null) ? NO_CHARS : _currentSegment;\n        }\n        // Nope, need to have/create a non-segmented array and return it\n        return contentsAsArray();\n    }\n\n```",
+            "method_doc": " Accessor that may be used to get the contents of this buffer in a single <code>char</code> array regardless of whether they were collected in a segmented fashion or not. "
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilterContext::isStartHandled()": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::isStartHandled()",
+            "method_code": "```java\n    public boolean isStartHandled() { return _startHandled; }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilterContext::nextTokenToRead()": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::nextTokenToRead()",
+            "method_code": "```java\n    public JsonToken nextTokenToRead() {\n        if (!_startHandled) {\n            _startHandled = true;\n            if (_type == TYPE_OBJECT) {\n                return JsonToken.START_OBJECT;\n            }\n            // Note: root should never be unhandled\n            return JsonToken.START_ARRAY;\n        }\n        // But otherwise at most might have FIELD_NAME\n        if (_needToHandleName && (_type == TYPE_OBJECT)) {\n            _needToHandleName = false;\n            return JsonToken.FIELD_NAME;\n        }\n        return null;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilterContext::TokenFilterContext(int,TokenFilterContext,TokenFilter,boolean)": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::TokenFilterContext(int,TokenFilterContext,TokenFilter,boolean)",
+            "method_code": "```java\n    protected TokenFilterContext(int type, TokenFilterContext parent,\n            TokenFilter filter, boolean startHandled)\n    {\n        super();\n        _type = type;\n        _parent = parent;\n        _filter = filter;\n        _index = -1;\n        _startHandled = startHandled;\n        _needToHandleName = false;\n    }\n\n```",
+            "method_doc": "  Life-cycle  "
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilterContext::reset(int,TokenFilter,boolean)": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilterContext::reset(int,TokenFilter,boolean)",
+            "method_code": "```java\n    protected TokenFilterContext reset(int type,\n            TokenFilter filter, boolean startWritten)\n    {\n        _type = type;\n        _filter = filter;\n        _index = -1;\n        _currentName = null;\n        _startHandled = startWritten;\n        _needToHandleName = false;\n        return this;\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartObject()": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterStartObject()",
+            "method_code": "```java\n    public TokenFilter filterStartObject() {\n        return this;\n    }\n\n```",
+            "method_doc": " Method called to check whether Object value at current output location should be included in output. Three kinds of return values may be used as follows: <ul> <li><code>null</code> to indicate that the Object should be skipped </li> <li>{@link #INCLUDE_ALL} to indicate that the Object should be included completely in output </li> <li>Any other {@link TokenFilter} implementation (possibly this one) to mean that further inclusion calls on return filter object need to be made on contained properties, as necessary. {@link #filterFinishObject()} will also be called on returned filter object </li> </ul> <p> Default implementation returns <code>this</code>, which means that checks are made recursively for properties of the Object to determine possible inclusion.  @return TokenFilter to use for further calls within Array, unless return value is <code>null</code> or {@link #INCLUDE_ALL} (which have simpler semantics) "
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartArray()": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterStartArray()",
+            "method_code": "```java\n    public TokenFilter filterStartArray() {\n        return this;\n    }\n\n```",
+            "method_doc": " Method called to check whether Array value at current output location should be included in output. Three kinds of return values may be used as follows: <ul> <li><code>null</code> to indicate that the Array should be skipped </li> <li>{@link #INCLUDE_ALL} to indicate that the Array should be included completely in output </li> <li>Any other {@link TokenFilter} implementation (possibly this one) to mean that further inclusion calls on return filter object need to be made on contained element values, as necessary. {@link #filterFinishArray()} will also be called on returned filter object </li> </ul> <p> Default implementation returns <code>this</code>, which means that checks are made recursively for elements of the array to determine possible inclusion.  @return TokenFilter to use for further calls within Array, unless return value is <code>null</code> or {@link #INCLUDE_ALL} (which have simpler semantics) "
+        },
+        "com.fasterxml.jackson.core.filter.TokenFilter::filterFinishArray()": {
+            "method_name": "com.fasterxml.jackson.core.filter.TokenFilter::filterFinishArray()",
+            "method_code": "```java\n    public void filterFinishArray() { }\n\n```",
+            "method_doc": " Method called to indicate that output of non-filtered Array (one that may have been included either completely, or in part) is completed, in cases where filter other that {@link #INCLUDE_ALL} was returned. This occurs when {@link JsonGenerator#writeEndArray()} is called. "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+            "method_code": "```java\n    public void releaseBuffers()\n    {\n        if (_allocator == null) {\n            resetWithEmpty();\n        } else {\n            if (_currentSegment != null) {\n                // First, let's get rid of all but the largest char array\n                resetWithEmpty();\n                // And then return that array\n                char[] buf = _currentSegment;\n                _currentSegment = null;\n                _allocator.releaseCharBuffer(BufferRecycler.CHAR_TEXT_BUFFER, buf);\n            }\n        }\n    }\n\n```",
+            "method_doc": " Method called to indicate that the underlying buffers should now be recycled if they haven't yet been recycled. Although caller can still use this text buffer, it is not advisable to call this method if that is likely, since next time a buffer is needed, buffers need to reallocated. Note: calling this method automatically also clears contents of the buffer. "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::contentsAsInt(boolean)": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::contentsAsInt(boolean)",
+            "method_code": "```java\n    public int contentsAsInt(boolean neg) {\n        if ((_inputStart >= 0) && (_inputBuffer != null)) {\n            if (neg) {\n                return -NumberInput.parseInt(_inputBuffer, _inputStart+1, _inputLen-1);\n            }\n            return NumberInput.parseInt(_inputBuffer, _inputStart, _inputLen);\n        }\n        if (neg) {\n            return -NumberInput.parseInt(_currentSegment, 1, _currentSize-1);\n        }\n        return NumberInput.parseInt(_currentSegment, 0, _currentSize);\n    }\n\n```",
+            "method_doc": " Specialized convenience method that will decode a 32-bit int, of at most 9 digits (and possible leading minus sign).  @param neg Whether contents start with a minus sign  @since 2.9 "
+        },
+        "com.fasterxml.jackson.core.util.TextBuffer::getTextOffset()": {
+            "method_name": "com.fasterxml.jackson.core.util.TextBuffer::getTextOffset()",
+            "method_code": "```java\n    public int getTextOffset() {\n        /* Only shared input buffer can have non-zero offset; buffer\n         * segments start at 0, and if we have to create a combo buffer,\n         * that too will start from beginning of the buffer\n         */\n        return (_inputStart >= 0) ? _inputStart : 0;\n    }\n\n```",
+            "method_doc": "This method returns the text offset. For a shared input buffer, it returns the start index; otherwise, it returns 0."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.fasterxml.jackson.core.filter.BasicParserFilteringTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Match Count Calculation in `FilteringParserDelegate`\n**Description:** The `FilteringParserDelegate` class may have a bug in its implementation of the `getMatchCount()` method. It might be incorrectly resetting the count after processing each match, leading to an undercount of total matches.\n\n**Location:** Likely within the `FilteringParserDelegate` class, specifically in the `getMatchCount()` method.\n\n**Observation:** All tests fail with assertions expecting non-zero match counts, but the actual count returned is zero. This strongly suggests that the match count is not being incremented correctly during the parsing process.",
+                "Inconsistent Handling of Multiple Matches\n**Description:** There might be an inconsistency in how the `FilteringParserDelegate` handles multiple matches when `multipleMatches` is set to `true`. Specifically, it could be failing to properly track or return the count of multiple matches.\n\n**Location:** Within the `FilteringParserDelegate` class, particularly in the logic that processes matches when `multipleMatches` is enabled.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect multiple matches to be counted, but the actual count is zero. This indicates a potential flaw in how multiple matches are being processed.",
+                "Path Inclusion Logic Error\n**Description:** The logic for including paths in the filtered output might be causing issues. If the path inclusion logic is flawed, it could lead to incorrect counts being reported.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the section responsible for handling path inclusion.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testMultipleMatchFilteringWithPath3` expect the path to be included in the output, but the match count is still zero. This suggests that the path inclusion logic might be interfering with the match count calculation.",
+                "Filter Logic Not Applying Correctly\n**Description:** The filter logic itself might not be applying correctly to the JSON data. This could result in matches not being detected even though they exist.\n\n**Location:** Within the `FilteringParserDelegate` class, specifically in the logic that determines whether a value should be included based on the filter criteria.\n\n**Observation:** Tests like `testSingleMatchFilteringWithPath` and `testAllowMultipleMatchesWithoutPath` expect specific keys to be matched, but no matches are found. This indicates that the filter logic might be missing some matches or not functioning as intended.",
+                "Issue with `readAndWrite` Method\n**Description:** The `readAndWrite` method used to convert the filtered JSON back into a string might be causing issues. It could be misinterpreting the filtered JSON or not accurately reflecting the match count.\n\n**Location:** Within the `readAndWrite` method or related classes/methods.\n\n**Observation:** Tests like `testMultipleMatchFilteringWithPath1` and `testSingleMatchFilteringWithPath` expect specific outputs, but the actual output does not match the expected results. This suggests that there might be an issue with how the filtered JSON is being handled or converted back into a string.\n\nThese hypotheses collectively address the core issue of incorrect match counts across multiple tests, covering potential flaws in match counting, filter logic, path handling, and the conversion of filtered JSON back into strings."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    10,
+                    8.666666666666666
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    10,
+                    8.666666666666666
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    8,
+                    7.333333333333333
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.SerializedString",
+                    "com.fasterxml.jackson.core.JsonToken"
+                ],
+                "2": [
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.CharTypes",
+                    "com.fasterxml.jackson.core.util.TextBuffer"
+                ],
+                "3": [
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.filter.TokenFilterContext",
+                    "com.fasterxml.jackson.core.filter.TokenFilter"
+                ],
+                "4": [
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.filter.TokenFilterContext",
+                    "com.fasterxml.jackson.core.filter.TokenFilter"
+                ],
+                "5": [
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate",
+                    "com.fasterxml.jackson.core.JsonParser",
+                    "com.fasterxml.jackson.core.io.SerializedString",
+                    "com.fasterxml.jackson.core.util.TextBuffer"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate": [
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.SerializedString": [
+                        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)",
+                        "com.fasterxml.jackson.core.io.SerializedString::getValue()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonToken": [
+                        "com.fasterxml.jackson.core.JsonToken::id()",
+                        "com.fasterxml.jackson.core.JsonToken::isScalarValue()"
+                    ]
+                },
+                "2": {
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate": [
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.CharTypes": [],
+                    "com.fasterxml.jackson.core.util.TextBuffer": [
+                        "com.fasterxml.jackson.core.util.TextBuffer::releaseBuffers()",
+                        "com.fasterxml.jackson.core.util.TextBuffer::resetWithShared(char[],int,int)",
+                        "com.fasterxml.jackson.core.util.TextBuffer::contentsAsInt(boolean)"
+                    ]
+                },
+                "3": {
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate": [
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.filter.TokenFilterContext": [
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::checkValue(TokenFilter)",
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::isStartHandled()",
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::nextTokenToRead()"
+                    ],
+                    "com.fasterxml.jackson.core.filter.TokenFilter": [
+                        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartObject()",
+                        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartArray()",
+                        "com.fasterxml.jackson.core.filter.TokenFilter::filterFinishArray()"
+                    ]
+                },
+                "4": {
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate": [
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextBuffered(TokenFilterContext)"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.filter.TokenFilterContext": [
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::checkValue(TokenFilter)",
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::TokenFilterContext(int,TokenFilterContext,TokenFilter,boolean)",
+                        "com.fasterxml.jackson.core.filter.TokenFilterContext::reset(int,TokenFilter,boolean)"
+                    ],
+                    "com.fasterxml.jackson.core.filter.TokenFilter": [
+                        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartObject()",
+                        "com.fasterxml.jackson.core.filter.TokenFilter::filterStartArray()",
+                        "com.fasterxml.jackson.core.filter.TokenFilter::includeValue(JsonParser)"
+                    ]
+                },
+                "5": {
+                    "com.fasterxml.jackson.core.filter.FilteringParserDelegate": [
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::getMatchCount()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::nextToken()",
+                        "com.fasterxml.jackson.core.filter.FilteringParserDelegate::_nextToken2()"
+                    ],
+                    "com.fasterxml.jackson.core.JsonParser": [
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser()",
+                        "com.fasterxml.jackson.core.JsonParser::JsonParser(int)",
+                        "com.fasterxml.jackson.core.JsonParser$Feature::collectDefaults()"
+                    ],
+                    "com.fasterxml.jackson.core.io.SerializedString": [
+                        "com.fasterxml.jackson.core.io.SerializedString::SerializedString(String)"
+                    ],
+                    "com.fasterxml.jackson.core.util.TextBuffer": [
+                        "com.fasterxml.jackson.core.util.TextBuffer::size()",
+                        "com.fasterxml.jackson.core.util.TextBuffer::getTextOffset()",
+                        "com.fasterxml.jackson.core.util.TextBuffer::getTextBuffer()"
+                    ]
+                }
+            }
+        }
+    ]
+}
