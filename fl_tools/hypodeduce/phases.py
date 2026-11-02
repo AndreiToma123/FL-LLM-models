@@ -52,10 +52,21 @@ def state(chat_env: ChatEnv) -> dict:
                                                "support": {}, "scores": {}, "reasons": {}, "info": {}})
 
 
+def checkpoint_name(sub_name: str, limit: int = 150) -> str:
+    """SoapFL stores each answer as checkpoint/<suite>/<Phase>_<sub_name>.txt. A method signature with long generic
+    parameter types (JacksonDatabind-8, -36 on 2026-11-02) exceeds the 255-byte file-name limit, so long names are
+    shortened to a prefix plus a hash; short names stay exactly as before (existing checkpoints remain valid)."""
+    if len(sub_name.encode("utf-8")) <= limit:
+        return sub_name
+    import hashlib
+    return sub_name[:80] + "_" + hashlib.sha1(sub_name.encode("utf-8")).hexdigest()[:16]
+
+
 class _Asking:
     """Mixin: one model call with SoapFL's checkpointing, under a sub-name (resumable runs)."""
 
     def ask(self, chat_env, sub_name, chat_turn_limit, need_reflect) -> str:
+        sub_name = checkpoint_name(sub_name)
         if not self.load_conclusion(chat_env, sub_name):
             self.seminar_conclusion = self.chatting(chat_env=chat_env, need_reflect=need_reflect,
                                                     assistant_role_name=self.assistant_role_name,
