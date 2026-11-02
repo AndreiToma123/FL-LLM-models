@@ -73,7 +73,8 @@ ls "$MODEL_DIR"/*.safetensors >/dev/null 2>&1 || die "weights of $HF_REPO missin
 
 PIPELINE_ARGS=""; SUFFIX=""
 if [ "$PIPELINE" = hypodeduce ]; then
-  PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C --hd-methods $HD_M --timeout 10800"
+  # 1 h per bug: on CSC the slowest finished HypoDeduce bug took 16 min (2026-11-01); 3 h only held the GPU for a hung bug
+  PIPELINE_ARGS="--pipeline hypodeduce --hd-hypotheses $HD_H --hd-classes $HD_C --hd-methods $HD_M --timeout 3600"
   SUFFIX="-hd-h${HD_H}c${HD_C}"
   [ "$HD_M" != 0 ] && SUFFIX="${SUFFIX}m${HD_M}"
 fi

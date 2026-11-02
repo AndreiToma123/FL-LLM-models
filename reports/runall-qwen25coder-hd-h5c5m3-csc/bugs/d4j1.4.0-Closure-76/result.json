@@ -1,0 +1,967 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.DeadAssignmentsElimination",
+        "com.google.javascript.rhino.jstype.JSType",
+        "com.google.javascript.rhino.jstype.FunctionType",
+        "com.google.javascript.rhino.jstype.ObjectType",
+        "com.google.javascript.rhino.jstype.UnionType",
+        "com.google.javascript.rhino.jstype.BooleanType",
+        "com.google.javascript.rhino.jstype.JSTypeRegistry",
+        "com.google.javascript.rhino.Node"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+            "method_code": "```java\n  private void tryRemoveDeadAssignments(NodeTraversal t,\n      ControlFlowGraph<Node> cfg) {\n    Iterable<DiGraphNode<Node, Branch>> nodes = cfg.getDirectedGraphNodes();\n\n    for (DiGraphNode<Node, Branch> cfgNode : nodes) {\n      FlowState<LiveVariableLattice> state =\n          cfgNode.getAnnotation();\n      Node n = cfgNode.getValue();\n      if (n == null) {\n        continue;\n      }\n      switch (n.getType()) {\n        case Token.IF:\n        case Token.WHILE:\n        case Token.DO:\n          tryRemoveAssignment(t, NodeUtil.getConditionExpression(n), state);\n          continue;\n        case Token.FOR:\n          if (!NodeUtil.isForIn(n)) {\n            tryRemoveAssignment(\n                t, NodeUtil.getConditionExpression(n), state);\n          }\n          continue;\n        case Token.SWITCH:\n        case Token.CASE:\n        case Token.RETURN:\n          if (n.hasChildren()) {\n            tryRemoveAssignment(t, n.getFirstChild(), state);\n          }\n          continue;\n        // TODO(user): case Token.VAR: Remove var a=1;a=2;.....\n      }\n\n      tryRemoveAssignment(t, n, state);\n    }\n  }\n\n```",
+            "method_doc": " Try to remove useless assignments from a control flow graph that has been annotated with liveness information.  @param t The node traversal. @param cfg The control flow graph of the program annotated with liveness information. ",
+            "class_name": "com.google.javascript.jscomp.DeadAssignmentsElimination",
+            "class_doc": " Removes local variable assignments that are useless based on information from {@link LiveVariablesAnalysis}. If there is an assignment to variable {@code x} and {@code x} is dead after this assignment, we know that the current content of {@code x} will not be read and this assignment is useless.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly deals with the removal of dead assignments, which is the root cause of the test failures. The method iterates over each node in the control flow graph and attempts to remove unnecessary assignments, making it a prime candidate for fixing the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 6,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)",
+            "method_code": "```java\n  private void tryRemoveAssignment(NodeTraversal t, Node n, Node exprRoot,\n      FlowState<LiveVariableLattice> state) {\n\n    Node parent = n.getParent();\n\n    if (NodeUtil.isAssignmentOp(n) ||\n        n.getType() == Token.INC || n.getType() == Token.DEC) {\n\n      Node lhs = n.getFirstChild();\n      Node rhs = lhs.getNext();\n\n      // Recurse first. Example: dead_x = dead_y = 1; We try to clean up dead_y\n      // first.\n      if (rhs != null) {\n        tryRemoveAssignment(t, rhs, exprRoot, state);\n        rhs = lhs.getNext();\n      }\n\n      Scope scope = t.getScope();\n      if (!NodeUtil.isName(lhs)) {\n        return; // Not a local variable assignment.\n      }\n      String name = lhs.getString();\n      if (!scope.isDeclared(name, false)) {\n        return;\n      }\n      Var var = scope.getVar(name);\n\n      if (liveness.getEscapedLocals().contains(var)) {\n        return; // Local variable that might be escaped due to closures.\n      }\n\n      // If we have an identity assignment such as a=a, always remove it\n      // regardless of what the liveness results because it\n      // does not change the result afterward.\n      if (rhs != null &&\n          NodeUtil.isName(rhs) &&\n          rhs.getString().equals(var.name) &&\n          NodeUtil.isAssign(n)) {\n        n.removeChild(rhs);\n        n.getParent().replaceChild(n, rhs);\n        compiler.reportCodeChange();\n        return;\n      }\n\n      if (state.getOut().isLive(var)) {\n        return; // Variable not dead.\n      }\n\n      if (state.getIn().isLive(var) &&\n          isVariableStillLiveWithinExpression(n, exprRoot, var.name)) {\n        // The variable is killed here but it is also live before it.\n        // This is possible if we have say:\n        //    if (X = a && a = C) {..} ; .......; a = S;\n        // In this case we are safe to remove \"a = C\" because it is dead.\n        // However if we have:\n        //    if (a = C && X = a) {..} ; .......; a = S;\n        // removing \"a = C\" is NOT correct, although the live set at the node\n        // is exactly the same.\n        // TODO(user): We need more fine grain CFA or we need to keep track\n        // of GEN sets when we recurse here.\n        return;\n      }\n\n      if (NodeUtil.isAssign(n)) {\n        n.removeChild(rhs);\n        n.getParent().replaceChild(n, rhs);\n      } else if (NodeUtil.isAssignmentOp(n)) {\n        n.removeChild(rhs);\n        n.removeChild(lhs);\n        Node op = new Node(NodeUtil.getOpFromAssignmentOp(n), lhs, rhs);\n        parent.replaceChild(n, op);\n      } else if (n.getType() == Token.INC || n.getType() == Token.DEC) {\n        if (NodeUtil.isExpressionNode(parent)) {\n          parent.replaceChild(n,\n              new Node(Token.VOID, Node.newNumber(0).copyInformationFrom(n)));\n        } else if(n.getType() == Token.COMMA && n != parent.getLastChild()) {\n          parent.removeChild(n);\n        } else if (parent.getType() == Token.FOR && !NodeUtil.isForIn(parent) &&\n            NodeUtil.getConditionExpression(parent) != n) {\n          parent.replaceChild(n, new Node(Token.EMPTY));\n        } else {\n          // Cannot replace x = a++ with x = a because that's not valid\n          // when a is not a number.\n          return;\n        }\n      } else {\n        // Not reachable.\n        Preconditions.checkState(false, \"Unknown statement\");\n      }\n\n      compiler.reportCodeChange();\n      return;\n\n    } else {\n      for (Node c = n.getFirstChild(); c != null;) {\n        Node next = c.getNext();\n        if (!ControlFlowGraph.isEnteringNewCfgNode(c)) {\n          tryRemoveAssignment(t, c, exprRoot, state);\n        }\n        c = next;\n      }\n      return;\n    }\n  }\n\n```",
+            "method_doc": " Determines if any local variables are dead after the instruction {@code n} and are assigned within the subtree of {@code n}. Removes those assignments if there are any.  @param n Target instruction. @param exprRoot The CFG node where the liveness information in state is still correct. @param state The liveness information at {@code n}. ",
+            "class_name": "com.google.javascript.jscomp.DeadAssignmentsElimination",
+            "class_doc": " Removes local variable assignments that are useless based on information from {@link LiveVariablesAnalysis}. If there is an assignment to variable {@code x} and {@code x} is dead after this assignment, we know that the current content of {@code x} will not be read and this assignment is useless.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly deals with the removal of dead assignments, which is the core issue causing the test failures. The method checks various conditions to determine if an assignment is dead and removes it accordingly. Given that all failing tests involve dead assignments within conditional expressions, fixing this method could resolve the bugs.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 6,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+            "method_code": "```java\n  private void tryRemoveAssignment(NodeTraversal t, Node n,\n      FlowState<LiveVariableLattice> state) {\n    tryRemoveAssignment(t, n, n, state);\n  }\n\n```",
+            "method_doc": "This method is overloaded and primarily calls another version of itself. It checks if the node is an assignment operation, increments/decrements, or a VAR declaration, and removes unnecessary assignments based on liveness analysis.",
+            "class_name": "com.google.javascript.jscomp.DeadAssignmentsElimination",
+            "class_doc": " Removes local variable assignments that are useless based on information from {@link LiveVariablesAnalysis}. If there is an assignment to variable {@code x} and {@code x} is dead after this assignment, we know that the current content of {@code x} will not be read and this assignment is useless.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious as it handles various types of assignments and could potentially miss cases where dead assignments within conditional expressions are not correctly identified. However, it's not the only place where such issues could arise.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "3": 6,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtype(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType instanceof UnionType) {\n      UnionType union = (UnionType)thatType;\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // named types\n    if (thatType instanceof NamedType) {\n      return thisType.isSubtype(((NamedType)thatType).getReferencedType());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it handles various subtyping cases, including unions and named types. However, the issue seems to be related to how dead assignments are handled within conditional expressions, rather than the general subtyping logic.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "3": 6,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, boolean inExterns, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false, inExterns,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param inExterns {@code true} if this property was defined in an externs file. TightenTypes assumes that any function passed to an externs property could be called, so setting this incorrectly could result in live code being removed. @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it defines declared properties on an object type, which could potentially impact how dead assignments are handled within conditional expressions. However, the method itself does not directly manipulate the AST nodes involved in the tests. Further investigation into how this method interacts with the rest of the compiler's logic would be necessary to determine its exact role in the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)",
+            "method_code": "```java\n  boolean hasOwnDeclaredProperty(String name) {\n    return hasOwnProperty(name) && isPropertyTypeDeclared(name);\n  }\n\n```",
+            "method_doc": " Whether the given property is declared on this object. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it relies on two conditions: `hasOwnProperty(name)` and `isPropertyTypeDeclared(name)`. While it seems plausible that the issue could lie in how these conditions are evaluated, further investigation is needed to confirm if the problem originates from this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::isImplicitPrototype(ObjectType)",
+            "method_code": "```java\n  final boolean isImplicitPrototype(ObjectType prototype) {\n    for (ObjectType current = this;\n         current != null;\n         current = current.getImplicitPrototype()) {\n      if (current.isEquivalentTo(prototype)) {\n        return true;\n      }\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " Checks that the prototype is an implicit prototype of this object. Since each object has an implicit prototype, an implicit prototype's implicit prototype is also this implicit prototype's.  @param prototype any prototype based object  @return {@code true} if {@code prototype} is {@code equal} to any object in this object's implicit prototype chain. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves checking the implicit prototype chain, which could potentially interact with dead assignments in conditional expressions. However, the issue seems to stem from how dead assignments are handled within those expressions rather than directly from this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::UnionType(JSTypeRegistry,Collection)",
+            "method_code": "```java\n  UnionType(JSTypeRegistry registry, Collection<JSType> alternates) {\n    super(registry);\n    this.alternates = alternates;\n    this.hashcode = this.alternates.hashCode();\n  }\n\n```",
+            "method_doc": " Creates a union type.  @param alternates the alternates of the union ",
+            "class_name": "com.google.javascript.rhino.jstype.UnionType",
+            "class_doc": " The {@code UnionType} implements a common JavaScript idiom in which the code is specifically designed to work with multiple input types.  Because JavaScript always knows the runtime type of an object value, this is safer than a C union.<p>  For instance, values of the union type {@code (String,boolean)} can be of type {@code String} or of type {@code boolean}. The commutativity of the statement is captured by making {@code (String,boolean)} and {@code (boolean,String)} equal.<p>  The implementation of this class prevents the creation of nested unions.<p> ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves creating union types, which could potentially interact with dead assignments in conditional expressions. However, the method itself does not directly handle dead assignments, so it's less likely to be the primary issue causing the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "4": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the handling of dead assignments within conditional expressions, rather than the functionality of the `getNativeType` method itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)",
+            "method_code": "```java\n  JSType(JSTypeRegistry registry) {\n    this.registry = registry;\n  }\n\n```",
+            "method_doc": "This method initializes the \"registry\" field with the provided \"JSTypeRegistry\".",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to the handling of dead assignments within conditional expressions, rather than the initialization of the `registry` field.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+            "method_code": "```java\n  @Override\n  public boolean isConstructor() {\n    return kind == Kind.CONSTRUCTOR;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents a constructor.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures pertains to the handling of dead assignments within conditional expressions, which is unrelated to the functionality of the `isConstructor()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents an interface.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures pertains to the handling of dead assignments within conditional expressions, which is unrelated to the functionality of the `isInterface()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()",
+            "method_code": "```java\n  @Override\n  public boolean isFunctionType() {\n    return true;\n  }\n\n```",
+            "method_doc": "Always returns `true` indicating the type is a function type.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the handling of dead assignments within conditional expressions, rather than the implementation of the `isFunctionType()` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 6,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    ObjectType TOP_LEVEL_PROTOTYPE =\n        new FunctionPrototypeType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    OBJECT_FUNCTION_TYPE.defineDeclaredProperty(\n        \"prototype\", TOP_LEVEL_PROTOTYPE, true, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createFunctionType(NO_TYPE, true, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n      createFunctionType(ALL_TYPE, true, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes built-in types by creating instances of various JavaScript primitive types and registering them with the type registry.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes built-in types which could potentially affect the behavior of function calls and variable assignments in the codebase.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 8,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it resets various internal state variables, which could potentially affect the behavior of other parts of the system during subsequent type checks. However, without further context, it's difficult to pinpoint exactly why these specific tests are failing.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()",
+            "method_code": "```java\n  private void initializeRegistry() {\n    register(getNativeType(JSTypeNative.ARRAY_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_TYPE));\n    register(getNativeType(JSTypeNative.DATE_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE), \"Null\");\n    register(getNativeType(JSTypeNative.NUMBER_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.NUMBER_TYPE));\n    register(getNativeType(JSTypeNative.OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.ERROR_TYPE));\n    register(getNativeType(JSTypeNative.URI_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.EVAL_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.TYPE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.RANGE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REFERENCE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.SYNTAX_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REGEXP_TYPE));\n    register(getNativeType(JSTypeNative.STRING_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.STRING_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"Undefined\");\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"void\");\n    register(getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE), \"Function\");\n  }\n\n```",
+            "method_doc": "Registers built-in types with their respective names and namespaces.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it registers built-in types, which could potentially affect the behavior of the compiler's type system. However, the issue seems to be related to function call optimization rather than type registration.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 6,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::hasChildren()",
+            "method_code": "```java\n  public boolean hasChildren() {\n    return first != null;\n  }\n\n```",
+            "method_doc": "Checks if the node has children.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it only checks if the 'first' child is not null, which does not account for other potential children nodes. It's possible that the issue lies elsewhere in the code handling function calls and side effects.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+            "method_code": "```java\n  public static String createDelegateSuffix(String suffix) {\n    return \"(\" + suffix + \")\";\n  }\n\n```",
+            "method_doc": " Creates a suffix for a proxy delegate. @see #getNormalizedReferenceName ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incomplete Simplification of Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incomplete in simplifying conditional expressions, leading to incorrect transformations. Specifically, it may not be fully evaluating the truthiness of expressions containing dead assignments.\n\n**Location:** Likely in the logic responsible for simplifying conditional expressions.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is not correctly simplifying the expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is not fully simplifying complex conditional expressions involving dead assignments.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the simplification of conditional expressions rather than the creation of delegate suffixes.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::toString()",
+            "method_code": "```java\n  @Override\n  public String toString() {\n    return getDisplayName();\n  }\n\n```",
+            "method_doc": "This method returns the display name of the boolean type by calling `getDisplayName()` method.",
+            "class_name": "com.google.javascript.rhino.jstype.BooleanType",
+            "class_doc": " Boolean type. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incomplete Simplification of Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incomplete in simplifying conditional expressions, leading to incorrect transformations. Specifically, it may not be fully evaluating the truthiness of expressions containing dead assignments.\n\n**Location:** Likely in the logic responsible for simplifying conditional expressions.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is not correctly simplifying the expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is not fully simplifying complex conditional expressions involving dead assignments.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failures observed in the test cases are related to the simplification of conditional expressions, which involves understanding the truthiness of expressions containing dead assignments. The `BooleanType::toString()` method does not directly impact the evaluation of these expressions, so fixing it would not resolve the issues.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::getDisplayName()",
+            "method_code": "```java\n  @Override\n  public String getDisplayName() {\n    return \"boolean\";\n  }\n\n```",
+            "method_doc": "This method returns the string \"boolean\".",
+            "class_name": "com.google.javascript.rhino.jstype.BooleanType",
+            "class_doc": " Boolean type. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incomplete Simplification of Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incomplete in simplifying conditional expressions, leading to incorrect transformations. Specifically, it may not be fully evaluating the truthiness of expressions containing dead assignments.\n\n**Location:** Likely in the logic responsible for simplifying conditional expressions.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is not correctly simplifying the expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is not fully simplifying complex conditional expressions involving dead assignments.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failures observed in the test cases are related to the simplification of conditional expressions, which involves understanding the truthiness of expressions containing dead assignments. The `BooleanType::getDisplayName()` method simply returns the string \"boolean\" and does not directly impact the evaluation of these expressions. Therefore, fixing this method would not address the root cause of the test failures.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::BooleanType(JSTypeRegistry)",
+            "method_code": "```java\n  BooleanType(JSTypeRegistry registry) {\n    super(registry);\n  }\n\n```",
+            "method_doc": "This constructor initializes a new instance of `BooleanType` by calling the superclass constructor with the provided `JSTypeRegistry`.",
+            "class_name": "com.google.javascript.rhino.jstype.BooleanType",
+            "class_doc": " Boolean type. ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Incomplete Simplification of Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incomplete in simplifying conditional expressions, leading to incorrect transformations. Specifically, it may not be fully evaluating the truthiness of expressions containing dead assignments.\n\n**Location:** Likely in the logic responsible for simplifying conditional expressions.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is not correctly simplifying the expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is not fully simplifying complex conditional expressions involving dead assignments.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failures observed in the test cases are related to the simplification of conditional expressions, which involves the evaluation of boolean values and the handling of dead assignments. The `BooleanType` class itself does not directly participate in the simplification process of conditional expressions. Therefore, fixing issues related to conditional expression simplification would likely involve modifying other parts of the codebase rather than this method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::propToString(int)",
+            "method_code": "```java\n  private static final String propToString(int propType) {\n      switch (propType) {\n        case LOCAL_BLOCK_PROP:   return \"local_block\";\n        case OBJECT_IDS_PROP:    return \"object_ids_prop\";\n        case CATCH_SCOPE_PROP:   return \"catch_scope_prop\";\n        case LABEL_ID_PROP:      return \"label_id_prop\";\n        case TARGET_PROP:        return \"target\";\n        case BREAK_PROP:         return \"break\";\n        case CONTINUE_PROP:      return \"continue\";\n        case ENUM_PROP:          return \"enum\";\n        case FUNCTION_PROP:      return \"function\";\n        case TEMP_PROP:          return \"temp\";\n        case LOCAL_PROP:         return \"local\";\n        case CODEOFFSET_PROP:    return \"codeoffset\";\n        case FIXUPS_PROP:        return \"fixups\";\n        case VARS_PROP:          return \"vars\";\n        case USES_PROP:          return \"uses\";\n        case REGEXP_PROP:        return \"regexp\";\n        case CASES_PROP:         return \"cases\";\n        case DEFAULT_PROP:       return \"default\";\n        case CASEARRAY_PROP:     return \"casearray\";\n        case SOURCENAME_PROP:    return \"sourcename\";\n        case TYPE_PROP:          return \"type\";\n        case SPECIAL_PROP_PROP:  return \"special_prop\";\n        case LABEL_PROP:         return \"label\";\n        case FINALLY_PROP:       return \"finally\";\n        case LOCALCOUNT_PROP:    return \"localcount\";\n\n        case TARGETBLOCK_PROP:   return \"targetblock\";\n        case VARIABLE_PROP:      return \"variable\";\n        case LASTUSE_PROP:       return \"lastuse\";\n        case ISNUMBER_PROP:      return \"isnumber\";\n        case DIRECTCALL_PROP:    return \"directcall\";\n\n        case SPECIALCALL_PROP:   return \"specialcall\";\n        case DEBUGSOURCE_PROP:   return \"debugsource\";\n\n        case JSDOC_INFO_PROP:    return \"jsdoc_info\";\n\n        case SKIP_INDEXES_PROP:  return \"skip_indexes\";\n        case INCRDECR_PROP:      return \"incrdecr\";\n        case MEMBER_TYPE_PROP:   return \"member_type\";\n        case NAME_PROP:          return \"name\";\n        case PARENTHESIZED_PROP: return \"parenthesized\";\n        case QUOTED_PROP:        return \"quoted\";\n\n        case SYNTHETIC_BLOCK_PROP: return \"synthetic\";\n        case EMPTY_BLOCK: return \"empty_block\";\n        case ORIGINALNAME_PROP: return \"originalname\";\n        case SIDE_EFFECT_FLAGS: return \"side_effect_flags\";\n\n        case IS_CONSTANT_NAME:   return \"is_constant_name\";\n        case IS_OPTIONAL_PARAM:  return \"is_optional_param\";\n        case IS_VAR_ARGS_PARAM:  return \"is_var_args_param\";\n        case IS_NAMESPACE:       return \"is_namespace\";\n        case IS_DISPATCHER:      return \"is_dispatcher\";\n        case DIRECTIVES:         return \"directives\";\n        case DIRECT_EVAL:        return \"direct_eval\";\n        case FREE_CALL:          return \"free_call\";\n        default:\n          Kit.codeBug();\n      }\n      return null;\n  }\n\n```",
+            "method_doc": "x..y or x..@i",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the optimization of function calls rather than the functionality of the `propToString` method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::getType()",
+            "method_code": "```java\n  public int getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the type of the node.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "test_failure_causes": "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the optimization of function calls rather than the `getType()` method itself. The `getType()` method simply returns the type of the node and does not perform any operations that could lead to the observed behavior.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)": {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+            "method_code": "```java\n  private void tryRemoveDeadAssignments(NodeTraversal t,\n      ControlFlowGraph<Node> cfg) {\n    Iterable<DiGraphNode<Node, Branch>> nodes = cfg.getDirectedGraphNodes();\n\n    for (DiGraphNode<Node, Branch> cfgNode : nodes) {\n      FlowState<LiveVariableLattice> state =\n          cfgNode.getAnnotation();\n      Node n = cfgNode.getValue();\n      if (n == null) {\n        continue;\n      }\n      switch (n.getType()) {\n        case Token.IF:\n        case Token.WHILE:\n        case Token.DO:\n          tryRemoveAssignment(t, NodeUtil.getConditionExpression(n), state);\n          continue;\n        case Token.FOR:\n          if (!NodeUtil.isForIn(n)) {\n            tryRemoveAssignment(\n                t, NodeUtil.getConditionExpression(n), state);\n          }\n          continue;\n        case Token.SWITCH:\n        case Token.CASE:\n        case Token.RETURN:\n          if (n.hasChildren()) {\n            tryRemoveAssignment(t, n.getFirstChild(), state);\n          }\n          continue;\n        // TODO(user): case Token.VAR: Remove var a=1;a=2;.....\n      }\n\n      tryRemoveAssignment(t, n, state);\n    }\n  }\n\n```",
+            "method_doc": " Try to remove useless assignments from a control flow graph that has been annotated with liveness information.  @param t The node traversal. @param cfg The control flow graph of the program annotated with liveness information. "
+        },
+        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)": {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)",
+            "method_code": "```java\n  private void tryRemoveAssignment(NodeTraversal t, Node n, Node exprRoot,\n      FlowState<LiveVariableLattice> state) {\n\n    Node parent = n.getParent();\n\n    if (NodeUtil.isAssignmentOp(n) ||\n        n.getType() == Token.INC || n.getType() == Token.DEC) {\n\n      Node lhs = n.getFirstChild();\n      Node rhs = lhs.getNext();\n\n      // Recurse first. Example: dead_x = dead_y = 1; We try to clean up dead_y\n      // first.\n      if (rhs != null) {\n        tryRemoveAssignment(t, rhs, exprRoot, state);\n        rhs = lhs.getNext();\n      }\n\n      Scope scope = t.getScope();\n      if (!NodeUtil.isName(lhs)) {\n        return; // Not a local variable assignment.\n      }\n      String name = lhs.getString();\n      if (!scope.isDeclared(name, false)) {\n        return;\n      }\n      Var var = scope.getVar(name);\n\n      if (liveness.getEscapedLocals().contains(var)) {\n        return; // Local variable that might be escaped due to closures.\n      }\n\n      // If we have an identity assignment such as a=a, always remove it\n      // regardless of what the liveness results because it\n      // does not change the result afterward.\n      if (rhs != null &&\n          NodeUtil.isName(rhs) &&\n          rhs.getString().equals(var.name) &&\n          NodeUtil.isAssign(n)) {\n        n.removeChild(rhs);\n        n.getParent().replaceChild(n, rhs);\n        compiler.reportCodeChange();\n        return;\n      }\n\n      if (state.getOut().isLive(var)) {\n        return; // Variable not dead.\n      }\n\n      if (state.getIn().isLive(var) &&\n          isVariableStillLiveWithinExpression(n, exprRoot, var.name)) {\n        // The variable is killed here but it is also live before it.\n        // This is possible if we have say:\n        //    if (X = a && a = C) {..} ; .......; a = S;\n        // In this case we are safe to remove \"a = C\" because it is dead.\n        // However if we have:\n        //    if (a = C && X = a) {..} ; .......; a = S;\n        // removing \"a = C\" is NOT correct, although the live set at the node\n        // is exactly the same.\n        // TODO(user): We need more fine grain CFA or we need to keep track\n        // of GEN sets when we recurse here.\n        return;\n      }\n\n      if (NodeUtil.isAssign(n)) {\n        n.removeChild(rhs);\n        n.getParent().replaceChild(n, rhs);\n      } else if (NodeUtil.isAssignmentOp(n)) {\n        n.removeChild(rhs);\n        n.removeChild(lhs);\n        Node op = new Node(NodeUtil.getOpFromAssignmentOp(n), lhs, rhs);\n        parent.replaceChild(n, op);\n      } else if (n.getType() == Token.INC || n.getType() == Token.DEC) {\n        if (NodeUtil.isExpressionNode(parent)) {\n          parent.replaceChild(n,\n              new Node(Token.VOID, Node.newNumber(0).copyInformationFrom(n)));\n        } else if(n.getType() == Token.COMMA && n != parent.getLastChild()) {\n          parent.removeChild(n);\n        } else if (parent.getType() == Token.FOR && !NodeUtil.isForIn(parent) &&\n            NodeUtil.getConditionExpression(parent) != n) {\n          parent.replaceChild(n, new Node(Token.EMPTY));\n        } else {\n          // Cannot replace x = a++ with x = a because that's not valid\n          // when a is not a number.\n          return;\n        }\n      } else {\n        // Not reachable.\n        Preconditions.checkState(false, \"Unknown statement\");\n      }\n\n      compiler.reportCodeChange();\n      return;\n\n    } else {\n      for (Node c = n.getFirstChild(); c != null;) {\n        Node next = c.getNext();\n        if (!ControlFlowGraph.isEnteringNewCfgNode(c)) {\n          tryRemoveAssignment(t, c, exprRoot, state);\n        }\n        c = next;\n      }\n      return;\n    }\n  }\n\n```",
+            "method_doc": " Determines if any local variables are dead after the instruction {@code n} and are assigned within the subtree of {@code n}. Removes those assignments if there are any.  @param n Target instruction. @param exprRoot The CFG node where the liveness information in state is still correct. @param state The liveness information at {@code n}. "
+        },
+        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)": {
+            "method_name": "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+            "method_code": "```java\n  private void tryRemoveAssignment(NodeTraversal t, Node n,\n      FlowState<LiveVariableLattice> state) {\n    tryRemoveAssignment(t, n, n, state);\n  }\n\n```",
+            "method_doc": "This method is overloaded and primarily calls another version of itself. It checks if the node is an assignment operation, increments/decrements, or a VAR declaration, and removes unnecessary assignments based on liveness analysis."
+        },
+        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtype(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType instanceof UnionType) {\n      UnionType union = (UnionType)thatType;\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // named types\n    if (thatType instanceof NamedType) {\n      return thisType.isSubtype(((NamedType)thatType).getReferencedType());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, boolean inExterns, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false, inExterns,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param inExterns {@code true} if this property was defined in an externs file. TightenTypes assumes that any function passed to an externs property could be called, so setting this incorrectly could result in live code being removed. @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)",
+            "method_code": "```java\n  boolean hasOwnDeclaredProperty(String name) {\n    return hasOwnProperty(name) && isPropertyTypeDeclared(name);\n  }\n\n```",
+            "method_doc": " Whether the given property is declared on this object. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::isImplicitPrototype(ObjectType)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::isImplicitPrototype(ObjectType)",
+            "method_code": "```java\n  final boolean isImplicitPrototype(ObjectType prototype) {\n    for (ObjectType current = this;\n         current != null;\n         current = current.getImplicitPrototype()) {\n      if (current.isEquivalentTo(prototype)) {\n        return true;\n      }\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " Checks that the prototype is an implicit prototype of this object. Since each object has an implicit prototype, an implicit prototype's implicit prototype is also this implicit prototype's.  @param prototype any prototype based object  @return {@code true} if {@code prototype} is {@code equal} to any object in this object's implicit prototype chain. "
+        },
+        "com.google.javascript.rhino.jstype.UnionType::UnionType(JSTypeRegistry,Collection)": {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::UnionType(JSTypeRegistry,Collection)",
+            "method_code": "```java\n  UnionType(JSTypeRegistry registry, Collection<JSType> alternates) {\n    super(registry);\n    this.alternates = alternates;\n    this.hashcode = this.alternates.hashCode();\n  }\n\n```",
+            "method_doc": " Creates a union type.  @param alternates the alternates of the union "
+        },
+        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. "
+        },
+        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)",
+            "method_code": "```java\n  JSType(JSTypeRegistry registry) {\n    this.registry = registry;\n  }\n\n```",
+            "method_doc": "This method initializes the \"registry\" field with the provided \"JSTypeRegistry\"."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+            "method_code": "```java\n  @Override\n  public boolean isConstructor() {\n    return kind == Kind.CONSTRUCTOR;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents a constructor."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isInterface()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type represents an interface."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()",
+            "method_code": "```java\n  @Override\n  public boolean isFunctionType() {\n    return true;\n  }\n\n```",
+            "method_doc": "Always returns `true` indicating the type is a function type."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    ObjectType TOP_LEVEL_PROTOTYPE =\n        new FunctionPrototypeType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    OBJECT_FUNCTION_TYPE.defineDeclaredProperty(\n        \"prototype\", TOP_LEVEL_PROTOTYPE, true, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createFunctionType(NO_TYPE, true, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n      createFunctionType(ALL_TYPE, true, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes built-in types by creating instances of various JavaScript primitive types and registering them with the type registry."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()",
+            "method_code": "```java\n  private void initializeRegistry() {\n    register(getNativeType(JSTypeNative.ARRAY_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.BOOLEAN_TYPE));\n    register(getNativeType(JSTypeNative.DATE_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE));\n    register(getNativeType(JSTypeNative.NULL_TYPE), \"Null\");\n    register(getNativeType(JSTypeNative.NUMBER_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.NUMBER_TYPE));\n    register(getNativeType(JSTypeNative.OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.ERROR_TYPE));\n    register(getNativeType(JSTypeNative.URI_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.EVAL_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.TYPE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.RANGE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REFERENCE_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.SYNTAX_ERROR_TYPE));\n    register(getNativeType(JSTypeNative.REGEXP_TYPE));\n    register(getNativeType(JSTypeNative.STRING_OBJECT_TYPE));\n    register(getNativeType(JSTypeNative.STRING_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE));\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"Undefined\");\n    register(getNativeType(JSTypeNative.VOID_TYPE), \"void\");\n    register(getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE), \"Function\");\n  }\n\n```",
+            "method_doc": "Registers built-in types with their respective names and namespaces."
+        },
+        "com.google.javascript.rhino.Node::hasChildren()": {
+            "method_name": "com.google.javascript.rhino.Node::hasChildren()",
+            "method_code": "```java\n  public boolean hasChildren() {\n    return first != null;\n  }\n\n```",
+            "method_doc": "Checks if the node has children."
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+            "method_code": "```java\n  public static String createDelegateSuffix(String suffix) {\n    return \"(\" + suffix + \")\";\n  }\n\n```",
+            "method_doc": " Creates a suffix for a proxy delegate. @see #getNormalizedReferenceName "
+        },
+        "com.google.javascript.rhino.jstype.BooleanType::toString()": {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::toString()",
+            "method_code": "```java\n  @Override\n  public String toString() {\n    return getDisplayName();\n  }\n\n```",
+            "method_doc": "This method returns the display name of the boolean type by calling `getDisplayName()` method."
+        },
+        "com.google.javascript.rhino.jstype.BooleanType::getDisplayName()": {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::getDisplayName()",
+            "method_code": "```java\n  @Override\n  public String getDisplayName() {\n    return \"boolean\";\n  }\n\n```",
+            "method_doc": "This method returns the string \"boolean\"."
+        },
+        "com.google.javascript.rhino.jstype.BooleanType::BooleanType(JSTypeRegistry)": {
+            "method_name": "com.google.javascript.rhino.jstype.BooleanType::BooleanType(JSTypeRegistry)",
+            "method_code": "```java\n  BooleanType(JSTypeRegistry registry) {\n    super(registry);\n  }\n\n```",
+            "method_doc": "This constructor initializes a new instance of `BooleanType` by calling the superclass constructor with the provided `JSTypeRegistry`."
+        },
+        "com.google.javascript.rhino.Node::propToString(int)": {
+            "method_name": "com.google.javascript.rhino.Node::propToString(int)",
+            "method_code": "```java\n  private static final String propToString(int propType) {\n      switch (propType) {\n        case LOCAL_BLOCK_PROP:   return \"local_block\";\n        case OBJECT_IDS_PROP:    return \"object_ids_prop\";\n        case CATCH_SCOPE_PROP:   return \"catch_scope_prop\";\n        case LABEL_ID_PROP:      return \"label_id_prop\";\n        case TARGET_PROP:        return \"target\";\n        case BREAK_PROP:         return \"break\";\n        case CONTINUE_PROP:      return \"continue\";\n        case ENUM_PROP:          return \"enum\";\n        case FUNCTION_PROP:      return \"function\";\n        case TEMP_PROP:          return \"temp\";\n        case LOCAL_PROP:         return \"local\";\n        case CODEOFFSET_PROP:    return \"codeoffset\";\n        case FIXUPS_PROP:        return \"fixups\";\n        case VARS_PROP:          return \"vars\";\n        case USES_PROP:          return \"uses\";\n        case REGEXP_PROP:        return \"regexp\";\n        case CASES_PROP:         return \"cases\";\n        case DEFAULT_PROP:       return \"default\";\n        case CASEARRAY_PROP:     return \"casearray\";\n        case SOURCENAME_PROP:    return \"sourcename\";\n        case TYPE_PROP:          return \"type\";\n        case SPECIAL_PROP_PROP:  return \"special_prop\";\n        case LABEL_PROP:         return \"label\";\n        case FINALLY_PROP:       return \"finally\";\n        case LOCALCOUNT_PROP:    return \"localcount\";\n\n        case TARGETBLOCK_PROP:   return \"targetblock\";\n        case VARIABLE_PROP:      return \"variable\";\n        case LASTUSE_PROP:       return \"lastuse\";\n        case ISNUMBER_PROP:      return \"isnumber\";\n        case DIRECTCALL_PROP:    return \"directcall\";\n\n        case SPECIALCALL_PROP:   return \"specialcall\";\n        case DEBUGSOURCE_PROP:   return \"debugsource\";\n\n        case JSDOC_INFO_PROP:    return \"jsdoc_info\";\n\n        case SKIP_INDEXES_PROP:  return \"skip_indexes\";\n        case INCRDECR_PROP:      return \"incrdecr\";\n        case MEMBER_TYPE_PROP:   return \"member_type\";\n        case NAME_PROP:          return \"name\";\n        case PARENTHESIZED_PROP: return \"parenthesized\";\n        case QUOTED_PROP:        return \"quoted\";\n\n        case SYNTHETIC_BLOCK_PROP: return \"synthetic\";\n        case EMPTY_BLOCK: return \"empty_block\";\n        case ORIGINALNAME_PROP: return \"originalname\";\n        case SIDE_EFFECT_FLAGS: return \"side_effect_flags\";\n\n        case IS_CONSTANT_NAME:   return \"is_constant_name\";\n        case IS_OPTIONAL_PARAM:  return \"is_optional_param\";\n        case IS_VAR_ARGS_PARAM:  return \"is_var_args_param\";\n        case IS_NAMESPACE:       return \"is_namespace\";\n        case IS_DISPATCHER:      return \"is_dispatcher\";\n        case DIRECTIVES:         return \"directives\";\n        case DIRECT_EVAL:        return \"direct_eval\";\n        case FREE_CALL:          return \"free_call\";\n        default:\n          Kit.codeBug();\n      }\n      return null;\n  }\n\n```",
+            "method_doc": "x..y or x..@i"
+        },
+        "com.google.javascript.rhino.Node::getType()": {
+            "method_name": "com.google.javascript.rhino.Node::getType()",
+            "method_code": "```java\n  public int getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the type of the node."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.DeadAssignmentsEliminationTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Dead Assignments in Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly identifying and removing dead assignments within conditional expressions. Specifically, it may not be properly distinguishing between dead assignments that do not affect the control flow and those that do.\n\n**Location:** Likely in the logic responsible for identifying and eliminating dead assignments within conditional expressions.\n\n**Observation:** All four failing tests involve dead assignments within conditional expressions. The failure in `testInExpression2` suggests that the pass is incorrectly removing the dead assignment `a = 1`. Similarly, the failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` indicate issues with handling dead assignments within nested conditional expressions.",
+                "Incomplete Simplification of Conditional Expressions\n**Description:** The `DeadAssignmentsElimination` pass might be incomplete in simplifying conditional expressions, leading to incorrect transformations. Specifically, it may not be fully evaluating the truthiness of expressions containing dead assignments.\n\n**Location:** Likely in the logic responsible for simplifying conditional expressions.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is not correctly simplifying the expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is not fully simplifying complex conditional expressions involving dead assignments.",
+                "Over-Optimization of Function Calls\n**Description:** The `DeadAssignmentsElimination` pass might be over-optimizing function calls, leading to incorrect transformations. Specifically, it may be incorrectly assuming that function calls with side effects can be replaced with their return values without affecting the overall behavior of the code.\n\n**Location:** Likely in the logic responsible for optimizing function calls.\n\n**Observation:** The failure in `testIssue384b` indicates that the pass is incorrectly replacing `f(b = true)` with `f(true)`, despite the fact that `b = true` has side effects. The failures in `testIssue384c` and `testIssue384d` also suggest that the pass is making incorrect assumptions about the behavior of function calls within conditional expressions.",
+                "Incorrect Propagation of Dead Assignments\n**Description:** The `DeadAssignmentsElimination` pass might be incorrectly propagating dead assignments through the code, leading to incorrect transformations. Specifically, it may be incorrectly assuming that dead assignments can be propagated through logical operators like `||` and `&&`.\n\n**Location:** Likely in the logic responsible for propagating dead assignments through logical operators.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is incorrectly propagating the dead assignment `a = 1` through the logical expression `(a = 2) || (a = 3) || (a)`. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is making incorrect assumptions about the propagation of dead assignments through logical operators.",
+                "Lack of Proper Contextual Analysis\n**Description:** The `DeadAssignmentsElimination` pass might lack proper contextual analysis, leading to incorrect transformations. Specifically, it may be incorrectly assuming that certain assignments are dead without considering the broader context of the code.\n\n**Location:** Likely in the logic responsible for performing contextual analysis.\n\n**Observation:** The failure in `testInExpression2` shows that the pass is incorrectly assuming that the assignment `a = 1` is dead without considering the subsequent use of `a` in the conditional expression. The failures in `testIssue384b`, `testIssue384c`, and `testIssue384d` also suggest that the pass is lacking proper contextual analysis when dealing with dead assignments within complex expressions."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    7.333333333333333
+                ],
+                "2": [
+                    8,
+                    7.333333333333333
+                ],
+                "3": [
+                    8,
+                    6.666666666666667
+                ],
+                "4": [
+                    8,
+                    7.333333333333333
+                ],
+                "5": [
+                    8,
+                    7.333333333333333
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.UnionType"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.BooleanType"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.Node"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.BooleanType",
+                    "com.google.javascript.rhino.jstype.UnionType"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination": [
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::isImplicitPrototype(ObjectType)"
+                    ],
+                    "com.google.javascript.rhino.jstype.UnionType": [
+                        "com.google.javascript.rhino.jstype.UnionType::UnionType(JSTypeRegistry,Collection)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination": [
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.BooleanType": [
+                        "com.google.javascript.rhino.jstype.BooleanType::toString()",
+                        "com.google.javascript.rhino.jstype.BooleanType::getDisplayName()",
+                        "com.google.javascript.rhino.jstype.BooleanType::BooleanType(JSTypeRegistry)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination": [
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::propToString(int)",
+                        "com.google.javascript.rhino.Node::getType()",
+                        "com.google.javascript.rhino.Node::hasChildren()"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination": [
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.BooleanType": [
+                        "com.google.javascript.rhino.jstype.BooleanType::toString()",
+                        "com.google.javascript.rhino.jstype.BooleanType::getDisplayName()",
+                        "com.google.javascript.rhino.jstype.BooleanType::BooleanType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.UnionType": [
+                        "com.google.javascript.rhino.jstype.UnionType::UnionType(JSTypeRegistry,Collection)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.DeadAssignmentsElimination": [
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveDeadAssignments(NodeTraversal,ControlFlowGraph)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,FlowState)",
+                        "com.google.javascript.jscomp.DeadAssignmentsElimination::tryRemoveAssignment(NodeTraversal,Node,Node,FlowState)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType,JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::JSType(JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isConstructor()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isFunctionType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::createDelegateSuffix(String)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,boolean,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::hasOwnDeclaredProperty(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeRegistry()"
+                    ]
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,1343 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.TypeCheck",
+        "com.google.javascript.rhino.jstype.JSTypeRegistry",
+        "com.google.javascript.rhino.jstype.ObjectType",
+        "com.google.javascript.rhino.jstype.FunctionType",
+        "com.google.javascript.jscomp.JSSourceFile",
+        "com.google.javascript.jscomp.FunctionTypeBuilder",
+        "com.google.javascript.rhino.jstype.JSType",
+        "com.google.javascript.rhino.jstype.PrototypeObjectType",
+        "com.google.javascript.jscomp.NodeTraversal",
+        "com.google.javascript.jscomp.CompilerInput"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        } else {\n          // Object literal keys are not typeable\n          typeable = false;\n        }\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.isNE()) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles various types of JavaScript nodes and their properties, which could involve incorrect type inference for annotations like `@lends`. The failure in both tests suggests that there might be an issue with how the type checker processes these annotations within the `visit` method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitObjLitKey(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitObjLitKey(NodeTraversal t, Node key, Node objlit) {\n    // TODO(johnlenz): Validate get and set function declarations are valid\n    // as is the functions can have \"extraneous\" bits.\n\n    // For getter and setter property definitions the\n    // rvalue type != the property type.\n    Node rvalue = key.getFirstChild();\n    JSType rightType = NodeUtil.getObjectLitKeyTypeFromValueType(\n        key, getJSType(rvalue));\n    if (rightType == null) {\n      rightType = getNativeType(UNKNOWN_TYPE);\n    }\n\n    Node owner = objlit;\n\n    // Validate value is assignable to the key type.\n\n    JSType keyType = getJSType(key);\n\n    JSType allowedValueType = keyType;\n    if (allowedValueType.isEnumElementType()) {\n      allowedValueType =\n          allowedValueType.toMaybeEnumElementType().getPrimitiveType();\n    }\n\n    boolean valid = validator.expectCanAssignToPropertyOf(t, key,\n        rightType, allowedValueType,\n        owner, NodeUtil.getObjectLitKeyName(key));\n    if (valid) {\n      ensureTyped(t, key, rightType);\n    } else {\n      ensureTyped(t, key);\n    }\n\n    // Validate that the key type is assignable to the object property type.\n    // This is necessary as the objlit may have been cast to a non-literal\n    // object type.\n    // TODO(johnlenz): consider introducing a CAST node to the AST (or\n    // perhaps a parentheses node).\n\n    JSType objlitType = getJSType(objlit);\n    ObjectType type = ObjectType.cast(\n        objlitType.restrictByNotNullOrUndefined());\n    if (type != null) {\n      String property = NodeUtil.getObjectLitKeyName(key);\n      if (type.hasProperty(property) &&\n          !type.isPropertyTypeInferred(property) &&\n          !propertyIsImplicitCast(type, property)) {\n        validator.expectCanAssignToPropertyOf(\n            t, key, keyType,\n            type.getPropertyType(property), owner, property);\n      }\n      return;\n    }\n  }\n\n```",
+            "method_doc": " Visits an object literal field definition <code>key : value</code>.  If the <code>lvalue</code> is a prototype modification, we change the schema of the object type it is referring to.  @param t the traversal @param key the assign node ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the processing of object literal keys, including those modified by the `@lends` annotation. The issue described involves incorrect type inference for properties annotated with `@lends`, which aligns with the functionality handled by this method. Additionally, the method's role in validating assignments to object properties makes it a prime candidate for addressing the root cause of the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the definition of properties on an object type, which could potentially be causing the issue with the `@lends` annotation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 6
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineInferredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    if (hasProperty(propertyName)) {\n      JSType originalType = getPropertyType(propertyName);\n      type = originalType == null ? type :\n          originalType.getLeastSupertype(type);\n    }\n\n    boolean result = defineProperty(propertyName, type, true,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is inferred. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the inferred definition of property that might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the inference and definition of properties on an object type. The issue described in the test failures involves incorrect type inference for properties annotated with `@lends`, which suggests that there might be a flaw in how the method processes or updates property types. By fixing this method, we can ensure that the type checker correctly infers and maintains property types, thus resolving the inconsistencies observed in the test cases.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 6
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType findPropertyType(String propertyName) {\n    return hasProperty(propertyName) ?\n        getPropertyType(propertyName) : null;\n  }\n\n```",
+            "method_doc": "This method finds the type of a property on the object type. It takes a property name and returns the type if the property exists, otherwise it returns `null`.",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the retrieval of property types, which seems to be the root cause of the issue in both test cases. The method's implementation checks if the property exists and returns its type if found, otherwise it returns null. Given that the errors involve inconsistent return types and missing property declarations, fixing the logic within this method could address the underlying problem.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 6
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType,Node)",
+            "method_code": "```java\n  void setPrototypeBasedOn(ObjectType baseType, Node propertyNode) {\n    // This is a bit weird. We need to successfully handle these\n    // two cases:\n    // Foo.prototype = new Bar();\n    // and\n    // Foo.prototype = {baz: 3};\n    // In the first case, we do not want new properties to get\n    // added to Bar. In the second case, we do want new properties\n    // to get added to the type of the anonymous object.\n    //\n    // We handle this by breaking it into two cases:\n    //\n    // In the first case, we create a new PrototypeObjectType and set\n    // its implicit prototype to the type being assigned. This ensures\n    // that Bar will not get any properties of Foo.prototype, but properties\n    // later assigned to Bar will get inherited properly.\n    //\n    // In the second case, we just use the anonymous object as the prototype.\n    if (baseType.hasReferenceName() ||\n        isNativeObjectType() ||\n        baseType.isFunctionPrototypeType() ||\n        !(baseType instanceof PrototypeObjectType)) {\n\n      baseType = new PrototypeObjectType(\n          registry, this.getReferenceName() + \".prototype\", baseType);\n    }\n    setPrototype((PrototypeObjectType) baseType, propertyNode);\n  }\n\n```",
+            "method_doc": "Sets the prototype based on the provided object type and property node, handling different cases.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the setting of prototypes, which seems to be the root cause of the issue in the failing tests. The method's logic involves creating new prototype objects and setting their properties, which could potentially misinterpret the types when using the `@lends` annotation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitGetProp(NodeTraversal t, Node n, Node parent) {\n    // GETPROP nodes have an assigned type on their node by the scope creator\n    // if this is an enum declaration. The only namespaced enum declarations\n    // that we allow are of the form object.name = ...;\n    if (n.getJSType() != null && parent.isAssign()) {\n      return;\n    }\n\n    // obj.prop or obj.method()\n    // Lots of types can appear on the left, a call to a void function can\n    // never be on the left. getPropertyType will decide what is acceptable\n    // and what isn't.\n    Node property = n.getLastChild();\n    Node objNode = n.getFirstChild();\n    JSType childType = getJSType(objNode);\n\n    // TODO(user): remove in favor of flagging every property access on\n    // non-object.\n    if (!validator.expectNotNullOrUndefined(t, n, childType,\n            \"No properties on this expression\", getNativeType(OBJECT_TYPE))) {\n      ensureTyped(t, n);\n      return;\n    }\n\n    checkPropertyAccess(childType, property.getString(), t, n);\n    ensureTyped(t, n);\n  }\n\n```",
+            "method_doc": " Visits a GETPROP node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of <code>n</code> ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles property accesses and type checking, which could involve the `@lends` annotation. However, the specific issue seems to relate to how the type checker interprets the `@lends` annotation rather than general property access.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6,
+                "3": 6,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::declareType(String,JSType)",
+            "method_code": "```java\n  public boolean declareType(String name, JSType t) {\n    if (namesToTypes.containsKey(name)) {\n      return false;\n    }\n    register(t, name);\n    return true;\n  }\n\n```",
+            "method_doc": " Records declared global type names. This makes resolution faster and more robust in the common case.  @param name The name of the type to be recorded. @param t The actual type being associated with the name. @return True if this name is not already defined, false otherwise. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it records declared global type names, which could potentially affect how types are inferred and resolved. However, it does not directly handle the logic for processing the `@lends` annotation, so it is unlikely to be the primary cause of the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "5": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getType(String)",
+            "method_code": "```java\n  public JSType getType(String jsTypeName) {\n    // TODO(user): Push every local type name out of namesToTypes so that\n    // NamedType#resolve is correct.\n    if (jsTypeName.equals(templateTypeName)) {\n      return templateType;\n    }\n    return namesToTypes.get(jsTypeName);\n  }\n\n```",
+            "method_doc": " Looks up a type by name.  @param jsTypeName The name string. @return the corresponding JSType object or {@code null} it cannot be found ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly handles type lookups by name, which could potentially affect how types are inferred and resolved, especially in complex scenarios involving annotations like `@lends`. However, it's unlikely to be the sole cause of the issue since the problem seems to be related to how the type checker processes the `@lends` annotation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "2": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getPrototype()",
+            "method_code": "```java\n  public ObjectType getPrototype() {\n    // lazy initialization of the prototype field\n    if (prototypeSlot == null) {\n      setPrototype(\n          new PrototypeObjectType(\n              registry,\n              this.getReferenceName() + \".prototype\",\n              registry.getNativeObjectType(OBJECT_TYPE),\n              isNativeObjectType()),\n          null);\n    }\n    return (ObjectType) prototypeSlot.getType();\n  }\n\n```",
+            "method_doc": " Gets the {@code prototype} property of this function type. This is equivalent to {@code (ObjectType) getPropertyType(\"prototype\")}. ",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves lazy initialization of the prototype field, which could potentially lead to incorrect type inference if not handled properly. However, the issue seems to be more related to how the `@lends` annotation is being processed rather than the prototype retrieval itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 6,
+                "3": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType)",
+            "method_code": "```java\n  public void setPrototypeBasedOn(ObjectType baseType) {\n    setPrototypeBasedOn(baseType, null);\n  }\n\n```",
+            "method_doc": " Sets the prototype, creating the prototype object from the given base type. @param baseType The base type. ",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it sets the prototype of a function type based on a given base type. However, the issue seems to be related to how the type checker handles the `@lends` annotation rather than directly setting the prototype.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 6
+            },
+            "rank_key": [
+                1,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error messages indicate issues with the interpretation of the `@lends` annotation, which seems to be related to property inference rather than the error reporting mechanism provided by this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)",
+            "method_code": "```java\n  private void checkPropertyAccess(JSType childType, String propName,\n      NodeTraversal t, Node n) {\n    // If the property type is unknown, check the object type to see if it\n    // can ever be defined. We explicitly exclude CHECKED_UNKNOWN (for\n    // properties where we've checked that it exists, or for properties on\n    // objects that aren't in this binary).\n    JSType propType = getJSType(n);\n    if (propType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n      childType = childType.autobox();\n      ObjectType objectType = ObjectType.cast(childType);\n      if (objectType != null) {\n        // We special-case object types so that checks on enums can be\n        // much stricter, and so that we can use hasProperty (which is much\n        // faster in most cases).\n        if (!objectType.hasProperty(propName) ||\n            objectType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n          if (objectType instanceof EnumType) {\n            report(t, n, INEXISTENT_ENUM_ELEMENT, propName);\n          } else {\n            checkPropertyAccessHelper(objectType, propName, t, n);\n          }\n        }\n\n      } else {\n        checkPropertyAccessHelper(childType, propName, t, n);\n      }\n    }\n  }\n\n```",
+            "method_doc": " Emit a warning if we can prove that a property cannot possibly be defined on an object. Note the difference between JS and a strictly statically typed language: we're checking if the property cannot be defined*, whereas a java compiler would check if the property *can be undefined*. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves checking property access and handling types, which seems to be the root cause of the test failures. The method's purpose aligns with the observed issues, and fixing it could potentially resolve the inconsistencies in return types and undeclared prototype variables.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferInheritance(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferInheritance(@Nullable JSDocInfo info) {\n    if (info != null) {\n      isConstructor = info.isConstructor();\n      isInterface = info.isInterface();\n\n      // base type\n      if (info.hasBaseType()) {\n        if (isConstructor) {\n          JSType maybeBaseType =\n              info.getBaseType().evaluate(scope, typeRegistry);\n          if (maybeBaseType != null &&\n              maybeBaseType.setValidator(new ExtendedTypeValidator())) {\n            baseType = (ObjectType) maybeBaseType;\n          }\n        } else {\n          reportWarning(EXTENDS_WITHOUT_TYPEDEF, fnName);\n        }\n      }\n\n      // implemented interfaces\n      if (isConstructor || isInterface) {\n        implementedInterfaces = Lists.newArrayList();\n        for (JSTypeExpression t : info.getImplementedInterfaces()) {\n          JSType maybeInterType = t.evaluate(scope, typeRegistry);\n          if (maybeInterType != null &&\n              maybeInterType.setValidator(new ImplementedTypeValidator())) {\n            implementedInterfaces.add((ObjectType) maybeInterType);\n          }\n        }\n      } else if (info.getImplementedInterfaceCount() > 0) {\n        reportWarning(IMPLEMENTS_WITHOUT_CONSTRUCTOR, fnName);\n      }\n\n      // extended interfaces (for interface only)\n      if (isInterface) {\n        extendedInterfaces = Lists.newArrayList();\n        for (JSTypeExpression t : info.getExtendedInterfaces()) {\n          JSType maybeInterfaceType = t.evaluate(scope, typeRegistry);\n          if (maybeInterfaceType != null &&\n              maybeInterfaceType.setValidator(new ExtendedTypeValidator())) {\n            extendedInterfaces.add((ObjectType) maybeInterfaceType);\n          }\n        }\n      }\n    }\n\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the role of the function (whether it's a constructor or interface) and what it inherits from in JSDocInfo. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves inferring inheritance relationships from JSDocInfo, which seems to be the root cause of the type mismatch issues in the failing tests.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::getSlot(String)",
+            "method_code": "```java\n  @Override\n  public Property getSlot(String name) {\n    if (properties.containsKey(name)) {\n      return properties.get(name);\n    }\n    ObjectType implicitPrototype = getImplicitPrototype();\n    if (implicitPrototype != null) {\n      Property prop = implicitPrototype.getSlot(name);\n      if (prop != null) {\n        return prop;\n      }\n    }\n    for (ObjectType interfaceType : getCtorExtendedInterfaces()) {\n      Property prop = interfaceType.getSlot(name);\n      if (prop != null) {\n        return prop;\n      }\n    }\n    return null;\n  }\n\n```",
+            "method_doc": "Retrieves a property from the object or its prototype chain. Calls `getImplicitPrototype()` and iterates over extended interfaces.",
+            "class_name": "com.google.javascript.rhino.jstype.PrototypeObjectType",
+            "class_doc": " The object type represents instances of JavaScript objects such as {@code Object}, {@code Date}, {@code Function}.<p>  Objects in JavaScript are unordered collections of properties. Each property consists of a name, a value and a set of attributes.<p>  Each instance has an implicit prototype property ({@code [[Prototype]]}) pointing to an object instance, which itself has an implicit property, thus forming a chain.<p>  A class begins life with no name.  Later, a name may be provided once it can be inferred.  Note that the name in this case is strictly for debugging purposes.  Looking up type name references goes through the {@link JSTypeRegistry}.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for retrieving properties from the object or its prototype chain. The failure in both tests suggests that there might be an issue with how properties are being retrieved or checked, especially when dealing with prototype chains. Fixing this method could potentially resolve the inconsistencies in return types reported in the test outputs.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::getPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType getPropertyType(String property) {\n    StaticSlot<JSType> slot = getSlot(property);\n    if (slot == null) {\n      return getNativeType(JSTypeNative.UNKNOWN_TYPE);\n    }\n    return slot.getType();\n  }\n\n```",
+            "method_doc": "Retrieves the type of a property, either declared or inherited. Calls `getSlot()`.",
+            "class_name": "com.google.javascript.rhino.jstype.PrototypeObjectType",
+            "class_doc": " The object type represents instances of JavaScript objects such as {@code Object}, {@code Date}, {@code Function}.<p>  Objects in JavaScript are unordered collections of properties. Each property consists of a name, a value and a set of attributes.<p>  Each instance has an implicit prototype property ({@code [[Prototype]]}) pointing to an object instance, which itself has an implicit property, thus forming a chain.<p>  A class begins life with no name.  Later, a name may be provided once it can be inferred.  Note that the name in this case is strictly for debugging purposes.  Looking up type name references goes through the {@link JSTypeRegistry}.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the retrieval of property types, including those declared or inherited. The issue observed in the test cases suggests that there might be a problem with how the method handles prototype properties, leading to incorrect type assumptions during the type checking process.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  boolean visitName(NodeTraversal t, Node n, Node parent) {\n    // At this stage, we need to determine whether this is a leaf\n    // node in an expression (which therefore needs to have a type\n    // assigned for it) versus some other decorative node that we\n    // can safely ignore.  Function names, arguments (children of LP nodes) and\n    // variable declarations are ignored.\n    // TODO(user): remove this short-circuiting in favor of a\n    // pre order traversal of the FUNCTION, CATCH, LP and VAR nodes.\n    int parentNodeType = parent.getType();\n    if (parentNodeType == Token.FUNCTION ||\n        parentNodeType == Token.CATCH ||\n        parentNodeType == Token.PARAM_LIST ||\n        parentNodeType == Token.VAR) {\n      return false;\n    }\n\n    JSType type = n.getJSType();\n    if (type == null) {\n      type = getNativeType(UNKNOWN_TYPE);\n      Var var = t.getScope().getVar(n.getString());\n      if (var != null) {\n        JSType varType = var.getType();\n        if (varType != null) {\n          type = varType;\n        }\n      }\n    }\n    ensureTyped(t, n, type);\n    return true;\n  }\n\n```",
+            "method_doc": " Visits a NAME node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. @return whether the node is typeable or not ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles the assignment of types to variables and expressions, which could be related to the type coercion issues observed in the test failures.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 6,
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::registerPropertyOnType(String,JSType)",
+            "method_code": "```java\n  public void registerPropertyOnType(String propertyName, JSType type) {\n    UnionTypeBuilder typeSet = typesIndexedByProperty.get(propertyName);\n    if (typeSet == null) {\n      typeSet = new UnionTypeBuilder(this, PROPERTY_CHECKING_UNION_SIZE);\n      typesIndexedByProperty.put(propertyName, typeSet);\n    }\n\n    typeSet.addAlternate(type);\n    addReferenceTypeIndexedByProperty(propertyName, type);\n\n    // Clear cached values that depend on typesIndexedByProperty.\n    greatestSubtypeByProperty.remove(propertyName);\n  }\n\n```",
+            "method_doc": " Tells the type system that {@code owner} may have a property named {@code propertyName}. This allows the registry to keep track of what types a property is defined upon.  This is NOT the same as saying that {@code owner} must have a property named type. ObjectType#hasProperty attempts to minimize false positives (\"if we're not sure, then don't type check this property\"). The type registry, on the other hand, should attempt to minimize false negatives (\"if this property is assigned anywhere in the program, it must show up in the type registry\"). ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves registering properties on types, which could potentially lead to issues when resolving types in the presence of inheritance. However, the specific problem described seems to be related to inheritance chain handling rather than the registration itself.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resolveTypesInScope(StaticScope)",
+            "method_code": "```java\n  public void resolveTypesInScope(StaticScope<JSType> scope) {\n    for (NamedType type : unresolvedNamedTypes.get(scope)) {\n      type.resolve(reporter, scope);\n    }\n\n    resolvedNamedTypes.putAll(scope, unresolvedNamedTypes.removeAll(scope));\n\n    if (scope != null && scope.getParentScope() == null) {\n      // By default, the global \"this\" type is just an anonymous object.\n      // If the user has defined a Window type, make the Window the\n      // implicit prototype of \"this\".\n      PrototypeObjectType globalThis = (PrototypeObjectType) getNativeType(\n          JSTypeNative.GLOBAL_THIS);\n      JSType windowType = getType(\"Window\");\n      if (globalThis.isUnknownType()) {\n        ObjectType windowObjType = ObjectType.cast(windowType);\n        if (windowObjType != null) {\n          globalThis.setImplicitPrototype(windowObjType);\n        } else {\n          globalThis.setImplicitPrototype(\n              getNativeObjectType(JSTypeNative.OBJECT_TYPE));\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Resolve all the unresolved types in the given scope. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it involves resolving types within a scope, which aligns with the issues observed in the failing tests. However, the specific handling of inheritance and type propagation within this method requires further investigation to confirm its direct involvement in the bugs.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it resets various data structures used by the type checker, which could potentially affect the state of type resolution during subsequent checks. However, it does not directly handle type coercion logic, so it is less likely to be the root cause of the specific type mismatch errors observed in the tests.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType)",
+            "method_code": "```java\n  private void register(JSType type) {\n    register(type, type.toString());\n  }\n\n```",
+            "method_doc": "Registers a type with a default name. Calls `register(type, type.toString())`.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it registers types without ensuring they are unique or properly initialized. However, the failure seems to be related to type inference rather than registration itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType,String)",
+            "method_code": "```java\n  private void register(JSType type, String name) {\n    namesToTypes.put(name, type);\n\n    // Add all the namespaces in which this name lives.\n    while (name.indexOf('.') > 0) {\n      name = name.substring(0, name.lastIndexOf('.'));\n      namespaces.add(name);\n    }\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly interacts with shared state (`namesToTypes` and `namespaces`). However, the failure messages suggest issues related to variable declarations rather than concurrent access problems within this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Returns the return type of the function.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly returns the return type stored in the `call` object without any validation or transformation. Given the observed errors related to inconsistent return types, it is plausible that the returned type might not always be accurate or consistent, leading to issues when used in further type checks.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()",
+            "method_code": "```java\n  public boolean isReturnTypeInferred() {\n    return call.returnTypeInferred;\n  }\n\n```",
+            "method_doc": "Checks if the return type of the function is inferred.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it directly returns whether the return type of the function is inferred, without considering the context or the actual return type. Given the error messages indicating inconsistent return types, it's plausible that the issue lies in how the return type is being checked or handled within the type checking process.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSSourceFile::getCode()",
+            "method_code": "```java\n  @Override\n  public String getCode() throws IOException {\n    return referenced.getCode();\n  }\n\n```",
+            "method_doc": "This method returns the code associated with the `JSSourceFile`. It calls the `getCode()` method of the `referenced` object to retrieve the code.",
+            "class_name": "com.google.javascript.jscomp.JSSourceFile",
+            "class_doc": " An abstract representation of a JavaScript source file, as input to JSCompiler.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 6.0,
+            "reason": "#6# The method `com.google.javascript.jscomp.JSSourceFile::getCode()` appears to be a simple delegate method that forwards the call to another object's `getCode()` method. Given the nature of the failing tests, which involve issues related to type checking and inheritance, it is plausible that the problem lies elsewhere in the type checking logic rather than in this method itself. However, since the method is part of the class handling JavaScript source files, it is still worth investigating if there are any issues with how the code is being retrieved or processed.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferReturnType(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferReturnType(@Nullable JSDocInfo info) {\n    if (info != null && info.hasReturnType()) {\n      returnType = info.getReturnType().evaluate(scope, typeRegistry);\n      returnTypeInferred = false;\n    }\n\n    if (templateTypeName != null &&\n        returnType != null &&\n        returnType.restrictByNotNullOrUndefined().isTemplateType()) {\n      reportError(TEMPLATE_TYPE_EXPECTED, fnName);\n    }\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the return type from JSDocInfo. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it directly involves inferring the return type from JSDocInfo, which seems to be related to the type mismatch issues observed in the tests. However, the root cause might lie elsewhere in the type checking logic, especially considering the inheritance chain handling.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferParameterTypes(JSDocInfo info) {\n    // Create a fake args parent.\n    Node lp = IR.paramList();\n    for (String name : info.getParameterNames()) {\n      lp.addChildToBack(IR.name(name));\n    }\n\n    return inferParameterTypes(lp, info);\n  }\n\n```",
+            "method_doc": " Infer the parameter types from the doc info alone. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it involves inferring parameter types from JSDocInfo, which could be related to the issues observed in the tests. However, the direct relationship needs further investigation.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::canAssignTo(JSType)",
+            "method_code": "```java\n  public boolean canAssignTo(JSType that) {\n    if (this.isSubtype(that)) {\n      return true;\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " Tests whether values of {@code this} type can be safely assigned to values of {@code that} type.<p>  The default implementation verifies that {@code this} is a subtype of {@code that}.<p> ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it relies solely on the `isSubtype` method to determine if one type can be assigned to another. However, the issue described involves inconsistent return types, which suggests a problem with type coercion rather than just subtype relationships.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType)",
+            "method_code": "```java\n  public boolean isSubtype(JSType that) {\n    return isSubtypeHelper(this, that);\n  }\n\n```",
+            "method_doc": " Checks whether {@code this} is a subtype of {@code that}.<p>  Subtyping rules: <ul> <li>(unknown) &mdash; every type is a subtype of the Unknown type.</li> <li>(no) &mdash; the No type is a subtype of every type.</li> <li>(no-object) &mdash; the NoObject type is a subtype of every object type (i.e. subtypes of the Object type).</li> <li>(ref) &mdash; a type is a subtype of itself.</li> <li>(union-l) &mdash; A union type is a subtype of a type U if all the union type's constituents are a subtype of U. Formally<br> {@code (T<sub>1</sub>, &hellip;, T<sub>n</sub>) &lt;: U} if and only {@code T<sub>k</sub> &lt;: U} for all {@code k &isin; 1..n}.</li> <li>(union-r) &mdash; A type U is a subtype of a union type if it is a subtype of one of the union type's constituents. Formally<br> {@code U &lt;: (T<sub>1</sub>, &hellip;, T<sub>n</sub>)} if and only if {@code U &lt;: T<sub>k</sub>} for some index {@code k}.</li> <li>(objects) &mdash; an Object {@code O<sub>1</sub>} is a subtype of an object {@code O<sub>2</sub>} if it has more properties than {@code O<sub>2</sub>} and all common properties are pairwise subtypes.</li> </ul>  @return {@code this &lt;: that} ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it is involved in checking subtyping relationships, which could potentially involve type coercion. However, the specific failure cases seem to relate to issues with variable declarations and annotations rather than direct type coercion within the isSubtype method.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtypeHelper(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtypeHelper(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType.isUnionType()) {\n      UnionType union = thatType.toMaybeUnionType();\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // proxy types\n    if (thatType instanceof ProxyObjectType) {\n      return thisType.isSubtype(\n          ((ProxyObjectType) thatType).getReferencedTypeInternal());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles various subtyping cases and might be missing specific checks for type coercion.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::hasProperty(String)",
+            "method_code": "```java\n  @Override\n  public boolean hasProperty(String propertyName) {\n    // Unknown types have all properties.\n    return isUnknownType() || getSlot(propertyName) != null;\n  }\n\n```",
+            "method_doc": "Checks if the object has a property, either declared or inherited. Calls `getSlot()`.",
+            "class_name": "com.google.javascript.rhino.jstype.PrototypeObjectType",
+            "class_doc": " The object type represents instances of JavaScript objects such as {@code Object}, {@code Date}, {@code Function}.<p>  Objects in JavaScript are unordered collections of properties. Each property consists of a name, a value and a set of attributes.<p>  Each instance has an implicit prototype property ({@code [[Prototype]]}) pointing to an object instance, which itself has an implicit property, thus forming a chain.<p>  A class begins life with no name.  Later, a name may be provided once it can be inferred.  Note that the name in this case is strictly for debugging purposes.  Looking up type name references goes through the {@link JSTypeRegistry}.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it directly checks for the existence of a property using `getSlot()`. However, the issue seems to stem from missing or incorrect type declarations rather than a flaw in the `hasProperty` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles the traversal of the parse tree, which could involve checking and updating type information for prototypes during the traversal process.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately likely to be the best location that needs to be fixed, because it handles the traversal of node trees, which could potentially affect the type checking process. However, the issue seems to be related to prototype declarations rather than the traversal itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 6,
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    Node root = ast.getAstRoot(compiler);\n    // The root maybe null if the AST can not be created.\n    if (root != null) {\n      Preconditions.checkState(root.isScript());\n      Preconditions.checkNotNull(root.getInputId());\n    }\n    return root;\n  }\n\n```",
+            "method_doc": "Retrieves the abstract syntax tree (AST) root node for this input. This method ensures that the root is not null and checks its properties.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker.",
+            "score": 6.0,
+            "reason": "#6# This method is moderately suspicious because it retrieves the AST root node, which could potentially lead to issues if the AST is not properly initialized or if there are concurrent modifications to the AST. However, the failure messages suggest that the problem might lie elsewhere in the type checking process rather than in the retrieval of the AST root.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)",
+            "method_code": "```java\n  public void setModule(JSModule module) {\n    // An input may only belong to one module.\n    Preconditions.checkArgument(\n        module == null || this.module == null || this.module == module);\n    this.module = module;\n  }\n\n```",
+            "method_doc": "Sets the module to which the input belongs. */",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker.",
+            "score": 6.0,
+            "reason": "#6# The method 'setModule' appears to be responsible for setting the module to which a CompilerInput belongs. Given that the errors involve issues related to variable declarations and type consistency, it's plausible that the problem lies in how the module association affects the type checking process. However, without further context about the broader implications of changing this method, its direct involvement in the failure seems somewhat speculative.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::isExtern()",
+            "method_code": "```java\n  public boolean isExtern() {\n    if (ast == null || ast.getSourceFile() == null) {\n      return false;\n    }\n    return ast.getSourceFile().isExtern();\n  }\n\n```",
+            "method_doc": "Determines if this input is considered external. It checks if the associated source file is external.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker.",
+            "score": 6.0,
+            "reason": "#6# The method `isExtern()` seems plausible as it involves checking properties of the source file, which could affect type inference. However, the failure messages suggest issues related to variable declarations and type consistency rather than direct problems with the `isExtern()` logic itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 6
+            },
+            "rank_key": [
+                0,
+                6.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Returns whether undefined values should be tolerated in the type system.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The errors in the test cases suggest issues with type coercion and variable declarations rather than the logic for tolerating undefined values.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSSourceFile::fromCode(String,String)",
+            "method_code": "```java\n  public static JSSourceFile fromCode(String fileName, String code) {\n    return new JSSourceFile(SourceFile.fromCode(fileName, code));\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.JSSourceFile",
+            "class_doc": " An abstract representation of a JavaScript source file, as input to JSCompiler.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the tests seems to be related to the handling of inheritance and type resolution within the `TypeCheck` module, rather than the simple creation of a `JSSourceFile` object.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue appears to be related to missing type declarations for prototypes, which seems to be handled elsewhere in the codebase rather than within the `shouldTraverse` method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        } else {\n          // Object literal keys are not typeable\n          typeable = false;\n        }\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.isNE()) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitObjLitKey(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitObjLitKey(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitObjLitKey(NodeTraversal t, Node key, Node objlit) {\n    // TODO(johnlenz): Validate get and set function declarations are valid\n    // as is the functions can have \"extraneous\" bits.\n\n    // For getter and setter property definitions the\n    // rvalue type != the property type.\n    Node rvalue = key.getFirstChild();\n    JSType rightType = NodeUtil.getObjectLitKeyTypeFromValueType(\n        key, getJSType(rvalue));\n    if (rightType == null) {\n      rightType = getNativeType(UNKNOWN_TYPE);\n    }\n\n    Node owner = objlit;\n\n    // Validate value is assignable to the key type.\n\n    JSType keyType = getJSType(key);\n\n    JSType allowedValueType = keyType;\n    if (allowedValueType.isEnumElementType()) {\n      allowedValueType =\n          allowedValueType.toMaybeEnumElementType().getPrimitiveType();\n    }\n\n    boolean valid = validator.expectCanAssignToPropertyOf(t, key,\n        rightType, allowedValueType,\n        owner, NodeUtil.getObjectLitKeyName(key));\n    if (valid) {\n      ensureTyped(t, key, rightType);\n    } else {\n      ensureTyped(t, key);\n    }\n\n    // Validate that the key type is assignable to the object property type.\n    // This is necessary as the objlit may have been cast to a non-literal\n    // object type.\n    // TODO(johnlenz): consider introducing a CAST node to the AST (or\n    // perhaps a parentheses node).\n\n    JSType objlitType = getJSType(objlit);\n    ObjectType type = ObjectType.cast(\n        objlitType.restrictByNotNullOrUndefined());\n    if (type != null) {\n      String property = NodeUtil.getObjectLitKeyName(key);\n      if (type.hasProperty(property) &&\n          !type.isPropertyTypeInferred(property) &&\n          !propertyIsImplicitCast(type, property)) {\n        validator.expectCanAssignToPropertyOf(\n            t, key, keyType,\n            type.getPropertyType(property), owner, property);\n      }\n      return;\n    }\n  }\n\n```",
+            "method_doc": " Visits an object literal field definition <code>key : value</code>.  If the <code>lvalue</code> is a prototype modification, we change the schema of the object type it is referring to.  @param t the traversal @param key the assign node "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is synthesized (i.e. not inferred). @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineInferredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    if (hasProperty(propertyName)) {\n      JSType originalType = getPropertyType(propertyName);\n      type = originalType == null ? type :\n          originalType.getLeastSupertype(type);\n    }\n\n    boolean result = defineProperty(propertyName, type, true,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is inferred. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the inferred definition of property that might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType findPropertyType(String propertyName) {\n    return hasProperty(propertyName) ?\n        getPropertyType(propertyName) : null;\n  }\n\n```",
+            "method_doc": "This method finds the type of a property on the object type. It takes a property name and returns the type if the property exists, otherwise it returns `null`."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType,Node)",
+            "method_code": "```java\n  void setPrototypeBasedOn(ObjectType baseType, Node propertyNode) {\n    // This is a bit weird. We need to successfully handle these\n    // two cases:\n    // Foo.prototype = new Bar();\n    // and\n    // Foo.prototype = {baz: 3};\n    // In the first case, we do not want new properties to get\n    // added to Bar. In the second case, we do want new properties\n    // to get added to the type of the anonymous object.\n    //\n    // We handle this by breaking it into two cases:\n    //\n    // In the first case, we create a new PrototypeObjectType and set\n    // its implicit prototype to the type being assigned. This ensures\n    // that Bar will not get any properties of Foo.prototype, but properties\n    // later assigned to Bar will get inherited properly.\n    //\n    // In the second case, we just use the anonymous object as the prototype.\n    if (baseType.hasReferenceName() ||\n        isNativeObjectType() ||\n        baseType.isFunctionPrototypeType() ||\n        !(baseType instanceof PrototypeObjectType)) {\n\n      baseType = new PrototypeObjectType(\n          registry, this.getReferenceName() + \".prototype\", baseType);\n    }\n    setPrototype((PrototypeObjectType) baseType, propertyNode);\n  }\n\n```",
+            "method_doc": "Sets the prototype based on the provided object type and property node, handling different cases."
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitGetProp(NodeTraversal t, Node n, Node parent) {\n    // GETPROP nodes have an assigned type on their node by the scope creator\n    // if this is an enum declaration. The only namespaced enum declarations\n    // that we allow are of the form object.name = ...;\n    if (n.getJSType() != null && parent.isAssign()) {\n      return;\n    }\n\n    // obj.prop or obj.method()\n    // Lots of types can appear on the left, a call to a void function can\n    // never be on the left. getPropertyType will decide what is acceptable\n    // and what isn't.\n    Node property = n.getLastChild();\n    Node objNode = n.getFirstChild();\n    JSType childType = getJSType(objNode);\n\n    // TODO(user): remove in favor of flagging every property access on\n    // non-object.\n    if (!validator.expectNotNullOrUndefined(t, n, childType,\n            \"No properties on this expression\", getNativeType(OBJECT_TYPE))) {\n      ensureTyped(t, n);\n      return;\n    }\n\n    checkPropertyAccess(childType, property.getString(), t, n);\n    ensureTyped(t, n);\n  }\n\n```",
+            "method_doc": " Visits a GETPROP node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of <code>n</code> "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::declareType(String,JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::declareType(String,JSType)",
+            "method_code": "```java\n  public boolean declareType(String name, JSType t) {\n    if (namesToTypes.containsKey(name)) {\n      return false;\n    }\n    register(t, name);\n    return true;\n  }\n\n```",
+            "method_doc": " Records declared global type names. This makes resolution faster and more robust in the common case.  @param name The name of the type to be recorded. @param t The actual type being associated with the name. @return True if this name is not already defined, false otherwise. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::getType(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getType(String)",
+            "method_code": "```java\n  public JSType getType(String jsTypeName) {\n    // TODO(user): Push every local type name out of namesToTypes so that\n    // NamedType#resolve is correct.\n    if (jsTypeName.equals(templateTypeName)) {\n      return templateType;\n    }\n    return namesToTypes.get(jsTypeName);\n  }\n\n```",
+            "method_doc": " Looks up a type by name.  @param jsTypeName The name string. @return the corresponding JSType object or {@code null} it cannot be found "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getPrototype()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getPrototype()",
+            "method_code": "```java\n  public ObjectType getPrototype() {\n    // lazy initialization of the prototype field\n    if (prototypeSlot == null) {\n      setPrototype(\n          new PrototypeObjectType(\n              registry,\n              this.getReferenceName() + \".prototype\",\n              registry.getNativeObjectType(OBJECT_TYPE),\n              isNativeObjectType()),\n          null);\n    }\n    return (ObjectType) prototypeSlot.getType();\n  }\n\n```",
+            "method_doc": " Gets the {@code prototype} property of this function type. This is equivalent to {@code (ObjectType) getPropertyType(\"prototype\")}. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType)": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType)",
+            "method_code": "```java\n  public void setPrototypeBasedOn(ObjectType baseType) {\n    setPrototypeBasedOn(baseType, null);\n  }\n\n```",
+            "method_doc": " Sets the prototype, creating the prototype object from the given base type. @param baseType The base type. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry."
+        },
+        "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)",
+            "method_code": "```java\n  private void checkPropertyAccess(JSType childType, String propName,\n      NodeTraversal t, Node n) {\n    // If the property type is unknown, check the object type to see if it\n    // can ever be defined. We explicitly exclude CHECKED_UNKNOWN (for\n    // properties where we've checked that it exists, or for properties on\n    // objects that aren't in this binary).\n    JSType propType = getJSType(n);\n    if (propType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n      childType = childType.autobox();\n      ObjectType objectType = ObjectType.cast(childType);\n      if (objectType != null) {\n        // We special-case object types so that checks on enums can be\n        // much stricter, and so that we can use hasProperty (which is much\n        // faster in most cases).\n        if (!objectType.hasProperty(propName) ||\n            objectType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n          if (objectType instanceof EnumType) {\n            report(t, n, INEXISTENT_ENUM_ELEMENT, propName);\n          } else {\n            checkPropertyAccessHelper(objectType, propName, t, n);\n          }\n        }\n\n      } else {\n        checkPropertyAccessHelper(childType, propName, t, n);\n      }\n    }\n  }\n\n```",
+            "method_doc": " Emit a warning if we can prove that a property cannot possibly be defined on an object. Note the difference between JS and a strictly statically typed language: we're checking if the property cannot be defined*, whereas a java compiler would check if the property *can be undefined*. "
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::inferInheritance(JSDocInfo)": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferInheritance(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferInheritance(@Nullable JSDocInfo info) {\n    if (info != null) {\n      isConstructor = info.isConstructor();\n      isInterface = info.isInterface();\n\n      // base type\n      if (info.hasBaseType()) {\n        if (isConstructor) {\n          JSType maybeBaseType =\n              info.getBaseType().evaluate(scope, typeRegistry);\n          if (maybeBaseType != null &&\n              maybeBaseType.setValidator(new ExtendedTypeValidator())) {\n            baseType = (ObjectType) maybeBaseType;\n          }\n        } else {\n          reportWarning(EXTENDS_WITHOUT_TYPEDEF, fnName);\n        }\n      }\n\n      // implemented interfaces\n      if (isConstructor || isInterface) {\n        implementedInterfaces = Lists.newArrayList();\n        for (JSTypeExpression t : info.getImplementedInterfaces()) {\n          JSType maybeInterType = t.evaluate(scope, typeRegistry);\n          if (maybeInterType != null &&\n              maybeInterType.setValidator(new ImplementedTypeValidator())) {\n            implementedInterfaces.add((ObjectType) maybeInterType);\n          }\n        }\n      } else if (info.getImplementedInterfaceCount() > 0) {\n        reportWarning(IMPLEMENTS_WITHOUT_CONSTRUCTOR, fnName);\n      }\n\n      // extended interfaces (for interface only)\n      if (isInterface) {\n        extendedInterfaces = Lists.newArrayList();\n        for (JSTypeExpression t : info.getExtendedInterfaces()) {\n          JSType maybeInterfaceType = t.evaluate(scope, typeRegistry);\n          if (maybeInterfaceType != null &&\n              maybeInterfaceType.setValidator(new ExtendedTypeValidator())) {\n            extendedInterfaces.add((ObjectType) maybeInterfaceType);\n          }\n        }\n      }\n    }\n\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the role of the function (whether it's a constructor or interface) and what it inherits from in JSDocInfo. "
+        },
+        "com.google.javascript.rhino.jstype.PrototypeObjectType::getSlot(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::getSlot(String)",
+            "method_code": "```java\n  @Override\n  public Property getSlot(String name) {\n    if (properties.containsKey(name)) {\n      return properties.get(name);\n    }\n    ObjectType implicitPrototype = getImplicitPrototype();\n    if (implicitPrototype != null) {\n      Property prop = implicitPrototype.getSlot(name);\n      if (prop != null) {\n        return prop;\n      }\n    }\n    for (ObjectType interfaceType : getCtorExtendedInterfaces()) {\n      Property prop = interfaceType.getSlot(name);\n      if (prop != null) {\n        return prop;\n      }\n    }\n    return null;\n  }\n\n```",
+            "method_doc": "Retrieves a property from the object or its prototype chain. Calls `getImplicitPrototype()` and iterates over extended interfaces."
+        },
+        "com.google.javascript.rhino.jstype.PrototypeObjectType::getPropertyType(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::getPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType getPropertyType(String property) {\n    StaticSlot<JSType> slot = getSlot(property);\n    if (slot == null) {\n      return getNativeType(JSTypeNative.UNKNOWN_TYPE);\n    }\n    return slot.getType();\n  }\n\n```",
+            "method_doc": "Retrieves the type of a property, either declared or inherited. Calls `getSlot()`."
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  boolean visitName(NodeTraversal t, Node n, Node parent) {\n    // At this stage, we need to determine whether this is a leaf\n    // node in an expression (which therefore needs to have a type\n    // assigned for it) versus some other decorative node that we\n    // can safely ignore.  Function names, arguments (children of LP nodes) and\n    // variable declarations are ignored.\n    // TODO(user): remove this short-circuiting in favor of a\n    // pre order traversal of the FUNCTION, CATCH, LP and VAR nodes.\n    int parentNodeType = parent.getType();\n    if (parentNodeType == Token.FUNCTION ||\n        parentNodeType == Token.CATCH ||\n        parentNodeType == Token.PARAM_LIST ||\n        parentNodeType == Token.VAR) {\n      return false;\n    }\n\n    JSType type = n.getJSType();\n    if (type == null) {\n      type = getNativeType(UNKNOWN_TYPE);\n      Var var = t.getScope().getVar(n.getString());\n      if (var != null) {\n        JSType varType = var.getType();\n        if (varType != null) {\n          type = varType;\n        }\n      }\n    }\n    ensureTyped(t, n, type);\n    return true;\n  }\n\n```",
+            "method_doc": " Visits a NAME node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. @return whether the node is typeable or not "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::registerPropertyOnType(String,JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::registerPropertyOnType(String,JSType)",
+            "method_code": "```java\n  public void registerPropertyOnType(String propertyName, JSType type) {\n    UnionTypeBuilder typeSet = typesIndexedByProperty.get(propertyName);\n    if (typeSet == null) {\n      typeSet = new UnionTypeBuilder(this, PROPERTY_CHECKING_UNION_SIZE);\n      typesIndexedByProperty.put(propertyName, typeSet);\n    }\n\n    typeSet.addAlternate(type);\n    addReferenceTypeIndexedByProperty(propertyName, type);\n\n    // Clear cached values that depend on typesIndexedByProperty.\n    greatestSubtypeByProperty.remove(propertyName);\n  }\n\n```",
+            "method_doc": " Tells the type system that {@code owner} may have a property named {@code propertyName}. This allows the registry to keep track of what types a property is defined upon.  This is NOT the same as saying that {@code owner} must have a property named type. ObjectType#hasProperty attempts to minimize false positives (\"if we're not sure, then don't type check this property\"). The type registry, on the other hand, should attempt to minimize false negatives (\"if this property is assigned anywhere in the program, it must show up in the type registry\"). "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resolveTypesInScope(StaticScope)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resolveTypesInScope(StaticScope)",
+            "method_code": "```java\n  public void resolveTypesInScope(StaticScope<JSType> scope) {\n    for (NamedType type : unresolvedNamedTypes.get(scope)) {\n      type.resolve(reporter, scope);\n    }\n\n    resolvedNamedTypes.putAll(scope, unresolvedNamedTypes.removeAll(scope));\n\n    if (scope != null && scope.getParentScope() == null) {\n      // By default, the global \"this\" type is just an anonymous object.\n      // If the user has defined a Window type, make the Window the\n      // implicit prototype of \"this\".\n      PrototypeObjectType globalThis = (PrototypeObjectType) getNativeType(\n          JSTypeNative.GLOBAL_THIS);\n      JSType windowType = getType(\"Window\");\n      if (globalThis.isUnknownType()) {\n        ObjectType windowObjType = ObjectType.cast(windowType);\n        if (windowObjType != null) {\n          globalThis.setImplicitPrototype(windowObjType);\n        } else {\n          globalThis.setImplicitPrototype(\n              getNativeObjectType(JSTypeNative.OBJECT_TYPE));\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Resolve all the unresolved types in the given scope. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType)",
+            "method_code": "```java\n  private void register(JSType type) {\n    register(type, type.toString());\n  }\n\n```",
+            "method_doc": "Registers a type with a default name. Calls `register(type, type.toString())`."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType,String)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType,String)",
+            "method_code": "```java\n  private void register(JSType type, String name) {\n    namesToTypes.put(name, type);\n\n    // Add all the namespaces in which this name lives.\n    while (name.indexOf('.') > 0) {\n      name = name.substring(0, name.lastIndexOf('.'));\n      namespaces.add(name);\n    }\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Returns the return type of the function."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()",
+            "method_code": "```java\n  public boolean isReturnTypeInferred() {\n    return call.returnTypeInferred;\n  }\n\n```",
+            "method_doc": "Checks if the return type of the function is inferred."
+        },
+        "com.google.javascript.jscomp.JSSourceFile::getCode()": {
+            "method_name": "com.google.javascript.jscomp.JSSourceFile::getCode()",
+            "method_code": "```java\n  @Override\n  public String getCode() throws IOException {\n    return referenced.getCode();\n  }\n\n```",
+            "method_doc": "This method returns the code associated with the `JSSourceFile`. It calls the `getCode()` method of the `referenced` object to retrieve the code."
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::inferReturnType(JSDocInfo)": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferReturnType(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferReturnType(@Nullable JSDocInfo info) {\n    if (info != null && info.hasReturnType()) {\n      returnType = info.getReturnType().evaluate(scope, typeRegistry);\n      returnTypeInferred = false;\n    }\n\n    if (templateTypeName != null &&\n        returnType != null &&\n        returnType.restrictByNotNullOrUndefined().isTemplateType()) {\n      reportError(TEMPLATE_TYPE_EXPECTED, fnName);\n    }\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the return type from JSDocInfo. "
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(JSDocInfo)": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferParameterTypes(JSDocInfo info) {\n    // Create a fake args parent.\n    Node lp = IR.paramList();\n    for (String name : info.getParameterNames()) {\n      lp.addChildToBack(IR.name(name));\n    }\n\n    return inferParameterTypes(lp, info);\n  }\n\n```",
+            "method_doc": " Infer the parameter types from the doc info alone. "
+        },
+        "com.google.javascript.rhino.jstype.JSType::canAssignTo(JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::canAssignTo(JSType)",
+            "method_code": "```java\n  public boolean canAssignTo(JSType that) {\n    if (this.isSubtype(that)) {\n      return true;\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " Tests whether values of {@code this} type can be safely assigned to values of {@code that} type.<p>  The default implementation verifies that {@code this} is a subtype of {@code that}.<p> "
+        },
+        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType)",
+            "method_code": "```java\n  public boolean isSubtype(JSType that) {\n    return isSubtypeHelper(this, that);\n  }\n\n```",
+            "method_doc": " Checks whether {@code this} is a subtype of {@code that}.<p>  Subtyping rules: <ul> <li>(unknown) &mdash; every type is a subtype of the Unknown type.</li> <li>(no) &mdash; the No type is a subtype of every type.</li> <li>(no-object) &mdash; the NoObject type is a subtype of every object type (i.e. subtypes of the Object type).</li> <li>(ref) &mdash; a type is a subtype of itself.</li> <li>(union-l) &mdash; A union type is a subtype of a type U if all the union type's constituents are a subtype of U. Formally<br> {@code (T<sub>1</sub>, &hellip;, T<sub>n</sub>) &lt;: U} if and only {@code T<sub>k</sub> &lt;: U} for all {@code k &isin; 1..n}.</li> <li>(union-r) &mdash; A type U is a subtype of a union type if it is a subtype of one of the union type's constituents. Formally<br> {@code U &lt;: (T<sub>1</sub>, &hellip;, T<sub>n</sub>)} if and only if {@code U &lt;: T<sub>k</sub>} for some index {@code k}.</li> <li>(objects) &mdash; an Object {@code O<sub>1</sub>} is a subtype of an object {@code O<sub>2</sub>} if it has more properties than {@code O<sub>2</sub>} and all common properties are pairwise subtypes.</li> </ul>  @return {@code this &lt;: that} "
+        },
+        "com.google.javascript.rhino.jstype.JSType::isSubtypeHelper(JSType,JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isSubtypeHelper(JSType,JSType)",
+            "method_code": "```java\n  static boolean isSubtypeHelper(JSType thisType, JSType thatType) {\n    // unknown\n    if (thatType.isUnknownType()) {\n      return true;\n    }\n    // equality\n    if (thisType.isEquivalentTo(thatType)) {\n      return true;\n    }\n    // all type\n    if (thatType.isAllType()) {\n      return true;\n    }\n    // unions\n    if (thatType.isUnionType()) {\n      UnionType union = thatType.toMaybeUnionType();\n      for (JSType element : union.alternates) {\n        if (thisType.isSubtype(element)) {\n          return true;\n        }\n      }\n    }\n    // proxy types\n    if (thatType instanceof ProxyObjectType) {\n      return thisType.isSubtype(\n          ((ProxyObjectType) thatType).getReferencedTypeInternal());\n    }\n    return false;\n  }\n\n```",
+            "method_doc": " A generic implementation meant to be used as a helper for common subtyping cases. "
+        },
+        "com.google.javascript.rhino.jstype.PrototypeObjectType::hasProperty(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.PrototypeObjectType::hasProperty(String)",
+            "method_code": "```java\n  @Override\n  public boolean hasProperty(String propertyName) {\n    // Unknown types have all properties.\n    return isUnknownType() || getSlot(propertyName) != null;\n  }\n\n```",
+            "method_doc": "Checks if the object has a property, either declared or inherited. Calls `getSlot()`."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node."
+        },
+        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    Node root = ast.getAstRoot(compiler);\n    // The root maybe null if the AST can not be created.\n    if (root != null) {\n      Preconditions.checkState(root.isScript());\n      Preconditions.checkNotNull(root.getInputId());\n    }\n    return root;\n  }\n\n```",
+            "method_doc": "Retrieves the abstract syntax tree (AST) root node for this input. This method ensures that the root is not null and checks its properties."
+        },
+        "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)",
+            "method_code": "```java\n  public void setModule(JSModule module) {\n    // An input may only belong to one module.\n    Preconditions.checkArgument(\n        module == null || this.module == null || this.module == module);\n    this.module = module;\n  }\n\n```",
+            "method_doc": "Sets the module to which the input belongs. */"
+        },
+        "com.google.javascript.jscomp.CompilerInput::isExtern()": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::isExtern()",
+            "method_code": "```java\n  public boolean isExtern() {\n    if (ast == null || ast.getSourceFile() == null) {\n      return false;\n    }\n    return ast.getSourceFile().isExtern();\n  }\n\n```",
+            "method_doc": "Determines if this input is considered external. It checks if the associated source file is external."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Returns whether undefined values should be tolerated in the type system."
+        },
+        "com.google.javascript.jscomp.JSSourceFile::fromCode(String,String)": {
+            "method_name": "com.google.javascript.jscomp.JSSourceFile::fromCode(String,String)",
+            "method_code": "```java\n  public static JSSourceFile fromCode(String fileName, String code) {\n    return new JSSourceFile(SourceFile.fromCode(fileName, code));\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Type Inference for `@lends` Annotation\n**Description:** The type checker might be incorrectly inferring the type of properties annotated with `@lends`. Specifically, it may not be properly considering the type of the properties defined in the object literal when applying the `@lends` annotation.\n\n**Location:** Likely within the implementation of the `TypeCheck` module, specifically in the logic that processes the `@lends` annotation.\n\n**Observation Support:** Both test outputs mention issues related to the `@lends` annotation, indicating that the problem might stem from how the type checker interprets this annotation.",
+                "Inheritance Chain Handling Bug\n**Description:** There might be a bug in the way the type checker handles inheritance chains. Specifically, it could be incorrectly propagating types up the inheritance chain, leading to mismatches between expected and actual types.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that resolves types during inheritance.\n\n**Observation Support:** Both tests involve subclasses (`SubFoo`), and the errors suggest that there might be an issue with how the type checker resolves types in the presence of inheritance.",
+                "Type Coercion Logic Flaw\n**Description:** The type checker might have a flaw in its type coercion logic, causing it to incorrectly convert types without proper validation. This could lead to situations where a `number` is treated as a `string` or vice versa.\n\n**Location:** Within the implementation of the `TypeCheck` module, specifically in the type coercion functions.\n\n**Observation Support:** The error messages indicate that the type checker is finding a `number` where a `string` is expected, suggesting a potential issue with type coercion rules.",
+                "Missing Type Declaration for Prototypes\n**Description:** The type checker might be missing necessary type declarations for prototypes, leading to incorrect assumptions about the types of properties and methods.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in the logic that processes prototype declarations.\n\n**Observation Support:** Both test outputs mention issues related to prototype declarations (`Foo.prototype` and `SubFoo.prototype`), indicating that the problem might stem from missing or incorrect type declarations for these prototypes.",
+                "Race Condition During Type Checking\n**Description:** There might be a race condition during type checking, where the order of operations leads to incorrect type inference. This could occur if the type checker is accessing or modifying shared state concurrently.\n\n**Location:** Within the implementation of the `TypeCheck` module, particularly in any parts of the codebase that handle concurrent type checking operations.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail similarly suggests that there might be some underlying concurrency issue affecting the type checker."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    6.666666666666667
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    6,
+                    6.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.FunctionType"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.jscomp.JSSourceFile",
+                    "com.google.javascript.jscomp.FunctionTypeBuilder"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.PrototypeObjectType",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.jscomp.JSSourceFile",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.CompilerInput"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitObjLitKey(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::declareType(String,JSType)",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getType(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getPrototype()",
+                        "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType)",
+                        "com.google.javascript.rhino.jstype.FunctionType::setPrototypeBasedOn(ObjectType,Node)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getType(String)",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::registerPropertyOnType(String,JSType)",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resolveTypesInScope(StaticScope)"
+                    ],
+                    "com.google.javascript.jscomp.JSSourceFile": [
+                        "com.google.javascript.jscomp.JSSourceFile::fromCode(String,String)",
+                        "com.google.javascript.jscomp.JSSourceFile::getCode()"
+                    ],
+                    "com.google.javascript.jscomp.FunctionTypeBuilder": [
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::inferReturnType(JSDocInfo)",
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::inferInheritance(JSDocInfo)",
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(JSDocInfo)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::canAssignTo(JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtype(JSType)",
+                        "com.google.javascript.rhino.jstype.JSType::isSubtypeHelper(JSType,JSType)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getPrototype()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.PrototypeObjectType": [
+                        "com.google.javascript.rhino.jstype.PrototypeObjectType::getSlot(String)",
+                        "com.google.javascript.rhino.jstype.PrototypeObjectType::hasProperty(String)",
+                        "com.google.javascript.rhino.jstype.PrototypeObjectType::getPropertyType(String)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitName(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType)",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::register(JSType,String)",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::declareType(String,JSType)"
+                    ],
+                    "com.google.javascript.jscomp.JSSourceFile": [
+                        "com.google.javascript.jscomp.JSSourceFile::fromCode(String,String)",
+                        "com.google.javascript.jscomp.JSSourceFile::getCode()"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)",
+                        "com.google.javascript.jscomp.CompilerInput::isExtern()"
+                    ]
+                }
+            }
+        }
+    ]
+}

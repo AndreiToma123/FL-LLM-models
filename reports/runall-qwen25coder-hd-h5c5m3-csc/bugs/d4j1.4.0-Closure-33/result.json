@@ -1,0 +1,1033 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.TypeCheck",
+        "com.google.javascript.rhino.jstype.JSTypeRegistry",
+        "com.google.javascript.rhino.jstype.FunctionType",
+        "com.google.javascript.jscomp.TypeInferencePass",
+        "com.google.javascript.rhino.jstype.RecordTypeBuilder",
+        "com.google.javascript.jscomp.TypeInference",
+        "com.google.javascript.rhino.jstype.UnionType",
+        "com.google.javascript.jscomp.JSError",
+        "com.google.javascript.jscomp.NodeTraversal"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        } else {\n          // Object literal keys are not typeable\n          typeable = false;\n        }\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.isNE()) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles the core logic of type checking in JavaScript code. The failure in the test suggests that there might be an issue with how the type checker processes certain types of parameters, particularly those with overlapping constraints. By fixing the logic within this method, we can address the root cause of the type mismatch errors reported in the test.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+            "method_code": "```java\n  public Iterable<Node> getParameters() {\n    Node n = getParametersNode();\n    if (n != null) {\n      return n.children();\n    } else {\n      return Collections.emptySet();\n    }\n  }\n\n```",
+            "method_doc": "Retrieves the parameters of the function type using `getParametersNode`.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly returns the parameters of the function type, which could be causing the type mismatch issue in the test case.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+            "method_code": "```java\n  public Node getParametersNode() {\n    return call.parameters;\n  }\n\n```",
+            "method_doc": "Gets an LP node that contains all params. May be null. */",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it returns the parameters node directly from the function type, which could be causing issues when dealing with complex type constraints like those in `temp2`. The returned node might not accurately reflect the expected type information, leading to type mismatches.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 8,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::canAssignTo(JSType)",
+            "method_code": "```java\n  @Override\n  public boolean canAssignTo(JSType that) {\n    boolean canAssign = true;\n    for (JSType t : alternates) {\n      if (t.isUnknownType()) {\n        return true;\n      }\n      canAssign &= t.canAssignTo(that);\n    }\n    return canAssign;\n  }\n\n```",
+            "method_doc": "Checks if this union type can be assigned to another type. Iterates through all alternate types and checks if each can assign to the target type.",
+            "class_name": "com.google.javascript.rhino.jstype.UnionType",
+            "class_doc": " The {@code UnionType} implements a common JavaScript idiom in which the code is specifically designed to work with multiple input types.  Because JavaScript always knows the runtime type of an object value, this is safer than a C union.<p>  For instance, values of the union type {@code (String,boolean)} can be of type {@code String} or of type {@code boolean}. The commutativity of the statement is captured by making {@code (String,boolean)} and {@code (boolean,String)} equal.<p>  The implementation of this class prevents the creation of nested unions.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the logic for checking if a union type can be assigned to another type. The issue described in the test failure involves a type mismatch related to the `activity` parameter in `temp2`, which could be resolved by ensuring that the `canAssignTo` method correctly handles the different types within the union.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::restrictByNotNullOrUndefined()",
+            "method_code": "```java\n  @Override\n  public JSType restrictByNotNullOrUndefined() {\n    UnionTypeBuilder restricted = new UnionTypeBuilder(registry);\n    for (JSType t : alternates) {\n      restricted.addAlternate(t.restrictByNotNullOrUndefined());\n    }\n    return restricted.build();\n  }\n\n```",
+            "method_doc": "Restricts the union type by removing null and undefined types. Iterates through all alternate types and applies the restriction to each.",
+            "class_name": "com.google.javascript.rhino.jstype.UnionType",
+            "class_doc": " The {@code UnionType} implements a common JavaScript idiom in which the code is specifically designed to work with multiple input types.  Because JavaScript always knows the runtime type of an object value, this is safer than a C union.<p>  For instance, values of the union type {@code (String,boolean)} can be of type {@code String} or of type {@code boolean}. The commutativity of the statement is captured by making {@code (String,boolean)} and {@code (boolean,String)} equal.<p>  The implementation of this class prevents the creation of nested unions.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly deals with restricting union types by removing null and undefined types. The issue described involves a type mismatch in the `temp2` function, which could be related to how union types are handled during type checking. By ensuring that the `restrictByNotNullOrUndefined` method correctly handles these cases, it may resolve the type mismatch errors observed in the test.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 5.0,
+            "reason": "#5# This method is not directly related to the type mismatch issue observed in the test case. The error message indicates a problem with the type constraints in the functions `temp1`, `temp2`, and `temp3`. While the `getErrorReporter()` method could potentially be involved in reporting errors, it is unlikely to be the root cause of the type mismatch. Therefore, fixing this method alone is not expected to resolve the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 5,
+                "4": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Indicates whether undefined values should be tolerated.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it controls whether undefined values are tolerated, which could potentially affect how type checking handles parameters like those in `temp2`. However, the issue described seems more related to the specific type constraints and their interactions rather than the general tolerance of undefined values.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 5,
+                "4": 3,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it resets the state of the type registry, which could potentially affect the type checking process. However, without further context about the specific issue, it's difficult to determine if this method is directly responsible for the failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 0,
+                "3": 5,
+                "4": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Returns the return type of the function.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the return type stored in the `call` object. However, the issue seems to stem from the way types are being handled within the functions themselves, particularly in `temp2`, where there are overlapping type constraints. Fixing the type handling logic within the functions might resolve the issue rather than changing the implementation of `getReturnType()`.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::getAlternates()",
+            "method_code": "```java\n  public Iterable<JSType> getAlternates() {\n    return alternates;\n  }\n\n```",
+            "method_doc": " Gets the alternate types of this union type. @return The alternate types of this union type. The returned set is immutable. ",
+            "class_name": "com.google.javascript.rhino.jstype.UnionType",
+            "class_doc": " The {@code UnionType} implements a common JavaScript idiom in which the code is specifically designed to work with multiple input types.  Because JavaScript always knows the runtime type of an object value, this is safer than a C union.<p>  For instance, values of the union type {@code (String,boolean)} can be of type {@code String} or of type {@code boolean}. The commutativity of the statement is captured by making {@code (String,boolean)} and {@code (boolean,String)} equal.<p>  The implementation of this class prevents the creation of nested unions.<p> ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it returns the alternate types of a union type, but the issue seems to stem from the way types are being handled within the functions `temp1`, `temp2`, and `temp3`. While fixing `getAlternates()` could potentially address underlying issues, the root problem might lie in how types are being propagated and checked throughout the function calls.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+            "method_code": "```java\n  public void check(Node node, boolean externs) {\n    Preconditions.checkNotNull(node);\n\n    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);\n    inExterns = externs;\n    t.traverseWithScope(node, topScope);\n    if (externs) {\n      inferJSDocInfo.process(node, null);\n    } else {\n      inferJSDocInfo.process(null, node);\n    }\n  }\n\n```",
+            "method_doc": "This method initializes the NodeTraversal, sets the \"inExterns\" flag, and traverses the node using the \"shouldTraverse\" and \"visit\" methods.",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The issue seems to be related to the type constraints within the functions `temp1`, `temp2`, and `temp3`, rather than the logic of the `TypeCheck::check` method itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 3,
+                "4": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Preconditions.checkNotNull(scopeCreator);\n    Preconditions.checkNotNull(topScope);\n\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    if (externsRoot != null) {\n      check(externsRoot, true);\n    }\n    check(jsRoot, false);\n  }\n\n```",
+            "method_doc": " Main entry point for this phase of processing. This follows the pattern for JSCompiler phases.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the type checking logic within specific functions like `temp1`, `temp2`, and `temp3`, rather than the general type checking process handled by the `TypeCheck::process` method.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public boolean shouldTraverse(\n      NodeTraversal t, Node n, Node parent) {\n    checkNoTypeCheckSection(n, true);\n    switch (n.getType()) {\n      case Token.FUNCTION:\n        // normal type checking\n        final Scope outerScope = t.getScope();\n        final String functionPrivateName = n.getFirstChild().getString();\n        if (functionPrivateName != null && functionPrivateName.length() > 0 &&\n            outerScope.isDeclared(functionPrivateName, false) &&\n            // Ideally, we would want to check whether the type in the scope\n            // differs from the type being defined, but then the extern\n            // redeclarations of built-in types generates spurious warnings.\n            !(outerScope.getVar(\n                functionPrivateName).getType() instanceof FunctionType)) {\n          report(t, n, FUNCTION_MASKS_VARIABLE, functionPrivateName);\n        }\n\n        // TODO(user): Only traverse the function's body. The function's\n        // name and arguments are traversed by the scope creator, and ideally\n        // should not be traversed by the type checker.\n        break;\n    }\n    return true;\n  }\n\n```",
+            "method_doc": "This method determines whether to traverse a node based on its type and calls the \"checkNoTypeCheckSection\" method. If the node is a function, it checks for function-private names and reports errors if necessary.",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Misinterpretation of `@notypecheck` Annotation\n**Description:** The `@notypecheck` annotation might be misinterpreted by the type checker, causing it to apply type checks even within the annotated block.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This discrepancy might suggest that the `@notypecheck` annotation is not being respected by the type checker, leading to unnecessary type checks within the annotated block.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly interacts with the traversal logic of nodes and can potentially ignore type checks when encountering functions marked with `@notypecheck`. The issue described suggests that the type checker is still performing type checks inside the `@notypecheck` section, which could be due to an oversight in handling this annotation.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)",
+            "method_code": "```java\n  void inferTypes(NodeTraversal t, Node n, Scope scope) {\n    TypeInference typeInference =\n        new TypeInference(\n            compiler, computeCfg(n), reverseInterpreter, scope,\n            assertionFunctionsMap);\n    try {\n      typeInference.analyze();\n\n      // Resolve any new type names found during the inference.\n      compiler.getTypeRegistry().resolveTypesInScope(scope);\n\n    } catch (DataFlowAnalysis.MaxIterationsExceededException e) {\n      compiler.report(t.makeError(n, DATAFLOW_ERROR));\n    }\n  }\n\n```",
+            "method_doc": "This method performs the actual type inference analysis using `TypeInference`, resolves new types, and handles exceptions.",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation in `temp2`\n**Description:** The `@notypecheck` annotation inside the `__inner` function might not be correctly handling the type inference for the `opt_data.activity` parameter when passed to `temp1`.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type inference might be failing to recognize the correct type of `opt_data.activity` after passing it through `temp2`.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly involves the type inference process which could potentially miss or incorrectly handle types if there are issues in its implementation.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(Node)",
+            "method_code": "```java\n  void inferTypes(Node node) {\n    NodeTraversal inferTypes = new NodeTraversal(\n        compiler, new TypeInferringCallback(), scopeCreator);\n    inferTypes.traverseWithScope(node, topScope);\n  }\n\n```",
+            "method_doc": "Entry point for type inference when running over part of the tree. */",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation in `temp2`\n**Description:** The `@notypecheck` annotation inside the `__inner` function might not be correctly handling the type inference for the `opt_data.activity` parameter when passed to `temp1`.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type inference might be failing to recognize the correct type of `opt_data.activity` after passing it through `temp2`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it serves as an entry point for type inference but does not directly handle the logic for inferring types. The issue described seems to be related to type mismatches during the inference process, which could potentially be addressed by refining the type inference logic within this method or its associated callbacks.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder::addProperty(String,JSType,Node)",
+            "method_code": "```java\n  public RecordTypeBuilder addProperty(String name, JSType type, Node\n      propertyNode) {\n    isEmpty = false;\n    if (properties.containsKey(name)) {\n      return null;\n    }\n    properties.put(name, new RecordProperty(type, propertyNode));\n    return this;\n  }\n\n```",
+            "method_doc": " Adds a property with the given name and type to the record type. @param name the name of the new property @param type the JSType of the new property @param propertyNode the node that holds this property definition @return The builder itself for chaining purposes, or null if there's a duplicate. ",
+            "class_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder",
+            "class_doc": " A builder for record types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly interacts with the properties of a record type, which could potentially lead to issues when adding properties with incorrect types. However, without further context about the specific issue causing the test failure, it's difficult to pinpoint whether this method is the exact source of the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder$RecordProperty::getType()",
+            "method_code": "```java\n    public JSType getType() {\n      return type;\n    }\n\n```",
+            "method_doc": "This method returns the `JSType` of the property.",
+            "class_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder",
+            "class_doc": " A builder for record types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the type of the property without considering whether the type information is complete or correct. Given the context of the failing test, it's plausible that the issue lies in how the type information is being handled or interpreted within the `RecordTypeBuilder` class.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::flowThrough(Node,FlowScope)",
+            "method_code": "```java\n  @Override\n  FlowScope flowThrough(Node n, FlowScope input) {\n    // If we have not walked a path from <entry> to <n>, then we don't\n    // want to infer anything about this scope.\n    if (input == bottomScope) {\n      return input;\n    }\n\n    FlowScope output = input.createChildFlowScope();\n    output = traverse(n, output);\n    return output;\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the flow of types through nodes, which could potentially affect how type information is propagated and checked. However, without specific details on how the type information is being handled within the method, it's difficult to pinpoint exactly where the issue lies.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, Node n,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, n, type, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError from a file and Node position.  @param sourceName The source file name @param n Determines the line and char position within the source file name @param type The DiagnosticType @param arguments Arguments to be incorporated into the message ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Handling of Optional Parameters in `temp1`\n**Description:** The `temp1` function might be incorrectly handling optional parameters, leading to type mismatches when called from `temp2`.\n\n**Location:** In the definition of `temp1`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type handling for optional parameters in `temp1` might be flawed.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it creates a JSError object, but the issue described seems to be related to type mismatches in the parameters passed to functions like `temp1`, `temp2`, and `temp3`. While the `JSError` class could potentially handle these errors better, the root cause appears to be in how the types are being handled and propagated through the function calls.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Misinterpretation of `@notypecheck` Annotation\n**Description:** The `@notypecheck` annotation might be misinterpreted by the type checker, causing it to apply type checks even within the annotated block.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This discrepancy might suggest that the `@notypecheck` annotation is not being respected by the type checker, leading to unnecessary type checks within the annotated block.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it always returns `true`, which means it does not filter out any nodes during the traversal. If there is a bug related to type checking, it could potentially affect the entire traversal process, including the nodes inside the `@notypecheck` block. However, without further context about the specific issue, it's difficult to pinpoint if this method is directly responsible.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Misinterpretation of `@notypecheck` Annotation\n**Description:** The `@notypecheck` annotation might be misinterpreted by the type checker, causing it to apply type checks even within the annotated block.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This discrepancy might suggest that the `@notypecheck` annotation is not being respected by the type checker, leading to unnecessary type checks within the annotated block.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the traversal of the parse tree, which could potentially affect how annotations like `@notypecheck` are interpreted. However, without specific evidence linking this method directly to the issue, it's difficult to pinpoint its exact role in the failure.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Misinterpretation of `@notypecheck` Annotation\n**Description:** The `@notypecheck` annotation might be misinterpreted by the type checker, causing it to apply type checks even within the annotated block.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This discrepancy might suggest that the `@notypecheck` annotation is not being respected by the type checker, leading to unnecessary type checks within the annotated block.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the traversal of node trees, which could potentially affect how annotations like `@notypecheck` are interpreted. However, without specific evidence linking this method directly to the issue, it's difficult to pinpoint its exact role in the failure.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    inferTypes(externsAndJs);\n  }\n\n```",
+            "method_doc": " Main entry point for type inference when running over the whole tree.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. ",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation in `temp2`\n**Description:** The `@notypecheck` annotation inside the `__inner` function might not be correctly handling the type inference for the `opt_data.activity` parameter when passed to `temp1`.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type inference might be failing to recognize the correct type of `opt_data.activity` after passing it through `temp2`.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed. The issue seems to be related to the incorrect type annotation in `temp2`, specifically the use of `@notypecheck` which might be bypassing the type inference for the `opt_data.activity` parameter. The `process` method in `TypeInferencePass` is responsible for initiating the type inference analysis but does not directly handle individual type annotations or their effects on type inference.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createInitialEstimateLattice() {\n    return bottomScope;\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to type mismatch in the `temp3` function, which is not directly caused by the `createInitialEstimateLattice()` method in the `TypeInference` class. The `createInitialEstimateLattice()` method initializes the flow scope, which seems unrelated to the specific type checking issue encountered in the test.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createEntryLattice() {\n    return functionScope;\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the type information of the parameters in the functions `temp1`, `temp2`, and `temp3`, rather than the implementation of the `createEntryLattice()` method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::toString()",
+            "method_code": "```java\n  @Override\n  public String toString() {\n    // TODO(user): remove custom toString.\n    return type.key + \". \" + description + \" at \" +\n      (sourceName != null && sourceName.length() > 0 ?\n       sourceName : \"(unknown source)\") + \" line \" +\n      (lineNumber != -1 ? String.valueOf(lineNumber) : \"(unknown line)\") +\n      \" : \" + (charno != -1 ? String.valueOf(charno) : \"(unknown column)\");\n  }\n\n```",
+            "method_doc": "This method generates a string representation of the `JSError`. It uses the `type`, `description`, `sourceName`, `lineNumber`, and `charno` fields to construct the string. It does not call any other methods in the covered list.",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Handling of Optional Parameters in `temp1`\n**Description:** The `temp1` function might be incorrectly handling optional parameters, leading to type mismatches when called from `temp2`.\n\n**Location:** In the definition of `temp1`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type handling for optional parameters in `temp1` might be flawed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to incorrect handling of optional parameters in the functions `temp1`, `temp2`, and `temp3`. The `JSError::toString()` method is responsible for generating a string representation of an error, which does not directly involve the type checking or parameter handling issues observed in the test.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::getCharno()",
+            "method_code": "```java\n  public int getCharno() {\n    return charno;\n  }\n\n```",
+            "method_doc": " Get the character number. ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Handling of Optional Parameters in `temp1`\n**Description:** The `temp1` function might be incorrectly handling optional parameters, leading to type mismatches when called from `temp2`.\n\n**Location:** In the definition of `temp1`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type handling for optional parameters in `temp1` might be flawed.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure is related to incorrect handling of optional parameters in functions like `temp1`, `temp2`, and `temp3`. The `getCharno()` method in the `JSError` class is responsible for retrieving the character number associated with an error, which is unrelated to the type mismatch problem observed in the test.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        } else {\n          // Object literal keys are not typeable\n          typeable = false;\n        }\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.isNE()) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getParameters()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+            "method_code": "```java\n  public Iterable<Node> getParameters() {\n    Node n = getParametersNode();\n    if (n != null) {\n      return n.children();\n    } else {\n      return Collections.emptySet();\n    }\n  }\n\n```",
+            "method_doc": "Retrieves the parameters of the function type using `getParametersNode`."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+            "method_code": "```java\n  public Node getParametersNode() {\n    return call.parameters;\n  }\n\n```",
+            "method_doc": "Gets an LP node that contains all params. May be null. */"
+        },
+        "com.google.javascript.rhino.jstype.UnionType::canAssignTo(JSType)": {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::canAssignTo(JSType)",
+            "method_code": "```java\n  @Override\n  public boolean canAssignTo(JSType that) {\n    boolean canAssign = true;\n    for (JSType t : alternates) {\n      if (t.isUnknownType()) {\n        return true;\n      }\n      canAssign &= t.canAssignTo(that);\n    }\n    return canAssign;\n  }\n\n```",
+            "method_doc": "Checks if this union type can be assigned to another type. Iterates through all alternate types and checks if each can assign to the target type."
+        },
+        "com.google.javascript.rhino.jstype.UnionType::restrictByNotNullOrUndefined()": {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::restrictByNotNullOrUndefined()",
+            "method_code": "```java\n  @Override\n  public JSType restrictByNotNullOrUndefined() {\n    UnionTypeBuilder restricted = new UnionTypeBuilder(registry);\n    for (JSType t : alternates) {\n      restricted.addAlternate(t.restrictByNotNullOrUndefined());\n    }\n    return restricted.build();\n  }\n\n```",
+            "method_doc": "Restricts the union type by removing null and undefined types. Iterates through all alternate types and applies the restriction to each."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Indicates whether undefined values should be tolerated."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Returns the return type of the function."
+        },
+        "com.google.javascript.rhino.jstype.UnionType::getAlternates()": {
+            "method_name": "com.google.javascript.rhino.jstype.UnionType::getAlternates()",
+            "method_code": "```java\n  public Iterable<JSType> getAlternates() {\n    return alternates;\n  }\n\n```",
+            "method_doc": " Gets the alternate types of this union type. @return The alternate types of this union type. The returned set is immutable. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+            "method_code": "```java\n  public void check(Node node, boolean externs) {\n    Preconditions.checkNotNull(node);\n\n    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);\n    inExterns = externs;\n    t.traverseWithScope(node, topScope);\n    if (externs) {\n      inferJSDocInfo.process(node, null);\n    } else {\n      inferJSDocInfo.process(null, node);\n    }\n  }\n\n```",
+            "method_doc": "This method initializes the NodeTraversal, sets the \"inExterns\" flag, and traverses the node using the \"shouldTraverse\" and \"visit\" methods."
+        },
+        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Preconditions.checkNotNull(scopeCreator);\n    Preconditions.checkNotNull(topScope);\n\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    if (externsRoot != null) {\n      check(externsRoot, true);\n    }\n    check(jsRoot, false);\n  }\n\n```",
+            "method_doc": " Main entry point for this phase of processing. This follows the pattern for JSCompiler phases.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public boolean shouldTraverse(\n      NodeTraversal t, Node n, Node parent) {\n    checkNoTypeCheckSection(n, true);\n    switch (n.getType()) {\n      case Token.FUNCTION:\n        // normal type checking\n        final Scope outerScope = t.getScope();\n        final String functionPrivateName = n.getFirstChild().getString();\n        if (functionPrivateName != null && functionPrivateName.length() > 0 &&\n            outerScope.isDeclared(functionPrivateName, false) &&\n            // Ideally, we would want to check whether the type in the scope\n            // differs from the type being defined, but then the extern\n            // redeclarations of built-in types generates spurious warnings.\n            !(outerScope.getVar(\n                functionPrivateName).getType() instanceof FunctionType)) {\n          report(t, n, FUNCTION_MASKS_VARIABLE, functionPrivateName);\n        }\n\n        // TODO(user): Only traverse the function's body. The function's\n        // name and arguments are traversed by the scope creator, and ideally\n        // should not be traversed by the type checker.\n        break;\n    }\n    return true;\n  }\n\n```",
+            "method_doc": "This method determines whether to traverse a node based on its type and calls the \"checkNoTypeCheckSection\" method. If the node is a function, it checks for function-private names and reports errors if necessary."
+        },
+        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)",
+            "method_code": "```java\n  void inferTypes(NodeTraversal t, Node n, Scope scope) {\n    TypeInference typeInference =\n        new TypeInference(\n            compiler, computeCfg(n), reverseInterpreter, scope,\n            assertionFunctionsMap);\n    try {\n      typeInference.analyze();\n\n      // Resolve any new type names found during the inference.\n      compiler.getTypeRegistry().resolveTypesInScope(scope);\n\n    } catch (DataFlowAnalysis.MaxIterationsExceededException e) {\n      compiler.report(t.makeError(n, DATAFLOW_ERROR));\n    }\n  }\n\n```",
+            "method_doc": "This method performs the actual type inference analysis using `TypeInference`, resolves new types, and handles exceptions."
+        },
+        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(Node)",
+            "method_code": "```java\n  void inferTypes(Node node) {\n    NodeTraversal inferTypes = new NodeTraversal(\n        compiler, new TypeInferringCallback(), scopeCreator);\n    inferTypes.traverseWithScope(node, topScope);\n  }\n\n```",
+            "method_doc": "Entry point for type inference when running over part of the tree. */"
+        },
+        "com.google.javascript.rhino.jstype.RecordTypeBuilder::addProperty(String,JSType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder::addProperty(String,JSType,Node)",
+            "method_code": "```java\n  public RecordTypeBuilder addProperty(String name, JSType type, Node\n      propertyNode) {\n    isEmpty = false;\n    if (properties.containsKey(name)) {\n      return null;\n    }\n    properties.put(name, new RecordProperty(type, propertyNode));\n    return this;\n  }\n\n```",
+            "method_doc": " Adds a property with the given name and type to the record type. @param name the name of the new property @param type the JSType of the new property @param propertyNode the node that holds this property definition @return The builder itself for chaining purposes, or null if there's a duplicate. "
+        },
+        "com.google.javascript.rhino.jstype.RecordTypeBuilder$RecordProperty::getType()": {
+            "method_name": "com.google.javascript.rhino.jstype.RecordTypeBuilder$RecordProperty::getType()",
+            "method_code": "```java\n    public JSType getType() {\n      return type;\n    }\n\n```",
+            "method_doc": "This method returns the `JSType` of the property."
+        },
+        "com.google.javascript.jscomp.TypeInference::flowThrough(Node,FlowScope)": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::flowThrough(Node,FlowScope)",
+            "method_code": "```java\n  @Override\n  FlowScope flowThrough(Node n, FlowScope input) {\n    // If we have not walked a path from <entry> to <n>, then we don't\n    // want to infer anything about this scope.\n    if (input == bottomScope) {\n      return input;\n    }\n\n    FlowScope output = input.createChildFlowScope();\n    output = traverse(n, output);\n    return output;\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])": {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, Node n,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, n, type, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError from a file and Node position.  @param sourceName The source file name @param n Determines the line and char position within the source file name @param type The DiagnosticType @param arguments Arguments to be incorporated into the message "
+        },
+        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node."
+        },
+        "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    inferTypes(externsAndJs);\n  }\n\n```",
+            "method_doc": " Main entry point for type inference when running over the whole tree.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. "
+        },
+        "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createInitialEstimateLattice() {\n    return bottomScope;\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.TypeInference::createEntryLattice()": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createEntryLattice() {\n    return functionScope;\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.JSError::toString()": {
+            "method_name": "com.google.javascript.jscomp.JSError::toString()",
+            "method_code": "```java\n  @Override\n  public String toString() {\n    // TODO(user): remove custom toString.\n    return type.key + \". \" + description + \" at \" +\n      (sourceName != null && sourceName.length() > 0 ?\n       sourceName : \"(unknown source)\") + \" line \" +\n      (lineNumber != -1 ? String.valueOf(lineNumber) : \"(unknown line)\") +\n      \" : \" + (charno != -1 ? String.valueOf(charno) : \"(unknown column)\");\n  }\n\n```",
+            "method_doc": "This method generates a string representation of the `JSError`. It uses the `type`, `description`, `sourceName`, `lineNumber`, and `charno` fields to construct the string. It does not call any other methods in the covered list."
+        },
+        "com.google.javascript.jscomp.JSError::getCharno()": {
+            "method_name": "com.google.javascript.jscomp.JSError::getCharno()",
+            "method_code": "```java\n  public int getCharno() {\n    return charno;\n  }\n\n```",
+            "method_doc": " Get the character number. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Type Annotation in `temp2`\n**Description:** The `@notypecheck` annotation inside the `__inner` function might not be correctly handling the type inference for the `opt_data.activity` parameter when passed to `temp1`.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type inference might be failing to recognize the correct type of `opt_data.activity` after passing it through `temp2`.",
+                "Missing Type Information in `temp3`\n**Description:** The `temp3` function might be missing type information for its parameters, leading to incorrect type checks.\n\n**Location:** In the definition of `temp3`.\n\n**Observation Support:** The error message specifies that the expected type for the `text` parameter in `temp3` is `(string|undefined)`, but the actual type being passed is `(string|undefined)`. This discrepancy might indicate that the type information for `temp3` is incomplete or incorrectly defined.",
+                "Overlapping Type Constraints in `temp2`\n**Description:** The overlapping type constraints in `temp2` might be causing confusion in the type checker, leading to incorrect type mismatches.\n\n**Location:** In the definition of `temp2`.\n\n**Observation Support:** The error message mentions a type mismatch involving the `activity` parameter of `temp2`. The fact that `activity` can be of various types (`boolean`, `number`, `string`, `null`, `Object`) might be causing the type checker to misinterpret the type of the parameter when passed to `temp1`.",
+                "Incorrect Handling of Optional Parameters in `temp1`\n**Description:** The `temp1` function might be incorrectly handling optional parameters, leading to type mismatches when called from `temp2`.\n\n**Location:** In the definition of `temp1`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This suggests that the type handling for optional parameters in `temp1` might be flawed.",
+                "Misinterpretation of `@notypecheck` Annotation\n**Description:** The `@notypecheck` annotation might be misinterpreted by the type checker, causing it to apply type checks even within the annotated block.\n\n**Location:** Inside the `__inner` function within `temp2`.\n\n**Observation Support:** The error message indicates a type mismatch between the expected and actual parameters of `temp3`. Specifically, the error states that the actual parameter does not match the formal parameter requirements. This discrepancy might suggest that the `@notypecheck` annotation is not being respected by the type checker, leading to unnecessary type checks within the annotated block."
+            ],
+            "selected": 3,
+            "plausibility": {
+                "1": [
+                    8,
+                    7.0
+                ],
+                "2": [
+                    8,
+                    7.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    7.0
+                ],
+                "5": [
+                    8,
+                    6.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.jscomp.TypeInferencePass"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.RecordTypeBuilder",
+                    "com.google.javascript.jscomp.TypeInference"
+                ],
+                "3": [
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.rhino.jstype.UnionType"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.jscomp.JSError"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.FunctionType",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()"
+                    ],
+                    "com.google.javascript.jscomp.TypeInferencePass": [
+                        "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(Node)",
+                        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.RecordTypeBuilder": [
+                        "com.google.javascript.rhino.jstype.RecordTypeBuilder::addProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.RecordTypeBuilder$RecordProperty::getType()"
+                    ],
+                    "com.google.javascript.jscomp.TypeInference": [
+                        "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+                        "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+                        "com.google.javascript.jscomp.TypeInference::flowThrough(Node,FlowScope)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()"
+                    ],
+                    "com.google.javascript.rhino.jstype.UnionType": [
+                        "com.google.javascript.rhino.jstype.UnionType::getAlternates()",
+                        "com.google.javascript.rhino.jstype.UnionType::canAssignTo(JSType)",
+                        "com.google.javascript.rhino.jstype.UnionType::restrictByNotNullOrUndefined()"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()"
+                    ],
+                    "com.google.javascript.jscomp.JSError": [
+                        "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+                        "com.google.javascript.jscomp.JSError::toString()",
+                        "com.google.javascript.jscomp.JSError::getCharno()"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::shouldTraverse(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::getParameters()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getParametersNode()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)"
+                    ]
+                }
+            }
+        }
+    ]
+}

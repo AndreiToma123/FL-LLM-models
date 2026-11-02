@@ -27,21 +27,24 @@ log "job $SLURM_JOB_ID on $(hostname): run $RUN, preset $FL_PRESET ($FL_HF_REPO)
 # Bugs finished by earlier jobs of this run are copied in and skipped by the runner (result.json exists).
 rsync -a "$PERSIST/" "$WORK/results/$RUN/" --exclude _jobs
 # SoapFL's per-bug failing-test cache does not depend on the model: reuse it across runs.
-# Keep the small per-test files under tmp/ (stack_trace.txt, test_output.txt): with test_failure.pkl present SoapFL
-# skips re-running the tests but still READS tmp/<suite>/<test>/stack_trace.txt in its class step. Only the big
-# instrumentation logs are left out (SoapFL re-creates them when missing). Excluding all of tmp/ made every
-# repeated run of the same bugs crash (FileNotFoundError, class-augmentation runs of 2026-11-01).
-CACHE_FILTER=(--exclude 'inst_*.log' --exclude 'run_*.log')
+# Keep ALL of tmp/: with test_failure.pkl present SoapFL skips re-running the failing tests, but its class step
+# still READS tmp/<suite>/<test>/stack_trace.txt and re-uses the instrumentation logs inst_src.log / run_src.log
+# ("instrumentation already done"). Without those logs it re-instruments on a checkout it never compiled:
+# all Mockito bugs then fail ("No instrument file") and Math-14 hung 2 x 3 h (HypoDeduce run of 2026-11-01).
+# Excluding all of tmp/ made repeated runs crash outright (FileNotFoundError, class-augmentation runs).
+CACHE_FILTER=(--exclude '*.partial')   # (non-empty: an empty array trips set -u in older bash)
 rsync -a "${CACHE_FILTER[@]}" "$SOAPFL_CACHE/" "$WORK/cache/"
-# self-heal entries saved by older jobs without tmp/: drop the pickle so SoapFL re-runs the failing tests
+# self-heal entries saved by older jobs without tmp/ or without the instrumentation logs: drop the pickle so SoapFL
+# re-runs (and compiles) the failing tests and re-creates every file it needs (one slower first run per bug)
 HEALED=0
 for d in "$WORK"/cache/*/; do
   [ -f "${d}test_failure.pkl" ] || continue
-  if [ -z "$(find "${d}tmp" -name stack_trace.txt -print -quit 2>/dev/null)" ]; then
+  if [ -z "$(find "${d}tmp" -name stack_trace.txt -print -quit 2>/dev/null)" ] \
+     || [ -z "$(find "${d}tmp" -name inst_src.log -print -quit 2>/dev/null)" ]; then
     rm -f "${d}test_failure.pkl"; HEALED=$((HEALED + 1))
   fi
 done
-log "cache: $(ls -d "$WORK"/cache/*/ 2>/dev/null | wc -l) bug entries restored, $HEALED without failing-test traces will be rebuilt"
+log "cache: $(ls -d "$WORK"/cache/*/ 2>/dev/null | wc -l) bug entries restored, $HEALED without failing-test traces or instrumentation logs will be rebuilt"
 
 sync_back() {
   rsync -a --exclude 'buggy/' --exclude 'fixed/' "$WORK/results/$RUN/" "$PERSIST/"

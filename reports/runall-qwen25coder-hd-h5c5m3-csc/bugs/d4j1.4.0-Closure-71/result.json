@@ -1,0 +1,907 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.CheckAccessControls",
+        "com.google.javascript.jscomp.TypeCheck",
+        "com.google.javascript.jscomp.NodeTraversal",
+        "com.google.javascript.rhino.jstype.JSType",
+        "com.google.javascript.jscomp.TypeInference",
+        "com.google.javascript.jscomp.JsAst",
+        "com.google.javascript.jscomp.CompilerInput"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void checkPropertyVisibility(NodeTraversal t,\n      Node getprop, Node parent) {\n    ObjectType objectType =\n        ObjectType.cast(dereference(getprop.getFirstChild().getJSType()));\n    String propertyName = getprop.getLastChild().getString();\n\n    if (objectType != null) {\n      // Is this a normal property access, or are we trying to override\n      // an existing property?\n      boolean isOverride = t.inGlobalScope() &&\n          parent.getType() == Token.ASSIGN &&\n          parent.getFirstChild() == getprop;\n\n      // Find the lowest property defined on a class with visibility\n      // information.\n      if (isOverride) {\n        objectType = objectType.getImplicitPrototype();\n      }\n      JSDocInfo docInfo = null;\n      for (; objectType != null;\n           objectType = objectType.getImplicitPrototype()) {\n        docInfo = objectType.getOwnPropertyJSDocInfo(propertyName);\n        if (docInfo != null &&\n            docInfo.getVisibility() != Visibility.INHERITED) {\n          break;\n        }\n      }\n\n      if (objectType == null) {\n        // We couldn't find a visibility modifier; assume it's public.\n        return;\n      }\n\n      boolean sameInput =\n          t.getInput().getName().equals(docInfo.getSourceName());\n      Visibility visibility = docInfo.getVisibility();\n      JSType ownerType = normalizeClassType(objectType);\n      if (isOverride) {\n        // Check an ASSIGN statement that's trying to override a property\n        // on a superclass.\n        JSDocInfo overridingInfo = parent.getJSDocInfo();\n        Visibility overridingVisibility = overridingInfo == null ?\n            Visibility.INHERITED : overridingInfo.getVisibility();\n\n        // Check that (a) the property *can* be overridden, and\n        // (b) that the visibility of the override is the same as the\n        // visibility of the original property.\n        if (visibility == Visibility.PRIVATE && !sameInput) {\n          compiler.report(\n              t.makeError(getprop, PRIVATE_OVERRIDE,\n                  objectType.toString()));\n        } else if (overridingVisibility != Visibility.INHERITED &&\n            overridingVisibility != visibility) {\n          compiler.report(\n              t.makeError(getprop, VISIBILITY_MISMATCH,\n                  visibility.name(), objectType.toString(),\n                  overridingVisibility.name()));\n        }\n      } else {\n        if (sameInput) {\n          // private access is always allowed in the same file.\n          return;\n        } else if (visibility == Visibility.PRIVATE &&\n            (currentClass == null || ownerType.differsFrom(currentClass))) {\n          if (docInfo.isConstructor() &&\n              isValidPrivateConstructorAccess(parent)) {\n            return;\n          }\n\n          // private access is not allowed outside the file from a different\n          // enclosing class.\n          compiler.report(\n              t.makeError(getprop,\n                  BAD_PRIVATE_PROPERTY_ACCESS,\n                  propertyName,\n                  validator.getReadableJSTypeName(\n                      getprop.getFirstChild(), true)));\n        } else if (visibility == Visibility.PROTECTED) {\n          // There are 3 types of legal accesses of a protected property:\n          // 1) Accesses in the same file\n          // 2) Overriding the property in a subclass\n          // 3) Accessing the property from inside a subclass\n          // The first two have already been checked for.\n          if (currentClass == null || !currentClass.isSubtype(ownerType)) {\n            compiler.report(\n                t.makeError(getprop,  BAD_PROTECTED_PROPERTY_ACCESS,\n                    propertyName,\n                    validator.getReadableJSTypeName(\n                        getprop.getFirstChild(), true)));\n          }\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Determines whether the given property is visible in the current context. @param t The current traversal. @param getprop The getprop node. ",
+            "class_name": "com.google.javascript.jscomp.CheckAccessControls",
+            "class_doc": " A compiler pass that checks that the programmer has obeyed all the access control restrictions indicated by JSDoc annotations, like {@code @private} and {@code @deprecated}.  Because access control restrictions are attached to type information, it's important that TypedScopeCreator, TypeInference, and InferJSDocInfo all run before this pass. TypedScopeCreator creates and resolves types, TypeInference propagates those types across the AST, and InferJSDocInfo propagates JSDoc across the types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the logic for checking property visibility, which is central to the failing tests. The errors suggest issues with how private properties are being accessed and overridden, and the method contains the necessary conditions to identify and report these violations.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void checkNameVisibility(NodeTraversal t, Node name, Node parent) {\n    Var var = t.getScope().getVar(name.getString());\n    if (var != null) {\n      JSDocInfo docInfo = var.getJSDocInfo();\n      if (docInfo != null) {\n        // If a name is private, make sure that we're in the same file.\n        Visibility visibility = docInfo.getVisibility();\n        if (visibility == Visibility.PRIVATE &&\n            !t.getInput().getName().equals(docInfo.getSourceName())) {\n          if (docInfo.isConstructor() &&\n              isValidPrivateConstructorAccess(parent)) {\n            return;\n          }\n\n          compiler.report(\n              t.makeError(name, BAD_PRIVATE_GLOBAL_ACCESS,\n                  name.getString(), docInfo.getSourceName()));\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Determines whether the given name is visible in the current context. @param t The current traversal. @param name The name node. ",
+            "class_name": "com.google.javascript.jscomp.CheckAccessControls",
+            "class_doc": " A compiler pass that checks that the programmer has obeyed all the access control restrictions indicated by JSDoc annotations, like {@code @private} and {@code @deprecated}.  Because access control restrictions are attached to type information, it's important that TypedScopeCreator, TypeInference, and InferJSDocInfo all run before this pass. TypedScopeCreator creates and resolves types, TypeInference propagates those types across the AST, and InferJSDocInfo propagates JSDoc across the types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the visibility checking of names, including private properties. The failure in both tests indicates an issue with how private properties are being accessed or overridden, which aligns with the functionality implemented in this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::CheckAccessControls(AbstractCompiler)",
+            "method_code": "```java\n  CheckAccessControls(AbstractCompiler compiler) {\n    this.compiler = compiler;\n    this.validator = compiler.getTypeValidator();\n    this.initializedConstantProperties = HashMultimap.create();\n  }\n\n```",
+            "method_doc": "This is the constructor for the `CheckAccessControls` class. It initializes the compiler, type validator, and a multimap for tracking initialized constant properties.",
+            "class_name": "com.google.javascript.jscomp.CheckAccessControls",
+            "class_doc": " A compiler pass that checks that the programmer has obeyed all the access control restrictions indicated by JSDoc annotations, like {@code @private} and {@code @deprecated}.  Because access control restrictions are attached to type information, it's important that TypedScopeCreator, TypeInference, and InferJSDocInfo all run before this pass. TypedScopeCreator creates and resolves types, TypeInference propagates those types across the AST, and InferJSDocInfo propagates JSDoc across the types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method is responsible for initializing the compiler, type validator, and a multimap for tracking initialized constant properties. Given the context of the failing tests, it seems plausible that an issue within this initialization process could lead to the observed behavior. However, without further investigation into the specific logic or interactions within the method, it's difficult to pinpoint the exact cause of the problem.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method 'shouldTraverse' is called during the traversal of the parse tree, but its implementation always returns true, which means it does not filter out any nodes. Given that the failing tests involve issues related to access controls and property overrides, it is plausible that the traversal logic itself might be missing necessary checks or conditions. Therefore, fixing this method could potentially address the root cause of the test failures.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method 'com.google.javascript.jscomp.NodeTraversal::traverse(Node)' appears to be involved in traversing the parse tree, which is a critical part of the compilation process. However, the provided stack traces do not directly point to issues within this method itself but rather suggest potential problems in how the access control checks are being applied during traversal. Given the context, it is plausible that the issue lies elsewhere in the code that interacts with this traversal, rather than within the traversal mechanism itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseWithScope(Node,Scope)",
+            "method_code": "```java\n  void traverseWithScope(Node root, Scope s) {\n    Preconditions.checkState(s.isGlobal());\n\n    sourceName = \"\";\n    curNode = root;\n    pushScope(s);\n    traverseBranch(root, null);\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively with a scope, starting with the given root. This should only be used in the global scope. Otherwise, use {@link #traverseAtScope}. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method is responsible for traversing the parse tree, which involves handling various nodes and scopes. Given the nature of the failing tests, it's plausible that issues within this traversal process could lead to incorrect access control checks. However, without further context about the specific behavior of the method during these tests, it's difficult to pinpoint the exact cause of the failure.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  @Override\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method `getName()` in `CompilerInput` appears to be a simple getter that returns a unique name for the input. Given the context of the failing tests, it seems unlikely that the issue lies within this method itself. The errors suggest potential issues with access control checks rather than with how names are being managed or retrieved.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method `getAstRoot(AbstractCompiler)` appears to be a straightforward wrapper around another method call (`ast.getAstRoot(compiler)`). Given the nature of the failing tests, it seems unlikely that the issue lies within this simple delegation. However, since the method is part of the `CompilerInput` class, which handles the internal representation of inputs to the compiler, it's possible that there could be issues related to how the AST roots are being managed or accessed. Therefore, while it's not the most suspicious method, further investigation into its implementation and interactions with other parts of the compiler might still be warranted.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)",
+            "method_code": "```java\n  public void setModule(JSModule module) {\n    // An input may only belong to one module.\n    Preconditions.checkArgument(\n        module == null || this.module == null || this.module == module);\n    this.module = module;\n  }\n\n```",
+            "method_doc": "Sets the module to which the input belongs. */",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios.",
+            "score": 5.0,
+            "reason": "#5# The method is responsible for setting the module of a CompilerInput, which seems relevant to the access control checks being performed. However, the failure messages suggest issues with overriding private properties rather than direct module assignment. Therefore, while this method could potentially be part of the problem, it is not the most likely location to be fixed.",
+            "hypothesis": 5,
+            "selected_hypothesis": true,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.LP:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (parent.getType() != Token.FUNCTION) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.REF_SPECIAL:\n        ensureTyped(t, n);\n        break;\n\n      case Token.GET_REF:\n        ensureTyped(t, n, getJSType(n.getFirstChild()));\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        }\n        break;\n\n      case Token.GET:\n      case Token.SET:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.getType() == Token.ASSIGN &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !NodeUtil.isExpressionNode(parent);\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.getType() == Token.NE) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        if (!isReference(n.getFirstChild())) {\n          report(t, n, BAD_DELETE);\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.getType() == Token.OBJECTLIT)\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.getType() == Token.OBJECTLIT) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Incorrect Error Handling in CheckAccessControls Pass\n**Description:** The `CheckAccessControls` pass might be incorrectly handling the case where a private property is overridden with a non-private property. Instead of throwing the expected `BAD_PRIVATE_PROPERTY_ACCESS` error, it might be throwing a different error like `PRIVATE_OVERRIDE`.\n\n**Location:** Likely within the `CheckAccessControls` pass logic, specifically when checking property overrides.\n\n**Observation Support:** The stack trace shows that the actual error thrown is `PRIVATE_OVERRIDE` instead of `BAD_PRIVATE_PROPERTY_ACCESS`, which directly points to an issue in how the pass handles property overrides.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for visiting and processing each node in the JavaScript AST, including properties and their access controls. The failure in these tests suggests that there might be an issue with how the method handles property overrides and access control checks.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitGetProp(NodeTraversal t, Node n, Node parent) {\n    // GETPROP nodes have an assigned type on their node by the scope creator\n    // if this is an enum declaration. The only namespaced enum declarations\n    // that we allow are of the form object.name = ...;\n    if (n.getJSType() != null && parent.getType() == Token.ASSIGN) {\n      return;\n    }\n\n    // obj.prop or obj.method()\n    // Lots of types can appear on the left, a call to a void function can\n    // never be on the left. getPropertyType will decide what is acceptable\n    // and what isn't.\n    Node property = n.getLastChild();\n    Node objNode = n.getFirstChild();\n    JSType childType = getJSType(objNode);\n\n    // TODO(user): remove in favor of flagging every property access on\n    // non-object.\n    if (!validator.expectNotNullOrUndefined(t, n, childType,\n            childType + \" has no properties\", getNativeType(OBJECT_TYPE))) {\n      ensureTyped(t, n);\n      return;\n    }\n\n    checkPropertyAccess(childType, property.getString(), t, n);\n    ensureTyped(t, n);\n  }\n\n```",
+            "method_doc": " Visits a GETPROP node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of <code>n</code> ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Incorrect Error Handling in CheckAccessControls Pass\n**Description:** The `CheckAccessControls` pass might be incorrectly handling the case where a private property is overridden with a non-private property. Instead of throwing the expected `BAD_PRIVATE_PROPERTY_ACCESS` error, it might be throwing a different error like `PRIVATE_OVERRIDE`.\n\n**Location:** Likely within the `CheckAccessControls` pass logic, specifically when checking property overrides.\n\n**Observation Support:** The stack trace shows that the actual error thrown is `PRIVATE_OVERRIDE` instead of `BAD_PRIVATE_PROPERTY_ACCESS`, which directly points to an issue in how the pass handles property overrides.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for visiting GETPROP nodes and performing property access checks. The failure in these tests suggests that there might be an issue with how private property overrides are handled during the property access check.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 7,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)",
+            "method_code": "```java\n  private void checkPropertyAccess(JSType childType, String propName,\n      NodeTraversal t, Node n) {\n    ObjectType objectType = childType.dereference();\n    if (objectType != null) {\n      JSType propType = getJSType(n);\n      if ((!objectType.hasProperty(propName) ||\n           objectType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) &&\n          propType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n        if (objectType instanceof EnumType) {\n          report(t, n, INEXISTENT_ENUM_ELEMENT, propName);\n        } else if (!objectType.isEmptyType() &&\n            reportMissingProperties && !isPropertyTest(n)) {\n          if (!typeRegistry.canPropertyBeDefined(objectType, propName)) {\n            report(t, n, INEXISTENT_PROPERTY, propName,\n                validator.getReadableJSTypeName(n.getFirstChild(), true));\n          }\n        }\n      }\n    } else {\n      // TODO(nicksantos): might want to flag the access on a non object when\n      // it's impossible to get a property from this type.\n    }\n  }\n\n```",
+            "method_doc": " Make sure that the access of this property is ok. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Incorrect Error Handling in CheckAccessControls Pass\n**Description:** The `CheckAccessControls` pass might be incorrectly handling the case where a private property is overridden with a non-private property. Instead of throwing the expected `BAD_PRIVATE_PROPERTY_ACCESS` error, it might be throwing a different error like `PRIVATE_OVERRIDE`.\n\n**Location:** Likely within the `CheckAccessControls` pass logic, specifically when checking property overrides.\n\n**Observation Support:** The stack trace shows that the actual error thrown is `PRIVATE_OVERRIDE` instead of `BAD_PRIVATE_PROPERTY_ACCESS`, which directly points to an issue in how the pass handles property overrides.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for checking property access, which is where the error related to private property access would occur. The method does not currently handle the case where a private property is overridden with a non-private property correctly, leading to incorrect error messages being reported.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitAssign(NodeTraversal,Node)",
+            "method_code": "```java\n  private void visitAssign(NodeTraversal t, Node assign) {\n    JSDocInfo info = assign.getJSDocInfo();\n    Node lvalue = assign.getFirstChild();\n    Node rvalue = assign.getLastChild();\n\n    if (lvalue.getType() == Token.GETPROP) {\n      Node object = lvalue.getFirstChild();\n      JSType objectJsType = getJSType(object);\n      String property = lvalue.getLastChild().getString();\n\n      // the first name in this getprop refers to an interface\n      // we perform checks in addition to the ones below\n      if (object.getType() == Token.GETPROP) {\n        JSType jsType = getJSType(object.getFirstChild());\n        if (jsType.isInterface() &&\n            object.getLastChild().getString().equals(\"prototype\")) {\n          visitInterfaceGetprop(t, assign, object, property, lvalue, rvalue);\n        }\n      }\n\n      // /** @type ... */object.name = ...;\n      if (info != null && info.hasType()) {\n        visitAnnotatedAssignGetprop(t, assign,\n            info.getType().evaluate(t.getScope(), typeRegistry), object,\n            property, rvalue);\n        return;\n      }\n\n      // /** @enum ... */object.name = ...;\n      if (info != null && info.hasEnumParameterType()) {\n        checkEnumInitializer(\n            t, rvalue, info.getEnumParameterType().evaluate(\n                t.getScope(), typeRegistry));\n        return;\n      }\n\n      // object.prototype = ...;\n      if (property.equals(\"prototype\")) {\n        if (objectJsType instanceof FunctionType) {\n          FunctionType functionType = (FunctionType) objectJsType;\n          if (functionType.isConstructor()) {\n            JSType rvalueType = rvalue.getJSType();\n            validator.expectObject(t, rvalue, rvalueType,\n                OVERRIDING_PROTOTYPE_WITH_NON_OBJECT);\n          }\n        } else {\n          // TODO(user): might want to flag that\n        }\n        return;\n      }\n\n      // object.prototype.property = ...;\n      if (object.getType() == Token.GETPROP) {\n        Node object2 = object.getFirstChild();\n        String property2 = NodeUtil.getStringValue(object.getLastChild());\n\n        if (\"prototype\".equals(property2)) {\n          JSType jsType = object2.getJSType();\n          if (jsType instanceof FunctionType) {\n            FunctionType functionType = (FunctionType) jsType;\n            if (functionType.isConstructor() || functionType.isInterface()) {\n              checkDeclaredPropertyInheritance(\n                  t, assign, functionType, property, info, getJSType(rvalue));\n            }\n          } else {\n            // TODO(user): might want to flag that\n          }\n          return;\n        }\n      }\n\n      // object.property = ...;\n      ObjectType type = ObjectType.cast(\n          objectJsType.restrictByNotNullOrUndefined());\n      if (type != null) {\n        if (type.hasProperty(property) &&\n            !type.isPropertyTypeInferred(property) &&\n            !propertyIsImplicitCast(type, property)) {\n          validator.expectCanAssignToPropertyOf(\n              t, assign, getJSType(rvalue),\n              type.getPropertyType(property), object, property);\n        }\n        return;\n      }\n    } else if (lvalue.getType() == Token.NAME) {\n      // variable with inferred type case\n      JSType rvalueType = getJSType(assign.getLastChild());\n      Var var = t.getScope().getVar(lvalue.getString());\n      if (var != null) {\n        if (var.isTypeInferred()) {\n          return;\n        }\n      }\n    }\n\n    // fall through case\n    JSType leftType = getJSType(lvalue);\n    Node rightChild = assign.getLastChild();\n    JSType rightType = getJSType(rightChild);\n    if (validator.expectCanAssignTo(\n            t, assign, rightType, leftType, \"assignment\")) {\n      ensureTyped(t, assign, rightType);\n    } else {\n      ensureTyped(t, assign);\n    }\n  }\n\n```",
+            "method_doc": " Visits an assignment <code>lvalue = rvalue</code>. If the <code>lvalue</code> is a prototype modification, we change the schema of the object type it is referring to. @param t the traversal @param assign the assign node (<code>assign.getType() == Token.ASSIGN</code> is an implicit invariant) ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Inconsistent Access Control Rules\n**Description:** The access control rules might be inconsistent between the parent class and the subclass. Specifically, the rule allowing private properties to be overridden by private properties might not be correctly implemented.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in the rules governing property access and inheritance.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties8` fails because it expects no errors, implying that the current implementation allows overriding private properties with private properties, which contradicts the expected behavior described in the test.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles assignments, including those involving prototype modifications, which could be related to the issues observed in the failing tests.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)",
+            "method_code": "```java\n  private void checkDeclaredPropertyInheritance(\n      NodeTraversal t, Node n, FunctionType ctorType, String propertyName,\n      JSDocInfo info, JSType propertyType) {\n    // If the supertype doesn't resolve correctly, we've warned about this\n    // already.\n    if (hasUnknownOrEmptySupertype(ctorType)) {\n      return;\n    }\n\n    FunctionType superClass = ctorType.getSuperClassConstructor();\n    boolean superClassHasProperty = superClass != null &&\n        superClass.getPrototype().hasProperty(propertyName);\n    boolean declaredOverride = info != null && info.isOverride();\n\n    boolean foundInterfaceProperty = false;\n    if (ctorType.isConstructor()) {\n      for (JSType implementedInterface : ctorType.getImplementedInterfaces()) {\n        if (implementedInterface.isUnknownType() ||\n            implementedInterface.isEmptyType()) {\n          continue;\n        }\n        FunctionType interfaceType =\n            implementedInterface.toObjectType().getConstructor();\n        Preconditions.checkNotNull(interfaceType);\n        boolean interfaceHasProperty =\n            interfaceType.getPrototype().hasProperty(propertyName);\n        foundInterfaceProperty = foundInterfaceProperty || interfaceHasProperty;\n        if (reportMissingOverride.isOn() && !declaredOverride &&\n            interfaceHasProperty) {\n          // @override not present, but the property does override an interface\n          // property\n          compiler.report(t.makeError(n, reportMissingOverride,\n              HIDDEN_INTERFACE_PROPERTY, propertyName,\n              interfaceType.getTopMostDefiningType(propertyName).toString()));\n        }\n      }\n    }\n\n    if (!declaredOverride && !superClassHasProperty) {\n      // nothing to do here, it's just a plain new property\n      return;\n    }\n\n    JSType topInstanceType = superClassHasProperty ?\n        superClass.getTopMostDefiningType(propertyName) : null;\n    if (reportMissingOverride.isOn() && ctorType.isConstructor() &&\n        !declaredOverride && superClassHasProperty) {\n      // @override not present, but the property does override a superclass\n      // property\n      compiler.report(t.makeError(n, reportMissingOverride,\n          HIDDEN_SUPERCLASS_PROPERTY, propertyName,\n          topInstanceType.toString()));\n    }\n    if (!declaredOverride) {\n      // there's no @override to check\n      return;\n    }\n    // @override is present and we have to check that it is ok\n    if (superClassHasProperty) {\n      // there is a superclass implementation\n      JSType superClassPropType =\n          superClass.getPrototype().getPropertyType(propertyName);\n      if (!propertyType.canAssignTo(superClassPropType)) {\n        compiler.report(\n            t.makeError(n, HIDDEN_SUPERCLASS_PROPERTY_MISMATCH,\n                propertyName, topInstanceType.toString(),\n                superClassPropType.toString(), propertyType.toString()));\n      }\n    } else if (!foundInterfaceProperty) {\n      // there is no superclass nor interface implementation\n      compiler.report(\n          t.makeError(n, UNKNOWN_OVERRIDE,\n              propertyName, ctorType.getInstanceType().toString()));\n    }\n  }\n\n```",
+            "method_doc": " Given a constructor type and a property name, check that the property has the JSDoc annotation @override iff the property is declared on a superclass. Several checks regarding inheritance correctness are also performed. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Inconsistent Access Control Rules\n**Description:** The access control rules might be inconsistent between the parent class and the subclass. Specifically, the rule allowing private properties to be overridden by private properties might not be correctly implemented.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in the rules governing property access and inheritance.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties8` fails because it expects no errors, implying that the current implementation allows overriding private properties with private properties, which contradicts the expected behavior described in the test.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly deals with the inheritance of properties and their access controls. The failure in the tests suggests that the current implementation of checking property overrides in subclasses is incorrect, and modifying this method would address the root cause of the issue.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 8,
+                "3": 8,
+                "4": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)",
+            "method_code": "```java\n  private static JSType dereference(JSType type) {\n    return type == null ? null : type.dereference();\n  }\n\n```",
+            "method_doc": " Dereference a type, autoboxing it and filtering out null. ",
+            "class_name": "com.google.javascript.jscomp.CheckAccessControls",
+            "class_doc": " A compiler pass that checks that the programmer has obeyed all the access control restrictions indicated by JSDoc annotations, like {@code @private} and {@code @deprecated}.  Because access control restrictions are attached to type information, it's important that TypedScopeCreator, TypeInference, and InferJSDocInfo all run before this pass. TypedScopeCreator creates and resolves types, TypeInference propagates those types across the AST, and InferJSDocInfo propagates JSDoc across the types.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Inconsistent Access Control Rules\n**Description:** The access control rules might be inconsistent between the parent class and the subclass. Specifically, the rule allowing private properties to be overridden by private properties might not be correctly implemented.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in the rules governing property access and inheritance.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties8` fails because it expects no errors, implying that the current implementation allows overriding private properties with private properties, which contradicts the expected behavior described in the test.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only handles dereferencing and does not directly relate to access control rules or property overrides.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 5,
+                "3": 5,
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Bug in Property Override Detection Logic\n**Description:** There might be a bug in the logic that detects whether a property is being overridden. The pass might be incorrectly identifying a non-private property as a valid override of a private property.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for detecting property overrides.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties6` fails because it expects a `BAD_PRIVATE_PROPERTY_ACCESS` error, indicating that the pass is incorrectly allowing a non-private property to override a private property.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it is involved in traversing the parse tree, which could potentially affect how properties are accessed and overridden. However, without further context about how the traversal logic interacts with access control checks, it's difficult to pinpoint if this method is directly causing the issue.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Bug in Property Override Detection Logic\n**Description:** There might be a bug in the logic that detects whether a property is being overridden. The pass might be incorrectly identifying a non-private property as a valid override of a private property.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for detecting property overrides.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties6` fails because it expects a `BAD_PRIVATE_PROPERTY_ACCESS` error, indicating that the pass is incorrectly allowing a non-private property to override a private property.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it handles the traversal of nodes in the parse tree, which could potentially affect how properties are accessed and overridden. However, without further context about the specific issues detected by the tests, it's difficult to pinpoint exactly why this method might be causing the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getJSDocInfo()",
+            "method_code": "```java\n  public JSDocInfo getJSDocInfo() {\n    return null;\n  }\n\n```",
+            "method_doc": " Gets the docInfo for this type. By default, documentation cannot be attached to arbitrary types. This must be overridden for programmer-defined types. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it does not directly relate to the identification or handling of private properties. The issue seems to lie within the logic of the `CheckAccessControls` pass rather than the `getJSDocInfo()` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createInitialEstimateLattice() {\n    return bottomScope;\n  }\n\n```",
+            "method_doc": "This method returns the `bottomScope` as the initial estimate lattice.",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the lattice with the `bottomScope`, which might not accurately reflect the type information needed for access control checks. Given that the tests involve issues related to private property identification and handling, fixing this method could potentially resolve the underlying problem.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createEntryLattice() {\n    return functionScope;\n  }\n\n```",
+            "method_doc": "This method returns the `functionScope` as the entry lattice.",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly returns the `functionScope` as the entry lattice without further processing. Given that the issue seems to be related to private property identification and handling, it's plausible that the problem lies elsewhere in the type inference process rather than just returning the scope.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInference::getAssignedOuterLocalVars()",
+            "method_code": "```java\n  Multimap<Scope, Var> getAssignedOuterLocalVars() {\n    return assignedOuterLocalVars;\n  }\n\n```",
+            "method_doc": " @return Local variables assigned in this scope, but which are declared in a scope outside of it. Hashed by the scope they're declared in. ",
+            "class_name": "com.google.javascript.jscomp.TypeInference",
+            "class_doc": " Type inference within a script node or a function body, using the data-flow analysis framework.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is not directly related to the identification or handling of private properties, so it is unlikely to be the best location to fix the issue.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler,String,String)",
+            "method_code": "```java\n  private void parse(AbstractCompiler compiler, String sourceName,\n      String sourceStr) {\n    try {\n      logger_.fine(\"Parsing: \" + sourceName);\n      root = ParserRunner.parse(sourceName, sourceStr,\n          compiler.getParserConfig(),\n          compiler.getDefaultErrorReporter(),\n          logger_);\n    } catch (IOException e) {\n      compiler.report(JSError.make(AbstractCompiler.READ_ERROR, sourceName));\n    }\n\n    if (root == null || compiler.hasHaltingErrors()) {\n      // There was a parse error or IOException, so use a dummy block.\n      root = new Node(Token.BLOCK);\n    } else {\n      compiler.prepareAst(root);\n    }\n\n    // Set the source name so that the compiler passes can track\n    // the source file and module.\n    root.putProp(Node.SOURCENAME_PROP, sourceName);\n  }\n\n```",
+            "method_doc": "This method parses the JavaScript source code using `ParserRunner.parse`. It logs parsing details, handles exceptions, and prepares the AST. If there are errors, it sets a dummy block as the root.",
+            "class_name": "com.google.javascript.jscomp.JsAst",
+            "class_doc": " Generates an AST for a JavaScript source file.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves parsing JavaScript source code and preparing the Abstract Syntax Tree (AST). While it's unlikely that the parsing itself would directly cause issues related to access control, the handling of errors and the preparation of the AST could potentially impact how the compiler processes subsequent passes, including the CheckAccessControls pass. However, without further context about how the AST is used in the CheckAccessControls pass, it's difficult to pinpoint exactly where the problem lies.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)",
+            "method_code": "```java\n  public JsAst(SourceFile sourceFile) {\n    this.sourceFile = sourceFile;\n    this.fileName = sourceFile.getName();\n  }\n\n```",
+            "method_doc": "This constructor initializes the `sourceFile` and `fileName` properties.",
+            "class_name": "com.google.javascript.jscomp.JsAst",
+            "class_doc": " Generates an AST for a JavaScript source file.  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue seems to be related to the identification and handling of private properties within the `CheckAccessControls` pass, rather than the initialization of the `JsAst` class.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the tests suggests an issue with how private properties are identified and handled within the `CheckAccessControls` pass logic, rather than with the `getNativeType` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoType()",
+            "method_code": "```java\n  public boolean isNoType() {\n    return false;\n  }\n\n```",
+            "method_doc": "Returns `false`, indicating that this type is not the `NoType`.",
+            "class_name": "com.google.javascript.rhino.jstype.JSType",
+            "class_doc": " Represents JavaScript value types.<p>  Types are split into two separate families: value types and object types.  A special {@link UnknownType} exists to represent a wildcard type on which no information can be gathered. In particular, it can assign to everyone, is a subtype of everyone (and everyone is a subtype of it).<p>  If you remove the {@link UnknownType}, the set of types in the type system forms a lattice with the {@link #isSubtype} relation defining the partial order of types. All types are united at the top of the lattice by the {@link AllType} and at the bottom by the {@link NoType}.<p>  ",
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "test_failure_causes": "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the tests suggests an issue with private property identification rather than the `isNoType()` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void checkPropertyVisibility(NodeTraversal t,\n      Node getprop, Node parent) {\n    ObjectType objectType =\n        ObjectType.cast(dereference(getprop.getFirstChild().getJSType()));\n    String propertyName = getprop.getLastChild().getString();\n\n    if (objectType != null) {\n      // Is this a normal property access, or are we trying to override\n      // an existing property?\n      boolean isOverride = t.inGlobalScope() &&\n          parent.getType() == Token.ASSIGN &&\n          parent.getFirstChild() == getprop;\n\n      // Find the lowest property defined on a class with visibility\n      // information.\n      if (isOverride) {\n        objectType = objectType.getImplicitPrototype();\n      }\n      JSDocInfo docInfo = null;\n      for (; objectType != null;\n           objectType = objectType.getImplicitPrototype()) {\n        docInfo = objectType.getOwnPropertyJSDocInfo(propertyName);\n        if (docInfo != null &&\n            docInfo.getVisibility() != Visibility.INHERITED) {\n          break;\n        }\n      }\n\n      if (objectType == null) {\n        // We couldn't find a visibility modifier; assume it's public.\n        return;\n      }\n\n      boolean sameInput =\n          t.getInput().getName().equals(docInfo.getSourceName());\n      Visibility visibility = docInfo.getVisibility();\n      JSType ownerType = normalizeClassType(objectType);\n      if (isOverride) {\n        // Check an ASSIGN statement that's trying to override a property\n        // on a superclass.\n        JSDocInfo overridingInfo = parent.getJSDocInfo();\n        Visibility overridingVisibility = overridingInfo == null ?\n            Visibility.INHERITED : overridingInfo.getVisibility();\n\n        // Check that (a) the property *can* be overridden, and\n        // (b) that the visibility of the override is the same as the\n        // visibility of the original property.\n        if (visibility == Visibility.PRIVATE && !sameInput) {\n          compiler.report(\n              t.makeError(getprop, PRIVATE_OVERRIDE,\n                  objectType.toString()));\n        } else if (overridingVisibility != Visibility.INHERITED &&\n            overridingVisibility != visibility) {\n          compiler.report(\n              t.makeError(getprop, VISIBILITY_MISMATCH,\n                  visibility.name(), objectType.toString(),\n                  overridingVisibility.name()));\n        }\n      } else {\n        if (sameInput) {\n          // private access is always allowed in the same file.\n          return;\n        } else if (visibility == Visibility.PRIVATE &&\n            (currentClass == null || ownerType.differsFrom(currentClass))) {\n          if (docInfo.isConstructor() &&\n              isValidPrivateConstructorAccess(parent)) {\n            return;\n          }\n\n          // private access is not allowed outside the file from a different\n          // enclosing class.\n          compiler.report(\n              t.makeError(getprop,\n                  BAD_PRIVATE_PROPERTY_ACCESS,\n                  propertyName,\n                  validator.getReadableJSTypeName(\n                      getprop.getFirstChild(), true)));\n        } else if (visibility == Visibility.PROTECTED) {\n          // There are 3 types of legal accesses of a protected property:\n          // 1) Accesses in the same file\n          // 2) Overriding the property in a subclass\n          // 3) Accessing the property from inside a subclass\n          // The first two have already been checked for.\n          if (currentClass == null || !currentClass.isSubtype(ownerType)) {\n            compiler.report(\n                t.makeError(getprop,  BAD_PROTECTED_PROPERTY_ACCESS,\n                    propertyName,\n                    validator.getReadableJSTypeName(\n                        getprop.getFirstChild(), true)));\n          }\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Determines whether the given property is visible in the current context. @param t The current traversal. @param getprop The getprop node. "
+        },
+        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void checkNameVisibility(NodeTraversal t, Node name, Node parent) {\n    Var var = t.getScope().getVar(name.getString());\n    if (var != null) {\n      JSDocInfo docInfo = var.getJSDocInfo();\n      if (docInfo != null) {\n        // If a name is private, make sure that we're in the same file.\n        Visibility visibility = docInfo.getVisibility();\n        if (visibility == Visibility.PRIVATE &&\n            !t.getInput().getName().equals(docInfo.getSourceName())) {\n          if (docInfo.isConstructor() &&\n              isValidPrivateConstructorAccess(parent)) {\n            return;\n          }\n\n          compiler.report(\n              t.makeError(name, BAD_PRIVATE_GLOBAL_ACCESS,\n                  name.getString(), docInfo.getSourceName()));\n        }\n      }\n    }\n  }\n\n```",
+            "method_doc": " Determines whether the given name is visible in the current context. @param t The current traversal. @param name The name node. "
+        },
+        "com.google.javascript.jscomp.CheckAccessControls::CheckAccessControls(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::CheckAccessControls(AbstractCompiler)",
+            "method_code": "```java\n  CheckAccessControls(AbstractCompiler compiler) {\n    this.compiler = compiler;\n    this.validator = compiler.getTypeValidator();\n    this.initializedConstantProperties = HashMultimap.create();\n  }\n\n```",
+            "method_doc": "This is the constructor for the `CheckAccessControls` class. It initializes the compiler, type validator, and a multimap for tracking initialized constant properties."
+        },
+        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseWithScope(Node,Scope)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseWithScope(Node,Scope)",
+            "method_code": "```java\n  void traverseWithScope(Node root, Scope s) {\n    Preconditions.checkState(s.isGlobal());\n\n    sourceName = \"\";\n    curNode = root;\n    pushScope(s);\n    traverseBranch(root, null);\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively with a scope, starting with the given root. This should only be used in the global scope. Otherwise, use {@link #traverseAtScope}. "
+        },
+        "com.google.javascript.jscomp.CompilerInput::getName()": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  @Override\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */"
+        },
+        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root."
+        },
+        "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)",
+            "method_code": "```java\n  public void setModule(JSModule module) {\n    // An input may only belong to one module.\n    Preconditions.checkArgument(\n        module == null || this.module == null || this.module == module);\n    this.module = module;\n  }\n\n```",
+            "method_doc": "Sets the module to which the input belongs. */"
+        },
+        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.LP:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (parent.getType() != Token.FUNCTION) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.REF_SPECIAL:\n        ensureTyped(t, n);\n        break;\n\n      case Token.GET_REF:\n        ensureTyped(t, n, getJSType(n.getFirstChild()));\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        // Object literal keys are handled with OBJECTLIT\n        if (!NodeUtil.isObjectLitKey(n, n.getParent())) {\n          ensureTyped(t, n, STRING_TYPE);\n        }\n        break;\n\n      case Token.GET:\n      case Token.SET:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.getType() == Token.ASSIGN &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !NodeUtil.isExpressionNode(parent);\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        TernaryValue result =\n            leftTypeRestricted.testForEquality(rightTypeRestricted);\n        if (result != TernaryValue.UNKNOWN) {\n          if (n.getType() == Token.NE) {\n            result = result.not();\n          }\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n        if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                rightTypeRestricted)) {\n          report(t, n, DETERMINISTIC_TEST_NO_RESULT, leftType.toString(),\n              rightType.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        if (!isReference(n.getFirstChild())) {\n          report(t, n, BAD_DELETE);\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.getType() == Token.OBJECTLIT)\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.getType() == Token.OBJECTLIT) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  private void visitGetProp(NodeTraversal t, Node n, Node parent) {\n    // GETPROP nodes have an assigned type on their node by the scope creator\n    // if this is an enum declaration. The only namespaced enum declarations\n    // that we allow are of the form object.name = ...;\n    if (n.getJSType() != null && parent.getType() == Token.ASSIGN) {\n      return;\n    }\n\n    // obj.prop or obj.method()\n    // Lots of types can appear on the left, a call to a void function can\n    // never be on the left. getPropertyType will decide what is acceptable\n    // and what isn't.\n    Node property = n.getLastChild();\n    Node objNode = n.getFirstChild();\n    JSType childType = getJSType(objNode);\n\n    // TODO(user): remove in favor of flagging every property access on\n    // non-object.\n    if (!validator.expectNotNullOrUndefined(t, n, childType,\n            childType + \" has no properties\", getNativeType(OBJECT_TYPE))) {\n      ensureTyped(t, n);\n      return;\n    }\n\n    checkPropertyAccess(childType, property.getString(), t, n);\n    ensureTyped(t, n);\n  }\n\n```",
+            "method_doc": " Visits a GETPROP node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of <code>n</code> "
+        },
+        "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)",
+            "method_code": "```java\n  private void checkPropertyAccess(JSType childType, String propName,\n      NodeTraversal t, Node n) {\n    ObjectType objectType = childType.dereference();\n    if (objectType != null) {\n      JSType propType = getJSType(n);\n      if ((!objectType.hasProperty(propName) ||\n           objectType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) &&\n          propType.equals(typeRegistry.getNativeType(UNKNOWN_TYPE))) {\n        if (objectType instanceof EnumType) {\n          report(t, n, INEXISTENT_ENUM_ELEMENT, propName);\n        } else if (!objectType.isEmptyType() &&\n            reportMissingProperties && !isPropertyTest(n)) {\n          if (!typeRegistry.canPropertyBeDefined(objectType, propName)) {\n            report(t, n, INEXISTENT_PROPERTY, propName,\n                validator.getReadableJSTypeName(n.getFirstChild(), true));\n          }\n        }\n      }\n    } else {\n      // TODO(nicksantos): might want to flag the access on a non object when\n      // it's impossible to get a property from this type.\n    }\n  }\n\n```",
+            "method_doc": " Make sure that the access of this property is ok. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitAssign(NodeTraversal,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitAssign(NodeTraversal,Node)",
+            "method_code": "```java\n  private void visitAssign(NodeTraversal t, Node assign) {\n    JSDocInfo info = assign.getJSDocInfo();\n    Node lvalue = assign.getFirstChild();\n    Node rvalue = assign.getLastChild();\n\n    if (lvalue.getType() == Token.GETPROP) {\n      Node object = lvalue.getFirstChild();\n      JSType objectJsType = getJSType(object);\n      String property = lvalue.getLastChild().getString();\n\n      // the first name in this getprop refers to an interface\n      // we perform checks in addition to the ones below\n      if (object.getType() == Token.GETPROP) {\n        JSType jsType = getJSType(object.getFirstChild());\n        if (jsType.isInterface() &&\n            object.getLastChild().getString().equals(\"prototype\")) {\n          visitInterfaceGetprop(t, assign, object, property, lvalue, rvalue);\n        }\n      }\n\n      // /** @type ... */object.name = ...;\n      if (info != null && info.hasType()) {\n        visitAnnotatedAssignGetprop(t, assign,\n            info.getType().evaluate(t.getScope(), typeRegistry), object,\n            property, rvalue);\n        return;\n      }\n\n      // /** @enum ... */object.name = ...;\n      if (info != null && info.hasEnumParameterType()) {\n        checkEnumInitializer(\n            t, rvalue, info.getEnumParameterType().evaluate(\n                t.getScope(), typeRegistry));\n        return;\n      }\n\n      // object.prototype = ...;\n      if (property.equals(\"prototype\")) {\n        if (objectJsType instanceof FunctionType) {\n          FunctionType functionType = (FunctionType) objectJsType;\n          if (functionType.isConstructor()) {\n            JSType rvalueType = rvalue.getJSType();\n            validator.expectObject(t, rvalue, rvalueType,\n                OVERRIDING_PROTOTYPE_WITH_NON_OBJECT);\n          }\n        } else {\n          // TODO(user): might want to flag that\n        }\n        return;\n      }\n\n      // object.prototype.property = ...;\n      if (object.getType() == Token.GETPROP) {\n        Node object2 = object.getFirstChild();\n        String property2 = NodeUtil.getStringValue(object.getLastChild());\n\n        if (\"prototype\".equals(property2)) {\n          JSType jsType = object2.getJSType();\n          if (jsType instanceof FunctionType) {\n            FunctionType functionType = (FunctionType) jsType;\n            if (functionType.isConstructor() || functionType.isInterface()) {\n              checkDeclaredPropertyInheritance(\n                  t, assign, functionType, property, info, getJSType(rvalue));\n            }\n          } else {\n            // TODO(user): might want to flag that\n          }\n          return;\n        }\n      }\n\n      // object.property = ...;\n      ObjectType type = ObjectType.cast(\n          objectJsType.restrictByNotNullOrUndefined());\n      if (type != null) {\n        if (type.hasProperty(property) &&\n            !type.isPropertyTypeInferred(property) &&\n            !propertyIsImplicitCast(type, property)) {\n          validator.expectCanAssignToPropertyOf(\n              t, assign, getJSType(rvalue),\n              type.getPropertyType(property), object, property);\n        }\n        return;\n      }\n    } else if (lvalue.getType() == Token.NAME) {\n      // variable with inferred type case\n      JSType rvalueType = getJSType(assign.getLastChild());\n      Var var = t.getScope().getVar(lvalue.getString());\n      if (var != null) {\n        if (var.isTypeInferred()) {\n          return;\n        }\n      }\n    }\n\n    // fall through case\n    JSType leftType = getJSType(lvalue);\n    Node rightChild = assign.getLastChild();\n    JSType rightType = getJSType(rightChild);\n    if (validator.expectCanAssignTo(\n            t, assign, rightType, leftType, \"assignment\")) {\n      ensureTyped(t, assign, rightType);\n    } else {\n      ensureTyped(t, assign);\n    }\n  }\n\n```",
+            "method_doc": " Visits an assignment <code>lvalue = rvalue</code>. If the <code>lvalue</code> is a prototype modification, we change the schema of the object type it is referring to. @param t the traversal @param assign the assign node (<code>assign.getType() == Token.ASSIGN</code> is an implicit invariant) "
+        },
+        "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)",
+            "method_code": "```java\n  private void checkDeclaredPropertyInheritance(\n      NodeTraversal t, Node n, FunctionType ctorType, String propertyName,\n      JSDocInfo info, JSType propertyType) {\n    // If the supertype doesn't resolve correctly, we've warned about this\n    // already.\n    if (hasUnknownOrEmptySupertype(ctorType)) {\n      return;\n    }\n\n    FunctionType superClass = ctorType.getSuperClassConstructor();\n    boolean superClassHasProperty = superClass != null &&\n        superClass.getPrototype().hasProperty(propertyName);\n    boolean declaredOverride = info != null && info.isOverride();\n\n    boolean foundInterfaceProperty = false;\n    if (ctorType.isConstructor()) {\n      for (JSType implementedInterface : ctorType.getImplementedInterfaces()) {\n        if (implementedInterface.isUnknownType() ||\n            implementedInterface.isEmptyType()) {\n          continue;\n        }\n        FunctionType interfaceType =\n            implementedInterface.toObjectType().getConstructor();\n        Preconditions.checkNotNull(interfaceType);\n        boolean interfaceHasProperty =\n            interfaceType.getPrototype().hasProperty(propertyName);\n        foundInterfaceProperty = foundInterfaceProperty || interfaceHasProperty;\n        if (reportMissingOverride.isOn() && !declaredOverride &&\n            interfaceHasProperty) {\n          // @override not present, but the property does override an interface\n          // property\n          compiler.report(t.makeError(n, reportMissingOverride,\n              HIDDEN_INTERFACE_PROPERTY, propertyName,\n              interfaceType.getTopMostDefiningType(propertyName).toString()));\n        }\n      }\n    }\n\n    if (!declaredOverride && !superClassHasProperty) {\n      // nothing to do here, it's just a plain new property\n      return;\n    }\n\n    JSType topInstanceType = superClassHasProperty ?\n        superClass.getTopMostDefiningType(propertyName) : null;\n    if (reportMissingOverride.isOn() && ctorType.isConstructor() &&\n        !declaredOverride && superClassHasProperty) {\n      // @override not present, but the property does override a superclass\n      // property\n      compiler.report(t.makeError(n, reportMissingOverride,\n          HIDDEN_SUPERCLASS_PROPERTY, propertyName,\n          topInstanceType.toString()));\n    }\n    if (!declaredOverride) {\n      // there's no @override to check\n      return;\n    }\n    // @override is present and we have to check that it is ok\n    if (superClassHasProperty) {\n      // there is a superclass implementation\n      JSType superClassPropType =\n          superClass.getPrototype().getPropertyType(propertyName);\n      if (!propertyType.canAssignTo(superClassPropType)) {\n        compiler.report(\n            t.makeError(n, HIDDEN_SUPERCLASS_PROPERTY_MISMATCH,\n                propertyName, topInstanceType.toString(),\n                superClassPropType.toString(), propertyType.toString()));\n      }\n    } else if (!foundInterfaceProperty) {\n      // there is no superclass nor interface implementation\n      compiler.report(\n          t.makeError(n, UNKNOWN_OVERRIDE,\n              propertyName, ctorType.getInstanceType().toString()));\n    }\n  }\n\n```",
+            "method_doc": " Given a constructor type and a property name, check that the property has the JSDoc annotation @override iff the property is declared on a superclass. Several checks regarding inheritance correctness are also performed. "
+        },
+        "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)": {
+            "method_name": "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)",
+            "method_code": "```java\n  private static JSType dereference(JSType type) {\n    return type == null ? null : type.dereference();\n  }\n\n```",
+            "method_doc": " Dereference a type, autoboxing it and filtering out null. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. "
+        },
+        "com.google.javascript.rhino.jstype.JSType::getJSDocInfo()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getJSDocInfo()",
+            "method_code": "```java\n  public JSDocInfo getJSDocInfo() {\n    return null;\n  }\n\n```",
+            "method_doc": " Gets the docInfo for this type. By default, documentation cannot be attached to arbitrary types. This must be overridden for programmer-defined types. "
+        },
+        "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createInitialEstimateLattice() {\n    return bottomScope;\n  }\n\n```",
+            "method_doc": "This method returns the `bottomScope` as the initial estimate lattice."
+        },
+        "com.google.javascript.jscomp.TypeInference::createEntryLattice()": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+            "method_code": "```java\n  @Override\n  FlowScope createEntryLattice() {\n    return functionScope;\n  }\n\n```",
+            "method_doc": "This method returns the `functionScope` as the entry lattice."
+        },
+        "com.google.javascript.jscomp.TypeInference::getAssignedOuterLocalVars()": {
+            "method_name": "com.google.javascript.jscomp.TypeInference::getAssignedOuterLocalVars()",
+            "method_code": "```java\n  Multimap<Scope, Var> getAssignedOuterLocalVars() {\n    return assignedOuterLocalVars;\n  }\n\n```",
+            "method_doc": " @return Local variables assigned in this scope, but which are declared in a scope outside of it. Hashed by the scope they're declared in. "
+        },
+        "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler,String,String)": {
+            "method_name": "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler,String,String)",
+            "method_code": "```java\n  private void parse(AbstractCompiler compiler, String sourceName,\n      String sourceStr) {\n    try {\n      logger_.fine(\"Parsing: \" + sourceName);\n      root = ParserRunner.parse(sourceName, sourceStr,\n          compiler.getParserConfig(),\n          compiler.getDefaultErrorReporter(),\n          logger_);\n    } catch (IOException e) {\n      compiler.report(JSError.make(AbstractCompiler.READ_ERROR, sourceName));\n    }\n\n    if (root == null || compiler.hasHaltingErrors()) {\n      // There was a parse error or IOException, so use a dummy block.\n      root = new Node(Token.BLOCK);\n    } else {\n      compiler.prepareAst(root);\n    }\n\n    // Set the source name so that the compiler passes can track\n    // the source file and module.\n    root.putProp(Node.SOURCENAME_PROP, sourceName);\n  }\n\n```",
+            "method_doc": "This method parses the JavaScript source code using `ParserRunner.parse`. It logs parsing details, handles exceptions, and prepares the AST. If there are errors, it sets a dummy block as the root."
+        },
+        "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)": {
+            "method_name": "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)",
+            "method_code": "```java\n  public JsAst(SourceFile sourceFile) {\n    this.sourceFile = sourceFile;\n    this.fileName = sourceFile.getName();\n  }\n\n```",
+            "method_doc": "This constructor initializes the `sourceFile` and `fileName` properties."
+        },
+        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+            "method_code": "```java\n  JSType getNativeType(JSTypeNative typeId) {\n    return registry.getNativeType(typeId);\n  }\n\n```",
+            "method_doc": " Utility method for less verbose code. "
+        },
+        "com.google.javascript.rhino.jstype.JSType::isNoType()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSType::isNoType()",
+            "method_code": "```java\n  public boolean isNoType() {\n    return false;\n  }\n\n```",
+            "method_doc": "Returns `false`, indicating that this type is not the `NoType`."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.CheckAccessControlsTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Error Handling in CheckAccessControls Pass\n**Description:** The `CheckAccessControls` pass might be incorrectly handling the case where a private property is overridden with a non-private property. Instead of throwing the expected `BAD_PRIVATE_PROPERTY_ACCESS` error, it might be throwing a different error like `PRIVATE_OVERRIDE`.\n\n**Location:** Likely within the `CheckAccessControls` pass logic, specifically when checking property overrides.\n\n**Observation Support:** The stack trace shows that the actual error thrown is `PRIVATE_OVERRIDE` instead of `BAD_PRIVATE_PROPERTY_ACCESS`, which directly points to an issue in how the pass handles property overrides.",
+                "Inconsistent Access Control Rules\n**Description:** The access control rules might be inconsistent between the parent class and the subclass. Specifically, the rule allowing private properties to be overridden by private properties might not be correctly implemented.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in the rules governing property access and inheritance.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties8` fails because it expects no errors, implying that the current implementation allows overriding private properties with private properties, which contradicts the expected behavior described in the test.",
+                "Bug in Property Override Detection Logic\n**Description:** There might be a bug in the logic that detects whether a property is being overridden. The pass might be incorrectly identifying a non-private property as a valid override of a private property.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for detecting property overrides.\n\n**Observation Support:** The test `testNoPrivateAccessForProperties6` fails because it expects a `BAD_PRIVATE_PROPERTY_ACCESS` error, indicating that the pass is incorrectly allowing a non-private property to override a private property.",
+                "Issue with Private Property Identification\n**Description:** The pass might be failing to correctly identify private properties. As a result, it might be incorrectly treating a non-private property as a private property, leading to incorrect error messages.\n\n**Location:** Within the `CheckAccessControls` pass logic, specifically in the methods responsible for identifying private properties.\n\n**Observation Support:** Both tests fail, suggesting that there is a fundamental issue with how private properties are identified and handled by the pass.",
+                "Race Condition or Concurrency Issue\n**Description:** There might be a race condition or concurrency issue in the `CheckAccessControls` pass. This could cause the pass to produce incorrect results depending on the order in which it processes the input files or properties.\n\n**Location:** Within the `CheckAccessControls` pass logic, particularly in parts of the code that handle concurrent processing or shared state.\n\n**Observation Support:** While less likely given the deterministic nature of the tests, the fact that both tests fail suggests that there might be some underlying issue that affects the consistency of the pass's execution across different scenarios."
+            ],
+            "selected": 5,
+            "plausibility": {
+                "1": [
+                    8,
+                    8.0
+                ],
+                "2": [
+                    8,
+                    8.0
+                ],
+                "3": [
+                    8,
+                    8.0
+                ],
+                "4": [
+                    8,
+                    8.0
+                ],
+                "5": [
+                    9,
+                    7.333333333333333
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.CheckAccessControls",
+                    "com.google.javascript.jscomp.TypeCheck"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.CheckAccessControls",
+                    "com.google.javascript.jscomp.TypeCheck"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.CheckAccessControls",
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.CheckAccessControls",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.jscomp.TypeInference",
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.jscomp.JsAst"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.CheckAccessControls",
+                    "com.google.javascript.jscomp.CompilerInput",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.CheckAccessControls": [
+                        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::CheckAccessControls(AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::checkPropertyAccess(JSType,String,NodeTraversal,Node)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.CheckAccessControls": [
+                        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)"
+                    ],
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visitAssign(NodeTraversal,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.CheckAccessControls": [
+                        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)"
+                    ],
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.CheckAccessControls": [
+                        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::dereference(JSType)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSType": [
+                        "com.google.javascript.rhino.jstype.JSType::getNativeType(JSTypeNative)",
+                        "com.google.javascript.rhino.jstype.JSType::getJSDocInfo()",
+                        "com.google.javascript.rhino.jstype.JSType::isNoType()"
+                    ],
+                    "com.google.javascript.jscomp.TypeInference": [
+                        "com.google.javascript.jscomp.TypeInference::createInitialEstimateLattice()",
+                        "com.google.javascript.jscomp.TypeInference::createEntryLattice()",
+                        "com.google.javascript.jscomp.TypeInference::getAssignedOuterLocalVars()"
+                    ],
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::checkDeclaredPropertyInheritance(NodeTraversal,Node,FunctionType,String,JSDocInfo,JSType)",
+                        "com.google.javascript.jscomp.TypeCheck::visitGetProp(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.JsAst": [
+                        "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler,String,String)",
+                        "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.CheckAccessControls": [
+                        "com.google.javascript.jscomp.CheckAccessControls::checkNameVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::checkPropertyVisibility(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.CheckAccessControls::CheckAccessControls(AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::getName()",
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::setModule(JSModule)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseWithScope(Node,Scope)"
+                    ]
+                }
+            }
+        }
+    ]
+}

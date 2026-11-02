@@ -1,0 +1,1701 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.NodeUtil",
+        "com.google.javascript.rhino.jstype.TernaryValue",
+        "com.google.javascript.rhino.Node",
+        "com.google.javascript.jscomp.AbstractCompiler",
+        "com.google.javascript.rhino.jstype.JSType",
+        "com.google.javascript.jscomp.parsing.ParserRunner",
+        "com.google.javascript.jscomp.NodeTraversal"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    // VOID nodes appear when there are extra semicolons at the BLOCK level.\n    // I've been unable to think of any cases where this indicates a bug,\n    // and apparently some people like keeping these semicolons around,\n    // so we'll allow it.\n    if (n.getType() == Token.EMPTY ||\n        n.getType() == Token.COMMA) {\n      return;\n    }\n\n    if (parent == null)\n      return;\n\n    int pt = parent.getType();\n    if (pt == Token.COMMA) {\n      Node gramps = parent.getParent();\n      if (gramps.getType() == Token.CALL &&\n          parent == gramps.getFirstChild()) {\n        // Semantically, a direct call to eval is different from an indirect\n        // call to an eval. See Ecma-262 S15.1.2.1. So it's ok for the first\n        // expression to a comma to be a no-op if it's used to indirect\n        // an eval.\n        if (n == parent.getFirstChild() &&\n            parent.getChildCount() == 2 &&\n            n.getNext().getType() == Token.NAME &&\n            \"eval\".equals(n.getNext().getString())) {\n          return;\n        }\n      }\n\n      if (n == parent.getLastChild()) {\n        for (Node an : parent.getAncestors()) {\n          int ancestorType = an.getType();\n          if (ancestorType == Token.COMMA)\n            continue;\n          if (ancestorType != Token.EXPR_RESULT &&\n              ancestorType != Token.BLOCK)\n            return;\n          else\n            break;\n        }\n      }\n    } else if (pt != Token.EXPR_RESULT && pt != Token.BLOCK) {\n      if (pt == Token.FOR && parent.getChildCount() == 4 &&\n          (n == parent.getFirstChild() ||\n           n == parent.getFirstChild().getNext().getNext())) {\n        // Fall through and look for warnings for the 1st and 3rd child\n        // of a for.\n      } else {\n        return;  // it might be ok to not have a side-effect\n      }\n    }\n    if (NodeUtil.isSimpleOperatorType(n.getType()) ||\n        !NodeUtil.mayHaveSideEffects(n, t.getCompiler())) {\n      if (n.isQualifiedName() && n.getJSDocInfo() != null) {\n        // This no-op statement was there so that JSDoc information could\n        // be attached to the name. This check should not complain about it.\n        return;\n      } else if (NodeUtil.isExpressionNode(n)) {\n        // we already reported the problem when we visited the child.\n        return;\n      }\n\n      String msg = \"This code lacks side-effects. Is there a bug?\";\n      if (n.getType() == Token.STRING) {\n        msg = \"Is there a missing '+' on the previous line?\";\n      }\n\n      t.getCompiler().report(\n          t.makeError(n, level, USELESS_CODE_ERROR, msg));\n    }\n  }\n\n```",
+            "method_doc": "This method checks for non-side-effecting statements and generates warnings. It calls `NodeUtil.isSimpleOperatorType` and `NodeUtil.mayHaveSideEffects` to determine if a node has side effects. If a node does not have side effects, it reports an error message indicating potential bugs or missing operators.",
+            "class_name": "com.google.javascript.jscomp.CheckSideEffects",
+            "class_doc": " Checks for non side effecting statements such as <pre> var s = \"this string is \" \"continued on the next line but you forgot the +\"; x == foo();  // should that be '='? foo();;  // probably just a stray-semicolon. Doesn't hurt to check though </p> and generates warnings.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly checks for non-side-effecting statements and generates warnings, which aligns with the issue described in the failed test. The method uses `NodeUtil.isSimpleOperatorType` and `NodeUtil.mayHaveSideEffects` to determine if a node has side effects, and if not, it reports an error message indicating potential bugs or missing operators. Given that the test failure involves a self-invoking function being treated as having side effects, fixing this method could potentially resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.ScriptRuntime::getMessage(String,Object[])",
+            "method_code": "```java\n    public static String getMessage(String messageId, Object[] arguments)\n    {\n        final String defaultResource\n            = \"rhino_ast.java.com.google.javascript.rhino.Messages\";\n\n        Context cx = Context.getCurrentContext();\n        Locale locale = cx != null ? cx.getLocale() : Locale.getDefault();\n\n        // ResourceBundle does cacheing.\n        ResourceBundle rb = ResourceBundle.getBundle(defaultResource, locale);\n\n        String formatString;\n        try {\n            formatString = rb.getString(messageId);\n        } catch (java.util.MissingResourceException mre) {\n            throw new RuntimeException\n                (\"no message resource found for message property \"+ messageId);\n        }\n\n        /*\n         * It's OK to format the string, even if 'arguments' is null;\n         * we need to format it anyway, to make double ''s collapse to\n         * single 's.\n         */\n        // TODO: MessageFormat is not available on pJava\n        MessageFormat formatter = new MessageFormat(formatString);\n        return formatter.format(arguments);\n    }\n\n```",
+            "method_doc": "OPT there's a noticable delay for the first error!  Maybe it'd make sense to use a ListResourceBundle instead of a properties file to avoid (synchronized) text parsing. ",
+            "class_name": "com.google.javascript.rhino.ScriptRuntime",
+            "class_doc": " This is the class that implements the runtime.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for retrieving and formatting error messages, which could potentially affect how the compiler handles certain types of code, including self-invoking functions.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return root;\n  }\n\n```",
+            "method_doc": "This method returns the current AST root node.",
+            "class_name": "com.google.javascript.jscomp.SyntheticAst",
+            "class_doc": " An AST generated totally by the compiler.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the AST root node, which might be causing the issue when dealing with self-invoking functions.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::clearAst()",
+            "method_code": "```java\n  @Override\n  public void clearAst() {\n    root = new Node(Token.SCRIPT);\n    root.setIsSyntheticBlock(true);\n    root.setStaticSourceFile(sourceFile);\n  }\n\n```",
+            "method_doc": "This method clears the AST by creating a new synthetic script node and setting its properties. It calls `clearAst()` to initialize the AST.",
+            "class_name": "com.google.javascript.jscomp.SyntheticAst",
+            "class_doc": " An AST generated totally by the compiler.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the AST, which could potentially affect the behavior of subsequent operations, including the optimization of self-invoking functions.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::SyntheticAst(String)",
+            "method_code": "```java\n  SyntheticAst(String sourceName) {\n    this.sourceFile = new SourceFile(sourceName);\n    clearAst();\n  }\n\n```",
+            "method_doc": "This constructor initializes a new `SyntheticAst` instance with the given source name. It creates a new `SourceFile` and then calls `clearAst()` to set up the initial AST state.",
+            "class_name": "com.google.javascript.jscomp.SyntheticAst",
+            "class_doc": " An AST generated totally by the compiler.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes a new `SyntheticAst` instance with the given source name, which could potentially affect how the compiler handles the subsequent AST operations. Given that the failing test involves a self-invoking function, it's plausible that the issue arises from how the compiler processes the AST created by this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph)",
+            "method_code": "```java\n  public void computeFixedPoint(DiGraph<N, E> graph) {\n    Set<N> nodes = Sets.newHashSet();\n    for (DiGraphNode<N, E> node : graph.getDirectedGraphNodes()) {\n      nodes.add(node.getValue());\n    }\n    computeFixedPoint(graph, nodes);\n  }\n\n```",
+            "method_doc": " Compute a fixed point for the given graph. @param graph The graph to traverse. ",
+            "class_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal",
+            "class_doc": " A utility class for doing fixed-point computations. We traverse the edges over the given directed graph until the graph reaches a steady state.   @param <N> Value type that the graph node stores. @param <E> Value type that the graph edge stores. ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the set of nodes which might be causing issues when computing the fixed point. It's crucial to ensure that the nodes are correctly identified and processed during the traversal.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph,N)",
+            "method_code": "```java\n  public void computeFixedPoint(DiGraph<N, E> graph, N entry) {\n    Set<N> entrySet = Sets.newHashSet();\n    entrySet.add(entry);\n    computeFixedPoint(graph, entrySet);\n  }\n\n```",
+            "method_doc": " Compute a fixed point for the given graph, entering from the given node. @param graph The graph to traverse. @param entry The node to begin traversing from. ",
+            "class_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal",
+            "class_doc": " A utility class for doing fixed-point computations. We traverse the edges over the given directed graph until the graph reaches a steady state.   @param <N> Value type that the graph node stores. @param <E> Value type that the graph edge stores. ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the traversal process and calls another method to perform the actual computation. Given that the issue seems related to incorrect handling of self-invoking functions, there's a high chance that the problem lies in how the traversal logic processes these functions.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "3": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+            "method_code": "```java\n  static TernaryValue getPureBooleanValue(Node n) {\n    switch (n.getType()) {\n      case Token.STRING:\n        return TernaryValue.forBoolean(n.getString().length() > 0);\n\n      case Token.NUMBER:\n        return TernaryValue.forBoolean(n.getDouble() != 0);\n\n      case Token.NOT:\n        return getPureBooleanValue(n.getLastChild()).not();\n\n      case Token.NULL:\n      case Token.FALSE:\n        return TernaryValue.FALSE;\n\n      case Token.VOID:\n          return TernaryValue.FALSE;\n\n      case Token.NAME:\n        String name = n.getString();\n        if (\"undefined\".equals(name)\n            || \"NaN\".equals(name)) {\n          // We assume here that programs don't change the value of the keyword\n          // undefined to something other than the value undefined.\n          return TernaryValue.FALSE;\n        } else if (\"Infinity\".equals(name)) {\n          return TernaryValue.TRUE;\n        }\n        break;\n\n      case Token.TRUE:\n      case Token.REGEXP:\n        return TernaryValue.TRUE;\n\n      case Token.ARRAYLIT:\n      case Token.OBJECTLIT:\n        if (!mayHaveSideEffects(n)) {\n          return TernaryValue.TRUE;\n        }\n        break;\n    }\n\n    return TernaryValue.UNKNOWN;\n  }\n\n```",
+            "method_doc": " Gets the boolean value of a node that represents a literal. This method effectively emulates the <code>Boolean()</code> JavaScript cast function except it return UNKNOWN for known values with side-effects, use getExpressionBooleanValue if you don't care about side-effects. ",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the evaluation of literals and their boolean values. The issue identified in the test failure involves the handling of expressions with side effects, specifically the 'void' operator. The current implementation does not correctly handle such cases, leading to an incorrect return value of 'false' instead of 'UNKNOWN'. Fixing this method would address the root cause of the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n) {\n    return mayHaveSideEffects(n, null);\n  }\n\n```",
+            "method_doc": " Returns true if the node which may have side effects when executed. ",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it determines whether a node may have side effects. The issue in the test case arises from the evaluation of expressions like 'void foo()', which should return TernaryValue.UNKNOWN. However, the current implementation of mayHaveSideEffects does not correctly handle these cases, leading to incorrect boolean values being returned.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 9,
+                "4": 9,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n, AbstractCompiler compiler) {\n    return checkForStateChangeHelper(n, false, compiler);\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it determines whether a node may have side effects, which could affect the evaluation of expressions like 'void foo()'. The issue observed in the test suggests that the current implementation might be incorrectly evaluating these expressions, leading to incorrect boolean values.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::newTraversal(EdgeCallback)",
+            "method_code": "```java\n  public static <NODE, EDGE> FixedPointGraphTraversal<NODE, EDGE> newTraversal(\n      EdgeCallback<NODE, EDGE> callback) {\n    return new FixedPointGraphTraversal<NODE, EDGE>(callback);\n  }\n\n```",
+            "method_doc": " Helper method for creating new traversals. ",
+            "class_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal",
+            "class_doc": " A utility class for doing fixed-point computations. We traverse the edges over the given directed graph until the graph reaches a steady state.   @param <N> Value type that the graph node stores. @param <E> Value type that the graph edge stores. ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it creates a new instance of `FixedPointGraphTraversal`, but does not directly handle the logic related to self-invoking functions or side effects. The issue might lie elsewhere in the implementation or usage of this traversal.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)",
+            "method_code": "```java\n  public static TernaryValue forBoolean(boolean val) {\n    return val ? TernaryValue.TRUE : TernaryValue.FALSE;\n  }\n\n```",
+            "method_doc": " Gets the TernaryValue for the given boolean. ",
+            "class_name": "com.google.javascript.rhino.jstype.TernaryValue",
+            "class_doc": "",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it only handles boolean values directly without considering expressions with side effects. The issue in the test case arises from the evaluation of `\"void foo()\"`, which involves a side effect (function call) rather than a direct boolean value. Therefore, fixing this method alone may not resolve the problem comprehensively.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 9,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::newNumber(double)",
+            "method_code": "```java\n  public static Node newNumber(double number) {\n    return new NumberNode(number);\n  }\n\n```",
+            "method_doc": "Creates a new `NumberNode` instance with the given double value.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The issue seems to be related to the handling of expressions with side effects in the `NodeUtil.getPureBooleanValue` method, rather than the creation of `NumberNode` instances.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::newString(String)",
+            "method_code": "```java\n  public static Node newString(String str) {\n    return new StringNode(Token.STRING, str);\n  }\n\n```",
+            "method_doc": "Creates a new `StringNode` instance with the given string value and default token type.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only creates a new `StringNode` instance and does not involve any logic related to boolean values or side effects.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::newString(int,String)",
+            "method_code": "```java\n  public static Node newString(int type, String str) {\n    return new StringNode(type, str);\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed, because it only creates a new string node and does not involve any logic related to boolean values or side effects.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::getSourceFile()",
+            "method_code": "```java\n  @Override\n  public SourceFile getSourceFile() {\n    return sourceFile;\n  }\n\n```",
+            "method_doc": "This method returns the source file associated with the synthetic AST.",
+            "class_name": "com.google.javascript.jscomp.SyntheticAst",
+            "class_doc": " An AST generated totally by the compiler.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Issue with Side Effect Detection\n**Description:** The compiler might have a bug in its side effect detection mechanism, incorrectly identifying self-invoking functions as having side effects when they do not.\n\n**Location:** Within the side effect detection logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the side effect detection is failing to correctly identify that the self-invoking function does not have side effects.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the source file associated with the synthetic AST. Given that the issue seems to be related to side effect detection, ensuring that the source file is correctly identified could resolve the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    NodeTraversal t = new NodeTraversal(compiler, this);\n\n    beginTraversal(t);\n    t.traverse(root);\n    endTraversal(t);\n  }\n\n```",
+            "method_doc": "This method initializes a `NodeTraversal` object, begins the traversal, traverses the AST rooted at `root`, and ends the traversal. It calls the `visit` method to perform peephole optimizations on each node.",
+            "class_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass",
+            "class_doc": " A compiler pass to run various peephole optimizations (e.g. constant folding, some useless code removal, some minimizations).  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the `NodeTraversal` object and starts the traversal of the AST, which is essential for applying peephole optimizations. Given that the issue seems related to the handling of self-invoking functions during advanced optimizations, fixing the logic within this method could address the problem.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    Node currentVersionOfNode = n;\n    boolean somethingChanged = false;\n\n    do {\n      somethingChanged = false;\n      for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {\n        Node newVersionOfNode =\n            optimization.optimizeSubtree(currentVersionOfNode);\n\n        if (newVersionOfNode != currentVersionOfNode) {\n          somethingChanged = true;\n\n          currentVersionOfNode = newVersionOfNode;\n        }\n\n        if (currentVersionOfNode == null) {\n          return;\n        }\n      }\n    } while(somethingChanged);\n  }\n\n```",
+            "method_doc": "This method iterates over an array of `AbstractPeepholeOptimization` objects, applying each optimization to the current node (`n`). If an optimization changes the node, it updates the node and continues until no more changes occur. It calls the `optimizeSubtree` method of each optimization to apply the transformation.",
+            "class_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass",
+            "class_doc": " A compiler pass to run various peephole optimizations (e.g. constant folding, some useless code removal, some minimizations).  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for applying various peephole optimizations to the AST nodes. Given that the test failure involves a self-invoking function that is not being optimized away, it suggests that there might be a specific optimization rule missing or incorrectly implemented within this method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::beginTraversal(NodeTraversal)",
+            "method_code": "```java\n  private void beginTraversal(NodeTraversal t) {\n    for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {\n      optimization.beginTraversal(t);\n    }\n  }\n\n```",
+            "method_doc": " Make sure that all the optimizations have the current traversal so they can report errors. ",
+            "class_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass",
+            "class_doc": " A compiler pass to run various peephole optimizations (e.g. constant folding, some useless code removal, some minimizations).  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for initializing all peephole optimizations with the current traversal context. If there is an issue with recognizing or handling specific patterns of code during the traversal, it could lead to bugs like the one observed in the test case.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for traversing the node recursively, which could potentially miss important optimizations if not implemented correctly.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it handles the traversal of nodes in the parse tree, including function calls and branches. Given that the issue involves a self-invoking function, it is plausible that the problem lies in how the method processes or optimizes these structures.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)",
+            "method_code": "```java\n  private void traverseFunction(Node n, Node parent) {\n    Preconditions.checkState(n.getChildCount() == 3);\n    Preconditions.checkState(n.getType() == Token.FUNCTION);\n\n    final Node fnName = n.getFirstChild();\n\n    boolean isFunctionExpression = (parent != null)\n        && NodeUtil.isFunctionExpression(n);\n\n    if (!isFunctionExpression) {\n      // Functions declarations are in the scope containing the declaration.\n      traverseBranch(fnName, n);\n    }\n\n    curNode = n;\n    pushScope(n);\n\n    if (isFunctionExpression) {\n      // Function expression names are only accessible within the function\n      // scope.\n      traverseBranch(fnName, n);\n    }\n\n    final Node args = fnName.getNext();\n    final Node body = args.getNext();\n\n    // Args\n    traverseBranch(args, n);\n\n    // Body\n    Preconditions.checkState(body.getNext() == null &&\n            body.getType() == Token.BLOCK);\n    traverseBranch(body, n);\n\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a function. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the traversal of function nodes, which could potentially miss important optimizations related to self-invoking functions.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalized()",
+            "method_code": "```java\n    boolean isNormalized() {\n      return this == NORMALIZED || this == NORMALIZED_OBFUSCATED;\n    }\n\n```",
+            "method_doc": "Checks if the current life-cycle stage is normalized or obfuscated. Calls no other methods from the list.",
+            "class_name": "com.google.javascript.jscomp.AbstractCompiler",
+            "class_doc": " An abstract compiler, to help remove the circular dependency of passes on JSCompiler.  This is an abstract class, so that we can make the methods package-private.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly checks the lifecycle stages that could potentially affect the normalization process. Given that the test failure involves issues related to advanced optimizations, ensuring that the lifecycle stage is correctly identified as normalized is crucial. Modifying this method could help resolve the bug by accurately reflecting the state of the compilation process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilationLevel::setOptionsForCompilationLevel(CompilerOptions)",
+            "method_code": "```java\n  public void setOptionsForCompilationLevel(CompilerOptions options) {\n    switch (this) {\n      case WHITESPACE_ONLY:\n        applyBasicCompilationOptions(options);\n        break;\n      case SIMPLE_OPTIMIZATIONS:\n        applySafeCompilationOptions(options);\n        break;\n      case ADVANCED_OPTIMIZATIONS:\n        applyFullCompilationOptions(options);\n        break;\n      default:\n        throw new RuntimeException(\"Unknown compilation level.\");\n    }\n  }\n\n```",
+            "method_doc": "This method sets the options for the specified compilation level by calling `applyBasicCompilationOptions`, `applySafeCompilationOptions`, or `applyFullCompilationOptions` based on the compilation level.",
+            "class_name": "com.google.javascript.jscomp.CompilationLevel",
+            "class_doc": "",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly controls the application of different levels of optimizations. Given that the failure is related to the `ADVANCED_OPTIMIZATIONS` level, it is reasonable to suspect that there might be an issue within the logic applied during this level.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilationLevel::applyFullCompilationOptions(CompilerOptions)",
+            "method_code": "```java\n  private static void applyFullCompilationOptions(CompilerOptions options) {\n    // Do not call applySafeCompilationOptions(options) because the call can\n    // create possible conflicts between multiple diagnostic groups.\n\n    // All the safe optimizations.\n    options.closurePass = true;\n    options.foldConstants = true;\n    options.coalesceVariableNames = true;\n    options.deadAssignmentElimination = true;\n    options.extractPrototypeMemberDeclarations = true;\n    options.collapseVariableDeclarations = true;\n    options.convertToDottedProperties = true;\n    options.rewriteFunctionExpressions = true;\n    options.labelRenaming = true;\n    options.removeDeadCode = true;\n    options.optimizeArgumentsArray = true;\n    options.collapseObjectLiterals = true;\n\n    // All the advance optimizations.\n    options.removeClosureAsserts = true;\n    options.aliasKeywords = true;\n    options.reserveRawExports = true;\n    options.variableRenaming = VariableRenamingPolicy.ALL;\n    options.shadowVariables = true;\n    options.propertyRenaming = PropertyRenamingPolicy.ALL_UNQUOTED;\n    options.removeUnusedPrototypeProperties = true;\n    options.removeUnusedPrototypePropertiesInExterns = true;\n    options.collapseAnonymousFunctions = true;\n    options.collapseProperties = true;\n    options.checkGlobalThisLevel = CheckLevel.WARNING;\n    options.rewriteFunctionExpressions = true;\n    options.smartNameRemoval = true;\n    options.inlineConstantVars = true;\n    options.inlineFunctions = true;\n    options.inlineLocalFunctions = true;\n    options.inlineGetters = true;\n    options.inlineVariables = true;\n    options.flowSensitiveInlineVariables = true;\n    options.computeFunctionSideEffects = true;\n\n    // Remove unused vars also removes unused functions.\n    options.removeUnusedVars = true;\n    options.removeUnusedLocalVars = true;\n\n    // Move code around based on the defined modules.\n    options.crossModuleCodeMotion = true;\n    options.crossModuleMethodMotion = true;\n\n    // Call optimizations\n    options.devirtualizePrototypeMethods = true;\n    options.optimizeParameters = true;\n    options.optimizeReturns = true;\n    options.optimizeCalls = true;\n\n    // Kindly tell the user that they have JsDocs that we don't understand.\n    options.setWarningLevel(DiagnosticGroups.NON_STANDARD_JSDOC,\n        CheckLevel.WARNING);\n  }\n\n```",
+            "method_doc": " Add the options that will work only if the user exported all the symbols correctly. @param options The CompilerOptions object to set the options on. ",
+            "class_name": "com.google.javascript.jscomp.CompilationLevel",
+            "class_doc": "",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it contains a mix of safe and advanced compilation options. The issue in the test case involves a self-invoking function, which could be an edge case that the current implementation does not handle optimally. By reviewing and potentially adjusting the logic within this method, especially focusing on how it handles different types of function expressions and their side effects, we can address the root cause of the failure.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::createOptions()",
+            "method_code": "```java\n  @Override\n  protected CompilerOptions createOptions() {\n    CompilerOptions options = new CompilerOptions();\n    options.setCodingConvention(new ClosureCodingConvention());\n    CompilationLevel level = flags.compilation_level;\n    level.setOptionsForCompilationLevel(options);\n    if (flags.debug) {\n      level.setDebugOptionsForCompilationLevel(options);\n    }\n\n    if(flags.generate_exports) {\n      options.setGenerateExports(flags.generate_exports);\n    }\n\n    WarningLevel wLevel = flags.warning_level;\n    wLevel.setOptionsForWarningLevel(options);\n    for (FormattingOption formattingOption : flags.formatting) {\n      formattingOption.applyToOptions(options);\n    }\n\n    options.closurePass = flags.process_closure_primitives;\n    return options;\n  }\n\n```",
+            "method_doc": "This method creates and configures `CompilerOptions` based on the parsed flags, setting various properties such as coding convention, compilation level, warning levels, and formatting options.",
+            "class_name": "com.google.javascript.jscomp.CommandLineRunner",
+            "class_doc": " CommandLineRunner translates flags into Java API calls on the Compiler.  This class may be extended and used to create other Java classes that behave the same as running the Compiler from the command line. If you want to run the compiler in-process in Java, you should look at this class for hints on what API calls to make, but you should not use this class directly.  Example: <pre> class MyCommandLineRunner extends CommandLineRunner { MyCommandLineRunner(String[] args) { super(args); }  {@code @Override} protected CompilerOptions createOptions() { CompilerOptions options = super.createOptions(); addMyCrazyCompilerPassThatOutputsAnExtraFile(options); return options; }  public static void main(String[] args) { MyCommandLineRunner runner = new MyCommandLineRunner(args); if (runner.shouldRunCompiler()) { runner.run(); } else { System.exit(-1); } } } </pre>  This class is totally not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Compiler Configuration Issue\n**Description:** There might be an issue with how the compiler is being configured or initialized, leading to incorrect behavior during the optimization process.\n\n**Location:** Within the configuration or initialization code of the compiler.\n\n**Observation:** The test failure occurs only when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, suggesting that the issue might be related to how this flag affects the compiler's configuration or initialization.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for creating and configuring `CompilerOptions`, which could potentially affect the behavior of the compiler during optimization. Given that the test failure occurs specifically when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, it suggests that there might be an issue with how this flag is handled or applied within the `createOptions()` method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::CommandLineRunner(String[])",
+            "method_code": "```java\n  protected CommandLineRunner(String[] args) {\n    super();\n    initConfigFromFlags(args, System.err);\n  }\n\n```",
+            "method_doc": " Create a new command-line runner. You should only need to call the constructor if you're extending this class. Otherwise, the main method should instantiate it. ",
+            "class_name": "com.google.javascript.jscomp.CommandLineRunner",
+            "class_doc": " CommandLineRunner translates flags into Java API calls on the Compiler.  This class may be extended and used to create other Java classes that behave the same as running the Compiler from the command line. If you want to run the compiler in-process in Java, you should look at this class for hints on what API calls to make, but you should not use this class directly.  Example: <pre> class MyCommandLineRunner extends CommandLineRunner { MyCommandLineRunner(String[] args) { super(args); }  {@code @Override} protected CompilerOptions createOptions() { CompilerOptions options = super.createOptions(); addMyCrazyCompilerPassThatOutputsAnExtraFile(options); return options; }  public static void main(String[] args) { MyCommandLineRunner runner = new MyCommandLineRunner(args); if (runner.shouldRunCompiler()) { runner.run(); } else { System.exit(-1); } } } </pre>  This class is totally not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Compiler Configuration Issue\n**Description:** There might be an issue with how the compiler is being configured or initialized, leading to incorrect behavior during the optimization process.\n\n**Location:** Within the configuration or initialization code of the compiler.\n\n**Observation:** The test failure occurs only when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, suggesting that the issue might be related to how this flag affects the compiler's configuration or initialization.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it initializes the configuration using the provided arguments, which could potentially affect the behavior of the compiler during optimization. Given that the test failure occurs specifically when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, it suggests that there might be an issue with how this flag is handled or interpreted within the `initConfigFromFlags` method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::error(String,String)",
+            "method_code": "```java\n  public static DiagnosticType error(String name, String descriptionFormat) {\n    return make(name, CheckLevel.ERROR, descriptionFormat);\n  }\n\n```",
+            "method_doc": " Create a DiagnosticType at level CheckLevel.ERROR  @param name An identifier @param descriptionFormat A format string @return A new DiagnosticType ",
+            "class_name": "com.google.javascript.jscomp.DiagnosticType",
+            "class_doc": " The type of a compile or analysis error.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly creates DiagnosticTypes at the ERROR level. The fact that the test is failing due to a USELESS_CODE_ERROR being reported instead of an error suggests that there might be an issue with how errors are being classified or handled within this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::make(String,CheckLevel,String)",
+            "method_code": "```java\n  public static DiagnosticType make(String name, CheckLevel level,\n                                    String descriptionFormat) {\n    return\n        new DiagnosticType(name, level, new MessageFormat(descriptionFormat));\n  }\n\n```",
+            "method_doc": " Create a DiagnosticType at a given CheckLevel.  @param name An identifier @param level Either CheckLevel.ERROR or CheckLevel.WARNING @param descriptionFormat A format string @return A new DiagnosticType ",
+            "class_name": "com.google.javascript.jscomp.DiagnosticType",
+            "class_doc": " The type of a compile or analysis error.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly creates instances of DiagnosticType, and the issue seems related to how errors are classified (as warnings instead of errors). Fixing the logic within this method could resolve the problem.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::equals(Object)",
+            "method_code": "```java\n  @Override\n  public boolean equals(Object type) {\n    return type instanceof DiagnosticType &&\n        ((DiagnosticType) type).key.equals(key);\n  }\n\n```",
+            "method_doc": "This method checks if the current DiagnosticType instance is equal to another object. It returns true if the other object is an instance of DiagnosticType and their keys are equal.",
+            "class_name": "com.google.javascript.jscomp.DiagnosticType",
+            "class_doc": " The type of a compile or analysis error.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly impacts how errors and warnings are compared and classified within the compiler's diagnostic system. Given that the test failure involves a situation where a warning was incorrectly reported as an error, modifying the behavior of the `equals` method could resolve this issue by ensuring that the correct classification of errors and warnings is maintained.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.RhinoErrorReporter::replacePlaceHolders(String)",
+            "method_code": "```java\n  private Pattern replacePlaceHolders(String s) {\n    s = Pattern.quote(s);\n    return Pattern.compile(s.replaceAll(\"\\\\{\\\\d+\\\\}\", \"\\\\\\\\E.*\\\\\\\\Q\"));\n  }\n\n```",
+            "method_doc": " For each message such as \"Not a good use of {0}\", replace the place holder {0} with a wild card that matches all possible strings. Also put the any non-place-holder in quotes for regex matching later. ",
+            "class_name": "com.google.javascript.jscomp.RhinoErrorReporter",
+            "class_doc": " An error reporter for serizalizing Rhino errors into our error format. ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the replacement of placeholders in error messages. The issue described involves a `USELESS_CODE_ERROR` being reported instead of an error, which could be due to incorrect handling of placeholders in the error message. Modifying the `replacePlaceHolders` method to correctly handle the placeholders could resolve the issue.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,int,int,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, int lineno, int charno,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, null, lineno, charno, type, null, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError at a given source location  @param sourceName The source file name @param lineno Line number with source file, or -1 if unknown @param charno Column number within line, or -1 for whole line. @param type The DiagnosticType @param arguments Arguments to be incorporated into the message ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly creates instances of JSError objects. Given that the test failure involves an incorrect error classification (warning instead of error), modifying the behavior of this method could potentially resolve the issue by ensuring that appropriate errors are reported correctly.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::getType()",
+            "method_code": "```java\n  public DiagnosticType getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "This method returns the DiagnosticType associated with the JSError. It does not call any other methods in the Covered Methods List.",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the DiagnosticType associated with the JSError without performing any additional checks or validations. Given that the test output indicates a `USELESS_CODE_ERROR` warning instead of an error, it's plausible that the issue lies in how the DiagnosticType is being handled or classified within the compiler's error reporting mechanism.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::format(CheckLevel,MessageFormatter)",
+            "method_code": "```java\n  public String format(CheckLevel level, MessageFormatter formatter) {\n    switch (level) {\n      case ERROR:\n        return formatter.formatError(this);\n\n      case WARNING:\n        return formatter.formatWarning(this);\n\n      default:\n        return null;\n    }\n  }\n\n```",
+            "method_doc": " Format a message at the given level.  @return the formatted message or {@code null} ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the formatting of errors and warnings based on their levels. Given that the test failure involves a `USELESS_CODE_ERROR` being reported as a warning, it's reasonable to suspect that there might be a mistake in how the error level is being interpreted or handled within this method.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly interacts with the AbstractCompiler and retrieves the AST root, which could potentially influence how errors are reported.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getSourceFile()",
+            "method_code": "```java\n  @Override\n  public SourceFile getSourceFile() {\n    return ast.getSourceFile();\n  }\n\n```",
+            "method_doc": "Returns the source file associated with the input. This method calls `ast.getSourceFile()` to retrieve the source file.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly returns the source file from the underlying AST, and any issues related to error reporting would likely originate from how the source file is handled or referenced within the compiler.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.parsing.ParserRunner::parse(StaticSourceFile,String,Config,ErrorReporter,Logger)",
+            "method_code": "```java\n  public static Node parse(StaticSourceFile sourceFile,\n                           String sourceString,\n                           Config config,\n                           ErrorReporter errorReporter,\n                           Logger logger) throws IOException {\n    Context cx = Context.enter();\n    cx.setErrorReporter(errorReporter);\n    cx.setLanguageVersion(Context.VERSION_1_5);\n    CompilerEnvirons compilerEnv = new CompilerEnvirons();\n    compilerEnv.initFromContext(cx);\n    compilerEnv.setRecordingComments(true);\n    compilerEnv.setRecordingLocalJsDocComments(true);\n    // ES5 specifically allows trailing commas\n    compilerEnv.setWarnTrailingComma(\n        config.languageMode == LanguageMode.ECMASCRIPT3);\n\n    if (config.isIdeMode || config.languageMode != LanguageMode.ECMASCRIPT3) {\n      // Do our own identifier check for ECMASCRIPT 5\n      compilerEnv.setReservedKeywordAsIdentifier(true);\n      compilerEnv.setAllowKeywordAsObjectPropertyName(true);\n    }\n\n    if (config.isIdeMode) {\n      compilerEnv.setAllowMemberExprAsFunctionName(true);\n    }\n\n    Parser p = new Parser(compilerEnv, errorReporter);\n    AstRoot astRoot = null;\n    try {\n      astRoot = p.parse(sourceString, sourceFile.getName(), 1);\n    } catch (EvaluatorException e) {\n      logger.info(\n          \"Error parsing \" + sourceFile.getName() + \": \" + e.getMessage());\n    } finally {\n      Context.exit();\n    }\n    Node root = null;\n    if (astRoot != null) {\n      root = IRFactory.transformTree(\n          astRoot, sourceFile, sourceString, config, errorReporter);\n      root.setIsSyntheticBlock(true);\n    }\n    return root;\n  }\n\n```",
+            "method_doc": " Parses the JavaScript text given by a reader.  @param sourceName The filename. @param sourceString Source code from the file. @param errorReporter An error. @param logger A logger. @return The AST of the given text. @throws IOException ",
+            "class_name": "com.google.javascript.jscomp.parsing.ParserRunner",
+            "class_doc": "",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incorrect Parsing of Expressions\n**Description:** There might be an issue with the way expressions are being parsed in the `parse` method. Specifically, the parser might not be correctly identifying or handling expressions with side effects.\n\n**Location:** Within the `parse` method, particularly in the logic that processes and tokenizes the input JavaScript string.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the parser might not be correctly interpreting the expression.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing of JavaScript strings into Abstract Syntax Trees (ASTs). The failure in the `testGetBooleanValue` method indicates an issue with how expressions like `\"void foo()\"` are being interpreted during parsing. Since the `parse` method is responsible for converting the input JavaScript code into an AST, fixing issues within this method would address the root cause of the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::getType()",
+            "method_code": "```java\n  public int getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the type of the current node.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Incomplete Evaluation of Expressions\n**Description:** The `NodeUtil.getPureBooleanValue` method might be incomplete in its evaluation of certain expressions, especially those involving side effects. It could be missing cases or conditions that handle specific types of expressions correctly.\n\n**Location:** Within the `NodeUtil.getPureBooleanValue` method, particularly in the switch or conditional statements that process different types of expressions.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the method might be missing a case for handling expressions with side effects.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the type of the current node without performing any evaluation or interpretation of the expression. Given that the issue arises from the incorrect handling of expressions with side effects, it's plausible that the problem lies elsewhere in the code rather than in this method itself.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "test_failure_causes": "Logic Error in `getNode` Method\n**Description:** The `getNode` method might contain a logic error that affects how expressions are processed. Specifically, it could be incorrectly wrapping or unwrapping expressions, leading to incorrect results.\n\n**Location:** Within the `getNode` method, particularly in the logic that wraps the input expression inside a variable declaration statement.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the method might be incorrectly handling the expression.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the traversal of the parse tree, which could indirectly affect how expressions are evaluated. However, the specific issue seems to be related to how expressions are handled within the `getNode` method, rather than the traversal itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::shouldRunCompiler()",
+            "method_code": "```java\n  public boolean shouldRunCompiler() {\n    return this.isConfigValid;\n  }\n\n```",
+            "method_doc": " @return Whether the configuration is valid. ",
+            "class_name": "com.google.javascript.jscomp.CommandLineRunner",
+            "class_doc": " CommandLineRunner translates flags into Java API calls on the Compiler.  This class may be extended and used to create other Java classes that behave the same as running the Compiler from the command line. If you want to run the compiler in-process in Java, you should look at this class for hints on what API calls to make, but you should not use this class directly.  Example: <pre> class MyCommandLineRunner extends CommandLineRunner { MyCommandLineRunner(String[] args) { super(args); }  {@code @Override} protected CompilerOptions createOptions() { CompilerOptions options = super.createOptions(); addMyCrazyCompilerPassThatOutputsAnExtraFile(options); return options; }  public static void main(String[] args) { MyCommandLineRunner runner = new MyCommandLineRunner(args); if (runner.shouldRunCompiler()) { runner.run(); } else { System.exit(-1); } } } </pre>  This class is totally not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Compiler Configuration Issue\n**Description:** There might be an issue with how the compiler is being configured or initialized, leading to incorrect behavior during the optimization process.\n\n**Location:** Within the configuration or initialization code of the compiler.\n\n**Observation:** The test failure occurs only when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, suggesting that the issue might be related to how this flag affects the compiler's configuration or initialization.",
+            "score": 2.0,
+            "reason": "#2# This method is not the best location that need to be fixed, because it simply returns whether the configuration is valid without considering the actual state of the compiler or the specific compilation level set.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 2
+            },
+            "rank_key": [
+                0,
+                2.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.ScriptRuntime::getMessage0(String)",
+            "method_code": "```java\n    public static String getMessage0(String messageId)\n    {\n        return getMessage(messageId, null);\n    }\n\n```",
+            "method_doc": "------------------",
+            "class_name": "com.google.javascript.rhino.ScriptRuntime",
+            "class_doc": " This is the class that implements the runtime.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Issue with Side Effect Detection\n**Description:** The compiler might have a bug in its side effect detection mechanism, incorrectly identifying self-invoking functions as having side effects when they do not.\n\n**Location:** Within the side effect detection logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the side effect detection is failing to correctly identify that the self-invoking function does not have side effects.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to side effect detection within the JavaScript compiler, rather than a problem with message retrieval.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler::getLifeCycleStage()",
+            "method_code": "```java\n  LifeCycleStage getLifeCycleStage() {\n    return stage;\n  }\n\n```",
+            "method_doc": " @return The current life-cycle stage of the AST we're working on. ",
+            "class_name": "com.google.javascript.jscomp.AbstractCompiler",
+            "class_doc": " An abstract compiler, to help remove the circular dependency of passes on JSCompiler.  This is an abstract class, so that we can make the methods package-private.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the logic within the `ADVANCED_OPTIMIZATIONS` level of the compiler, specifically how it handles self-invoking functions. The `getLifeCycleStage()` method simply returns the current life-cycle stage of the AST, which does not appear to be directly involved in the optimization process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler::setLifeCycleStage(LifeCycleStage)",
+            "method_code": "```java\n  void setLifeCycleStage(LifeCycleStage stage) {\n    this.stage = stage;\n  }\n\n```",
+            "method_doc": " Set the current life-cycle state. ",
+            "class_name": "com.google.javascript.jscomp.AbstractCompiler",
+            "class_doc": " An abstract compiler, to help remove the circular dependency of passes on JSCompiler.  This is an abstract class, so that we can make the methods package-private.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue seems to be related to the logic within the `ADVANCED_OPTIMIZATIONS` level of the compiler, not directly with setting the lifecycle stage.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalizedObfuscated()",
+            "method_code": "```java\n    boolean isNormalizedObfuscated() {\n      return this == NORMALIZED_OBFUSCATED;\n    }\n\n```",
+            "method_doc": "Checks if the current life-cycle stage is obfuscated. Calls no other methods from the list.",
+            "class_name": "com.google.javascript.jscomp.AbstractCompiler",
+            "class_doc": " An abstract compiler, to help remove the circular dependency of passes on JSCompiler.  This is an abstract class, so that we can make the methods package-private.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Compiler Configuration Issue\n**Description:** There might be an issue with how the compiler is being configured or initialized, leading to incorrect behavior during the optimization process.\n\n**Location:** Within the configuration or initialization code of the compiler.\n\n**Observation:** The test failure occurs only when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, suggesting that the issue might be related to how this flag affects the compiler's configuration or initialization.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The provided code snippet for `isNormalizedObfuscated()` simply checks if the current lifecycle stage is `NORMALIZED_OBFUSCATED`. Given the context of the failing test, it seems more likely that the issue lies elsewhere in the compiler's configuration or initialization process rather than within this specific method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  @Override\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "test_failure_causes": "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to error reporting rather than the name retrieval of the CompilerInput.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    // VOID nodes appear when there are extra semicolons at the BLOCK level.\n    // I've been unable to think of any cases where this indicates a bug,\n    // and apparently some people like keeping these semicolons around,\n    // so we'll allow it.\n    if (n.getType() == Token.EMPTY ||\n        n.getType() == Token.COMMA) {\n      return;\n    }\n\n    if (parent == null)\n      return;\n\n    int pt = parent.getType();\n    if (pt == Token.COMMA) {\n      Node gramps = parent.getParent();\n      if (gramps.getType() == Token.CALL &&\n          parent == gramps.getFirstChild()) {\n        // Semantically, a direct call to eval is different from an indirect\n        // call to an eval. See Ecma-262 S15.1.2.1. So it's ok for the first\n        // expression to a comma to be a no-op if it's used to indirect\n        // an eval.\n        if (n == parent.getFirstChild() &&\n            parent.getChildCount() == 2 &&\n            n.getNext().getType() == Token.NAME &&\n            \"eval\".equals(n.getNext().getString())) {\n          return;\n        }\n      }\n\n      if (n == parent.getLastChild()) {\n        for (Node an : parent.getAncestors()) {\n          int ancestorType = an.getType();\n          if (ancestorType == Token.COMMA)\n            continue;\n          if (ancestorType != Token.EXPR_RESULT &&\n              ancestorType != Token.BLOCK)\n            return;\n          else\n            break;\n        }\n      }\n    } else if (pt != Token.EXPR_RESULT && pt != Token.BLOCK) {\n      if (pt == Token.FOR && parent.getChildCount() == 4 &&\n          (n == parent.getFirstChild() ||\n           n == parent.getFirstChild().getNext().getNext())) {\n        // Fall through and look for warnings for the 1st and 3rd child\n        // of a for.\n      } else {\n        return;  // it might be ok to not have a side-effect\n      }\n    }\n    if (NodeUtil.isSimpleOperatorType(n.getType()) ||\n        !NodeUtil.mayHaveSideEffects(n, t.getCompiler())) {\n      if (n.isQualifiedName() && n.getJSDocInfo() != null) {\n        // This no-op statement was there so that JSDoc information could\n        // be attached to the name. This check should not complain about it.\n        return;\n      } else if (NodeUtil.isExpressionNode(n)) {\n        // we already reported the problem when we visited the child.\n        return;\n      }\n\n      String msg = \"This code lacks side-effects. Is there a bug?\";\n      if (n.getType() == Token.STRING) {\n        msg = \"Is there a missing '+' on the previous line?\";\n      }\n\n      t.getCompiler().report(\n          t.makeError(n, level, USELESS_CODE_ERROR, msg));\n    }\n  }\n\n```",
+            "method_doc": "This method checks for non-side-effecting statements and generates warnings. It calls `NodeUtil.isSimpleOperatorType` and `NodeUtil.mayHaveSideEffects` to determine if a node has side effects. If a node does not have side effects, it reports an error message indicating potential bugs or missing operators."
+        },
+        "com.google.javascript.rhino.ScriptRuntime::getMessage(String,Object[])": {
+            "method_name": "com.google.javascript.rhino.ScriptRuntime::getMessage(String,Object[])",
+            "method_code": "```java\n    public static String getMessage(String messageId, Object[] arguments)\n    {\n        final String defaultResource\n            = \"rhino_ast.java.com.google.javascript.rhino.Messages\";\n\n        Context cx = Context.getCurrentContext();\n        Locale locale = cx != null ? cx.getLocale() : Locale.getDefault();\n\n        // ResourceBundle does cacheing.\n        ResourceBundle rb = ResourceBundle.getBundle(defaultResource, locale);\n\n        String formatString;\n        try {\n            formatString = rb.getString(messageId);\n        } catch (java.util.MissingResourceException mre) {\n            throw new RuntimeException\n                (\"no message resource found for message property \"+ messageId);\n        }\n\n        /*\n         * It's OK to format the string, even if 'arguments' is null;\n         * we need to format it anyway, to make double ''s collapse to\n         * single 's.\n         */\n        // TODO: MessageFormat is not available on pJava\n        MessageFormat formatter = new MessageFormat(formatString);\n        return formatter.format(arguments);\n    }\n\n```",
+            "method_doc": "OPT there's a noticable delay for the first error!  Maybe it'd make sense to use a ListResourceBundle instead of a properties file to avoid (synchronized) text parsing. "
+        },
+        "com.google.javascript.jscomp.SyntheticAst::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return root;\n  }\n\n```",
+            "method_doc": "This method returns the current AST root node."
+        },
+        "com.google.javascript.jscomp.SyntheticAst::clearAst()": {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::clearAst()",
+            "method_code": "```java\n  @Override\n  public void clearAst() {\n    root = new Node(Token.SCRIPT);\n    root.setIsSyntheticBlock(true);\n    root.setStaticSourceFile(sourceFile);\n  }\n\n```",
+            "method_doc": "This method clears the AST by creating a new synthetic script node and setting its properties. It calls `clearAst()` to initialize the AST."
+        },
+        "com.google.javascript.jscomp.SyntheticAst::SyntheticAst(String)": {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::SyntheticAst(String)",
+            "method_code": "```java\n  SyntheticAst(String sourceName) {\n    this.sourceFile = new SourceFile(sourceName);\n    clearAst();\n  }\n\n```",
+            "method_doc": "This constructor initializes a new `SyntheticAst` instance with the given source name. It creates a new `SourceFile` and then calls `clearAst()` to set up the initial AST state."
+        },
+        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph)": {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph)",
+            "method_code": "```java\n  public void computeFixedPoint(DiGraph<N, E> graph) {\n    Set<N> nodes = Sets.newHashSet();\n    for (DiGraphNode<N, E> node : graph.getDirectedGraphNodes()) {\n      nodes.add(node.getValue());\n    }\n    computeFixedPoint(graph, nodes);\n  }\n\n```",
+            "method_doc": " Compute a fixed point for the given graph. @param graph The graph to traverse. "
+        },
+        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph,N)": {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph,N)",
+            "method_code": "```java\n  public void computeFixedPoint(DiGraph<N, E> graph, N entry) {\n    Set<N> entrySet = Sets.newHashSet();\n    entrySet.add(entry);\n    computeFixedPoint(graph, entrySet);\n  }\n\n```",
+            "method_doc": " Compute a fixed point for the given graph, entering from the given node. @param graph The graph to traverse. @param entry The node to begin traversing from. "
+        },
+        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::newTraversal(EdgeCallback)": {
+            "method_name": "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::newTraversal(EdgeCallback)",
+            "method_code": "```java\n  public static <NODE, EDGE> FixedPointGraphTraversal<NODE, EDGE> newTraversal(\n      EdgeCallback<NODE, EDGE> callback) {\n    return new FixedPointGraphTraversal<NODE, EDGE>(callback);\n  }\n\n```",
+            "method_doc": " Helper method for creating new traversals. "
+        },
+        "com.google.javascript.jscomp.SyntheticAst::getSourceFile()": {
+            "method_name": "com.google.javascript.jscomp.SyntheticAst::getSourceFile()",
+            "method_code": "```java\n  @Override\n  public SourceFile getSourceFile() {\n    return sourceFile;\n  }\n\n```",
+            "method_doc": "This method returns the source file associated with the synthetic AST."
+        },
+        "com.google.javascript.jscomp.PeepholeOptimizationsPass::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    NodeTraversal t = new NodeTraversal(compiler, this);\n\n    beginTraversal(t);\n    t.traverse(root);\n    endTraversal(t);\n  }\n\n```",
+            "method_doc": "This method initializes a `NodeTraversal` object, begins the traversal, traverses the AST rooted at `root`, and ends the traversal. It calls the `visit` method to perform peephole optimizations on each node."
+        },
+        "com.google.javascript.jscomp.PeepholeOptimizationsPass::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    Node currentVersionOfNode = n;\n    boolean somethingChanged = false;\n\n    do {\n      somethingChanged = false;\n      for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {\n        Node newVersionOfNode =\n            optimization.optimizeSubtree(currentVersionOfNode);\n\n        if (newVersionOfNode != currentVersionOfNode) {\n          somethingChanged = true;\n\n          currentVersionOfNode = newVersionOfNode;\n        }\n\n        if (currentVersionOfNode == null) {\n          return;\n        }\n      }\n    } while(somethingChanged);\n  }\n\n```",
+            "method_doc": "This method iterates over an array of `AbstractPeepholeOptimization` objects, applying each optimization to the current node (`n`). If an optimization changes the node, it updates the node and continues until no more changes occur. It calls the `optimizeSubtree` method of each optimization to apply the transformation."
+        },
+        "com.google.javascript.jscomp.PeepholeOptimizationsPass::beginTraversal(NodeTraversal)": {
+            "method_name": "com.google.javascript.jscomp.PeepholeOptimizationsPass::beginTraversal(NodeTraversal)",
+            "method_code": "```java\n  private void beginTraversal(NodeTraversal t) {\n    for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {\n      optimization.beginTraversal(t);\n    }\n  }\n\n```",
+            "method_doc": " Make sure that all the optimizations have the current traversal so they can report errors. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)",
+            "method_code": "```java\n  private void traverseFunction(Node n, Node parent) {\n    Preconditions.checkState(n.getChildCount() == 3);\n    Preconditions.checkState(n.getType() == Token.FUNCTION);\n\n    final Node fnName = n.getFirstChild();\n\n    boolean isFunctionExpression = (parent != null)\n        && NodeUtil.isFunctionExpression(n);\n\n    if (!isFunctionExpression) {\n      // Functions declarations are in the scope containing the declaration.\n      traverseBranch(fnName, n);\n    }\n\n    curNode = n;\n    pushScope(n);\n\n    if (isFunctionExpression) {\n      // Function expression names are only accessible within the function\n      // scope.\n      traverseBranch(fnName, n);\n    }\n\n    final Node args = fnName.getNext();\n    final Node body = args.getNext();\n\n    // Args\n    traverseBranch(args, n);\n\n    // Body\n    Preconditions.checkState(body.getNext() == null &&\n            body.getType() == Token.BLOCK);\n    traverseBranch(body, n);\n\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a function. "
+        },
+        "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalized()": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalized()",
+            "method_code": "```java\n    boolean isNormalized() {\n      return this == NORMALIZED || this == NORMALIZED_OBFUSCATED;\n    }\n\n```",
+            "method_doc": "Checks if the current life-cycle stage is normalized or obfuscated. Calls no other methods from the list."
+        },
+        "com.google.javascript.jscomp.CompilationLevel::setOptionsForCompilationLevel(CompilerOptions)": {
+            "method_name": "com.google.javascript.jscomp.CompilationLevel::setOptionsForCompilationLevel(CompilerOptions)",
+            "method_code": "```java\n  public void setOptionsForCompilationLevel(CompilerOptions options) {\n    switch (this) {\n      case WHITESPACE_ONLY:\n        applyBasicCompilationOptions(options);\n        break;\n      case SIMPLE_OPTIMIZATIONS:\n        applySafeCompilationOptions(options);\n        break;\n      case ADVANCED_OPTIMIZATIONS:\n        applyFullCompilationOptions(options);\n        break;\n      default:\n        throw new RuntimeException(\"Unknown compilation level.\");\n    }\n  }\n\n```",
+            "method_doc": "This method sets the options for the specified compilation level by calling `applyBasicCompilationOptions`, `applySafeCompilationOptions`, or `applyFullCompilationOptions` based on the compilation level."
+        },
+        "com.google.javascript.jscomp.CompilationLevel::applyFullCompilationOptions(CompilerOptions)": {
+            "method_name": "com.google.javascript.jscomp.CompilationLevel::applyFullCompilationOptions(CompilerOptions)",
+            "method_code": "```java\n  private static void applyFullCompilationOptions(CompilerOptions options) {\n    // Do not call applySafeCompilationOptions(options) because the call can\n    // create possible conflicts between multiple diagnostic groups.\n\n    // All the safe optimizations.\n    options.closurePass = true;\n    options.foldConstants = true;\n    options.coalesceVariableNames = true;\n    options.deadAssignmentElimination = true;\n    options.extractPrototypeMemberDeclarations = true;\n    options.collapseVariableDeclarations = true;\n    options.convertToDottedProperties = true;\n    options.rewriteFunctionExpressions = true;\n    options.labelRenaming = true;\n    options.removeDeadCode = true;\n    options.optimizeArgumentsArray = true;\n    options.collapseObjectLiterals = true;\n\n    // All the advance optimizations.\n    options.removeClosureAsserts = true;\n    options.aliasKeywords = true;\n    options.reserveRawExports = true;\n    options.variableRenaming = VariableRenamingPolicy.ALL;\n    options.shadowVariables = true;\n    options.propertyRenaming = PropertyRenamingPolicy.ALL_UNQUOTED;\n    options.removeUnusedPrototypeProperties = true;\n    options.removeUnusedPrototypePropertiesInExterns = true;\n    options.collapseAnonymousFunctions = true;\n    options.collapseProperties = true;\n    options.checkGlobalThisLevel = CheckLevel.WARNING;\n    options.rewriteFunctionExpressions = true;\n    options.smartNameRemoval = true;\n    options.inlineConstantVars = true;\n    options.inlineFunctions = true;\n    options.inlineLocalFunctions = true;\n    options.inlineGetters = true;\n    options.inlineVariables = true;\n    options.flowSensitiveInlineVariables = true;\n    options.computeFunctionSideEffects = true;\n\n    // Remove unused vars also removes unused functions.\n    options.removeUnusedVars = true;\n    options.removeUnusedLocalVars = true;\n\n    // Move code around based on the defined modules.\n    options.crossModuleCodeMotion = true;\n    options.crossModuleMethodMotion = true;\n\n    // Call optimizations\n    options.devirtualizePrototypeMethods = true;\n    options.optimizeParameters = true;\n    options.optimizeReturns = true;\n    options.optimizeCalls = true;\n\n    // Kindly tell the user that they have JsDocs that we don't understand.\n    options.setWarningLevel(DiagnosticGroups.NON_STANDARD_JSDOC,\n        CheckLevel.WARNING);\n  }\n\n```",
+            "method_doc": " Add the options that will work only if the user exported all the symbols correctly. @param options The CompilerOptions object to set the options on. "
+        },
+        "com.google.javascript.jscomp.CommandLineRunner::createOptions()": {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::createOptions()",
+            "method_code": "```java\n  @Override\n  protected CompilerOptions createOptions() {\n    CompilerOptions options = new CompilerOptions();\n    options.setCodingConvention(new ClosureCodingConvention());\n    CompilationLevel level = flags.compilation_level;\n    level.setOptionsForCompilationLevel(options);\n    if (flags.debug) {\n      level.setDebugOptionsForCompilationLevel(options);\n    }\n\n    if(flags.generate_exports) {\n      options.setGenerateExports(flags.generate_exports);\n    }\n\n    WarningLevel wLevel = flags.warning_level;\n    wLevel.setOptionsForWarningLevel(options);\n    for (FormattingOption formattingOption : flags.formatting) {\n      formattingOption.applyToOptions(options);\n    }\n\n    options.closurePass = flags.process_closure_primitives;\n    return options;\n  }\n\n```",
+            "method_doc": "This method creates and configures `CompilerOptions` based on the parsed flags, setting various properties such as coding convention, compilation level, warning levels, and formatting options."
+        },
+        "com.google.javascript.jscomp.CommandLineRunner::CommandLineRunner(String[])": {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::CommandLineRunner(String[])",
+            "method_code": "```java\n  protected CommandLineRunner(String[] args) {\n    super();\n    initConfigFromFlags(args, System.err);\n  }\n\n```",
+            "method_doc": " Create a new command-line runner. You should only need to call the constructor if you're extending this class. Otherwise, the main method should instantiate it. "
+        },
+        "com.google.javascript.jscomp.DiagnosticType::error(String,String)": {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::error(String,String)",
+            "method_code": "```java\n  public static DiagnosticType error(String name, String descriptionFormat) {\n    return make(name, CheckLevel.ERROR, descriptionFormat);\n  }\n\n```",
+            "method_doc": " Create a DiagnosticType at level CheckLevel.ERROR  @param name An identifier @param descriptionFormat A format string @return A new DiagnosticType "
+        },
+        "com.google.javascript.jscomp.DiagnosticType::make(String,CheckLevel,String)": {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::make(String,CheckLevel,String)",
+            "method_code": "```java\n  public static DiagnosticType make(String name, CheckLevel level,\n                                    String descriptionFormat) {\n    return\n        new DiagnosticType(name, level, new MessageFormat(descriptionFormat));\n  }\n\n```",
+            "method_doc": " Create a DiagnosticType at a given CheckLevel.  @param name An identifier @param level Either CheckLevel.ERROR or CheckLevel.WARNING @param descriptionFormat A format string @return A new DiagnosticType "
+        },
+        "com.google.javascript.jscomp.DiagnosticType::equals(Object)": {
+            "method_name": "com.google.javascript.jscomp.DiagnosticType::equals(Object)",
+            "method_code": "```java\n  @Override\n  public boolean equals(Object type) {\n    return type instanceof DiagnosticType &&\n        ((DiagnosticType) type).key.equals(key);\n  }\n\n```",
+            "method_doc": "This method checks if the current DiagnosticType instance is equal to another object. It returns true if the other object is an instance of DiagnosticType and their keys are equal."
+        },
+        "com.google.javascript.jscomp.RhinoErrorReporter::replacePlaceHolders(String)": {
+            "method_name": "com.google.javascript.jscomp.RhinoErrorReporter::replacePlaceHolders(String)",
+            "method_code": "```java\n  private Pattern replacePlaceHolders(String s) {\n    s = Pattern.quote(s);\n    return Pattern.compile(s.replaceAll(\"\\\\{\\\\d+\\\\}\", \"\\\\\\\\E.*\\\\\\\\Q\"));\n  }\n\n```",
+            "method_doc": " For each message such as \"Not a good use of {0}\", replace the place holder {0} with a wild card that matches all possible strings. Also put the any non-place-holder in quotes for regex matching later. "
+        },
+        "com.google.javascript.jscomp.JSError::make(String,int,int,DiagnosticType,String[])": {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,int,int,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, int lineno, int charno,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, null, lineno, charno, type, null, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError at a given source location  @param sourceName The source file name @param lineno Line number with source file, or -1 if unknown @param charno Column number within line, or -1 for whole line. @param type The DiagnosticType @param arguments Arguments to be incorporated into the message "
+        },
+        "com.google.javascript.jscomp.JSError::getType()": {
+            "method_name": "com.google.javascript.jscomp.JSError::getType()",
+            "method_code": "```java\n  public DiagnosticType getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "This method returns the DiagnosticType associated with the JSError. It does not call any other methods in the Covered Methods List."
+        },
+        "com.google.javascript.jscomp.JSError::format(CheckLevel,MessageFormatter)": {
+            "method_name": "com.google.javascript.jscomp.JSError::format(CheckLevel,MessageFormatter)",
+            "method_code": "```java\n  public String format(CheckLevel level, MessageFormatter formatter) {\n    switch (level) {\n      case ERROR:\n        return formatter.formatError(this);\n\n      case WARNING:\n        return formatter.formatWarning(this);\n\n      default:\n        return null;\n    }\n  }\n\n```",
+            "method_doc": " Format a message at the given level.  @return the formatted message or {@code null} "
+        },
+        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root."
+        },
+        "com.google.javascript.jscomp.CompilerInput::getSourceFile()": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getSourceFile()",
+            "method_code": "```java\n  @Override\n  public SourceFile getSourceFile() {\n    return ast.getSourceFile();\n  }\n\n```",
+            "method_doc": "Returns the source file associated with the input. This method calls `ast.getSourceFile()` to retrieve the source file."
+        },
+        "com.google.javascript.jscomp.CommandLineRunner::shouldRunCompiler()": {
+            "method_name": "com.google.javascript.jscomp.CommandLineRunner::shouldRunCompiler()",
+            "method_code": "```java\n  public boolean shouldRunCompiler() {\n    return this.isConfigValid;\n  }\n\n```",
+            "method_doc": " @return Whether the configuration is valid. "
+        },
+        "com.google.javascript.rhino.ScriptRuntime::getMessage0(String)": {
+            "method_name": "com.google.javascript.rhino.ScriptRuntime::getMessage0(String)",
+            "method_code": "```java\n    public static String getMessage0(String messageId)\n    {\n        return getMessage(messageId, null);\n    }\n\n```",
+            "method_doc": "------------------"
+        },
+        "com.google.javascript.jscomp.AbstractCompiler::getLifeCycleStage()": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler::getLifeCycleStage()",
+            "method_code": "```java\n  LifeCycleStage getLifeCycleStage() {\n    return stage;\n  }\n\n```",
+            "method_doc": " @return The current life-cycle stage of the AST we're working on. "
+        },
+        "com.google.javascript.jscomp.AbstractCompiler::setLifeCycleStage(LifeCycleStage)": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler::setLifeCycleStage(LifeCycleStage)",
+            "method_code": "```java\n  void setLifeCycleStage(LifeCycleStage stage) {\n    this.stage = stage;\n  }\n\n```",
+            "method_doc": " Set the current life-cycle state. "
+        },
+        "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalizedObfuscated()": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalizedObfuscated()",
+            "method_code": "```java\n    boolean isNormalizedObfuscated() {\n      return this == NORMALIZED_OBFUSCATED;\n    }\n\n```",
+            "method_doc": "Checks if the current life-cycle stage is obfuscated. Calls no other methods from the list."
+        },
+        "com.google.javascript.jscomp.CompilerInput::getName()": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  @Override\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */"
+        },
+        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+            "method_code": "```java\n  static TernaryValue getPureBooleanValue(Node n) {\n    switch (n.getType()) {\n      case Token.STRING:\n        return TernaryValue.forBoolean(n.getString().length() > 0);\n\n      case Token.NUMBER:\n        return TernaryValue.forBoolean(n.getDouble() != 0);\n\n      case Token.NOT:\n        return getPureBooleanValue(n.getLastChild()).not();\n\n      case Token.NULL:\n      case Token.FALSE:\n        return TernaryValue.FALSE;\n\n      case Token.VOID:\n          return TernaryValue.FALSE;\n\n      case Token.NAME:\n        String name = n.getString();\n        if (\"undefined\".equals(name)\n            || \"NaN\".equals(name)) {\n          // We assume here that programs don't change the value of the keyword\n          // undefined to something other than the value undefined.\n          return TernaryValue.FALSE;\n        } else if (\"Infinity\".equals(name)) {\n          return TernaryValue.TRUE;\n        }\n        break;\n\n      case Token.TRUE:\n      case Token.REGEXP:\n        return TernaryValue.TRUE;\n\n      case Token.ARRAYLIT:\n      case Token.OBJECTLIT:\n        if (!mayHaveSideEffects(n)) {\n          return TernaryValue.TRUE;\n        }\n        break;\n    }\n\n    return TernaryValue.UNKNOWN;\n  }\n\n```",
+            "method_doc": " Gets the boolean value of a node that represents a literal. This method effectively emulates the <code>Boolean()</code> JavaScript cast function except it return UNKNOWN for known values with side-effects, use getExpressionBooleanValue if you don't care about side-effects. "
+        },
+        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n) {\n    return mayHaveSideEffects(n, null);\n  }\n\n```",
+            "method_doc": " Returns true if the node which may have side effects when executed. "
+        },
+        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n, AbstractCompiler compiler) {\n    return checkForStateChangeHelper(n, false, compiler);\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)": {
+            "method_name": "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)",
+            "method_code": "```java\n  public static TernaryValue forBoolean(boolean val) {\n    return val ? TernaryValue.TRUE : TernaryValue.FALSE;\n  }\n\n```",
+            "method_doc": " Gets the TernaryValue for the given boolean. "
+        },
+        "com.google.javascript.rhino.Node::newNumber(double)": {
+            "method_name": "com.google.javascript.rhino.Node::newNumber(double)",
+            "method_code": "```java\n  public static Node newNumber(double number) {\n    return new NumberNode(number);\n  }\n\n```",
+            "method_doc": "Creates a new `NumberNode` instance with the given double value."
+        },
+        "com.google.javascript.rhino.Node::newString(String)": {
+            "method_name": "com.google.javascript.rhino.Node::newString(String)",
+            "method_code": "```java\n  public static Node newString(String str) {\n    return new StringNode(Token.STRING, str);\n  }\n\n```",
+            "method_doc": "Creates a new `StringNode` instance with the given string value and default token type."
+        },
+        "com.google.javascript.rhino.Node::newString(int,String)": {
+            "method_name": "com.google.javascript.rhino.Node::newString(int,String)",
+            "method_code": "```java\n  public static Node newString(int type, String str) {\n    return new StringNode(type, str);\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.parsing.ParserRunner::parse(StaticSourceFile,String,Config,ErrorReporter,Logger)": {
+            "method_name": "com.google.javascript.jscomp.parsing.ParserRunner::parse(StaticSourceFile,String,Config,ErrorReporter,Logger)",
+            "method_code": "```java\n  public static Node parse(StaticSourceFile sourceFile,\n                           String sourceString,\n                           Config config,\n                           ErrorReporter errorReporter,\n                           Logger logger) throws IOException {\n    Context cx = Context.enter();\n    cx.setErrorReporter(errorReporter);\n    cx.setLanguageVersion(Context.VERSION_1_5);\n    CompilerEnvirons compilerEnv = new CompilerEnvirons();\n    compilerEnv.initFromContext(cx);\n    compilerEnv.setRecordingComments(true);\n    compilerEnv.setRecordingLocalJsDocComments(true);\n    // ES5 specifically allows trailing commas\n    compilerEnv.setWarnTrailingComma(\n        config.languageMode == LanguageMode.ECMASCRIPT3);\n\n    if (config.isIdeMode || config.languageMode != LanguageMode.ECMASCRIPT3) {\n      // Do our own identifier check for ECMASCRIPT 5\n      compilerEnv.setReservedKeywordAsIdentifier(true);\n      compilerEnv.setAllowKeywordAsObjectPropertyName(true);\n    }\n\n    if (config.isIdeMode) {\n      compilerEnv.setAllowMemberExprAsFunctionName(true);\n    }\n\n    Parser p = new Parser(compilerEnv, errorReporter);\n    AstRoot astRoot = null;\n    try {\n      astRoot = p.parse(sourceString, sourceFile.getName(), 1);\n    } catch (EvaluatorException e) {\n      logger.info(\n          \"Error parsing \" + sourceFile.getName() + \": \" + e.getMessage());\n    } finally {\n      Context.exit();\n    }\n    Node root = null;\n    if (astRoot != null) {\n      root = IRFactory.transformTree(\n          astRoot, sourceFile, sourceString, config, errorReporter);\n      root.setIsSyntheticBlock(true);\n    }\n    return root;\n  }\n\n```",
+            "method_doc": " Parses the JavaScript text given by a reader.  @param sourceName The filename. @param sourceString Source code from the file. @param errorReporter An error. @param logger A logger. @return The AST of the given text. @throws IOException "
+        },
+        "com.google.javascript.rhino.Node::getType()": {
+            "method_name": "com.google.javascript.rhino.Node::getType()",
+            "method_code": "```java\n  public int getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the type of the current node."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.CommandLineRunnerTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Self-Invoking Functions\n**Description:** The compiler may be incorrectly handling self-invoking functions, treating them as having side effects even though they do not. This would lead to the generation of a warning instead of optimizing the function away.\n\n**Location:** Likely within the optimization logic of the compiler, specifically in the phase that determines whether a function has side effects.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, suggesting that the self-invoking function is being treated as having side effects.",
+                "Bug in Advanced Optimizations Logic\n**Description:** There might be a bug in the logic that implements the `ADVANCED_OPTIMIZATIONS` level, causing it to fail to recognize that certain patterns of code (like self-invoking functions) can be optimized away.\n\n**Location:** Within the implementation of the `ADVANCED_OPTIMIZATIONS` level in the compiler's optimization pipeline.\n\n**Observation:** The test output shows that the compiler is not removing the self-invoking function, but rather generating a warning, which aligns with the behavior described in Hypothesis 1.",
+                "Issue with Side Effect Detection\n**Description:** The compiler might have a bug in its side effect detection mechanism, incorrectly identifying self-invoking functions as having side effects when they do not.\n\n**Location:** Within the side effect detection logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the side effect detection is failing to correctly identify that the self-invoking function does not have side effects.",
+                "Compiler Configuration Issue\n**Description:** There might be an issue with how the compiler is being configured or initialized, leading to incorrect behavior during the optimization process.\n\n**Location:** Within the configuration or initialization code of the compiler.\n\n**Observation:** The test failure occurs only when the `--compilation_level=ADVANCED_OPTIMIZATIONS` flag is used, suggesting that the issue might be related to how this flag affects the compiler's configuration or initialization.",
+                "Bug in Error Reporting Mechanism\n**Description:** There might be a bug in the error reporting mechanism of the compiler, causing it to report a warning instead of an error when it encounters a situation that should result in an error.\n\n**Location:** Within the error reporting logic of the compiler.\n\n**Observation:** The test output indicates that the compiler is generating a `USELESS_CODE_ERROR` warning, which suggests that the error reporting mechanism is misclassifying the situation as a warning instead of an error."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    9.0
+                ],
+                "2": [
+                    9,
+                    9.0
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    9.0
+                ],
+                "5": [
+                    9,
+                    9.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.CheckSideEffects",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.rhino.ScriptRuntime",
+                    "com.google.javascript.jscomp.SyntheticAst",
+                    "com.google.javascript.jscomp.graph.FixedPointGraphTraversal"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.PeepholeOptimizationsPass",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.jscomp.CompilationLevel"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.CheckSideEffects",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.rhino.ScriptRuntime",
+                    "com.google.javascript.jscomp.SyntheticAst",
+                    "com.google.javascript.jscomp.graph.FixedPointGraphTraversal"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.CommandLineRunner",
+                    "com.google.javascript.jscomp.CompilationLevel",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.jscomp.PeepholeOptimizationsPass",
+                    "com.google.javascript.jscomp.CheckSideEffects"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.CheckSideEffects",
+                    "com.google.javascript.jscomp.DiagnosticType",
+                    "com.google.javascript.jscomp.RhinoErrorReporter",
+                    "com.google.javascript.jscomp.JSError",
+                    "com.google.javascript.jscomp.CompilerInput"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.CheckSideEffects": [
+                        "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.ScriptRuntime": [
+                        "com.google.javascript.rhino.ScriptRuntime::getMessage(String,Object[])"
+                    ],
+                    "com.google.javascript.jscomp.SyntheticAst": [
+                        "com.google.javascript.jscomp.SyntheticAst::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.SyntheticAst::clearAst()",
+                        "com.google.javascript.jscomp.SyntheticAst::SyntheticAst(String)"
+                    ],
+                    "com.google.javascript.jscomp.graph.FixedPointGraphTraversal": [
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::newTraversal(EdgeCallback)",
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph)",
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph,N)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.PeepholeOptimizationsPass": [
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::process(Node,Node)",
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::beginTraversal(NodeTraversal)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.AbstractCompiler": [
+                        "com.google.javascript.jscomp.AbstractCompiler::getLifeCycleStage()",
+                        "com.google.javascript.jscomp.AbstractCompiler::setLifeCycleStage(LifeCycleStage)",
+                        "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalized()"
+                    ],
+                    "com.google.javascript.jscomp.CompilationLevel": [
+                        "com.google.javascript.jscomp.CompilationLevel::setOptionsForCompilationLevel(CompilerOptions)",
+                        "com.google.javascript.jscomp.CompilationLevel::applyFullCompilationOptions(CompilerOptions)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.CheckSideEffects": [
+                        "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.ScriptRuntime": [
+                        "com.google.javascript.rhino.ScriptRuntime::getMessage0(String)",
+                        "com.google.javascript.rhino.ScriptRuntime::getMessage(String,Object[])"
+                    ],
+                    "com.google.javascript.jscomp.SyntheticAst": [
+                        "com.google.javascript.jscomp.SyntheticAst::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.SyntheticAst::clearAst()",
+                        "com.google.javascript.jscomp.SyntheticAst::getSourceFile()"
+                    ],
+                    "com.google.javascript.jscomp.graph.FixedPointGraphTraversal": [
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::newTraversal(EdgeCallback)",
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph)",
+                        "com.google.javascript.jscomp.graph.FixedPointGraphTraversal::computeFixedPoint(DiGraph,N)"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.CommandLineRunner": [
+                        "com.google.javascript.jscomp.CommandLineRunner::createOptions()",
+                        "com.google.javascript.jscomp.CommandLineRunner::shouldRunCompiler()",
+                        "com.google.javascript.jscomp.CommandLineRunner::CommandLineRunner(String[])"
+                    ],
+                    "com.google.javascript.jscomp.CompilationLevel": [
+                        "com.google.javascript.jscomp.CompilationLevel::setOptionsForCompilationLevel(CompilerOptions)",
+                        "com.google.javascript.jscomp.CompilationLevel::applyFullCompilationOptions(CompilerOptions)"
+                    ],
+                    "com.google.javascript.jscomp.AbstractCompiler": [
+                        "com.google.javascript.jscomp.AbstractCompiler::getLifeCycleStage()",
+                        "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalized()",
+                        "com.google.javascript.jscomp.AbstractCompiler$LifeCycleStage::isNormalizedObfuscated()"
+                    ],
+                    "com.google.javascript.jscomp.PeepholeOptimizationsPass": [
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::process(Node,Node)",
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.PeepholeOptimizationsPass::beginTraversal(NodeTraversal)"
+                    ],
+                    "com.google.javascript.jscomp.CheckSideEffects": [
+                        "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.CheckSideEffects": [
+                        "com.google.javascript.jscomp.CheckSideEffects::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.DiagnosticType": [
+                        "com.google.javascript.jscomp.DiagnosticType::error(String,String)",
+                        "com.google.javascript.jscomp.DiagnosticType::make(String,CheckLevel,String)",
+                        "com.google.javascript.jscomp.DiagnosticType::equals(Object)"
+                    ],
+                    "com.google.javascript.jscomp.RhinoErrorReporter": [
+                        "com.google.javascript.jscomp.RhinoErrorReporter::replacePlaceHolders(String)"
+                    ],
+                    "com.google.javascript.jscomp.JSError": [
+                        "com.google.javascript.jscomp.JSError::make(String,int,int,DiagnosticType,String[])",
+                        "com.google.javascript.jscomp.JSError::getType()",
+                        "com.google.javascript.jscomp.JSError::format(CheckLevel,MessageFormatter)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::getName()",
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::getSourceFile()"
+                    ]
+                }
+            }
+        },
+        {
+            "test_suite": "com.google.javascript.jscomp.NodeUtilTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Side Effects\n**Description:** The `NodeUtil.getPureBooleanValue` method may be incorrectly handling expressions with side effects. Specifically, it might be evaluating the side effect before determining the boolean value, leading to incorrect results.\n\n**Location:** Likely within the `NodeUtil.getPureBooleanValue` method, particularly around the logic that processes expressions with side effects.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN` because `void` discards the value and returns `undefined`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`.",
+                "Incomplete Evaluation of Expressions\n**Description:** The `NodeUtil.getPureBooleanValue` method might be incomplete in its evaluation of certain expressions, especially those involving side effects. It could be missing cases or conditions that handle specific types of expressions correctly.\n\n**Location:** Within the `NodeUtil.getPureBooleanValue` method, particularly in the switch or conditional statements that process different types of expressions.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the method might be missing a case for handling expressions with side effects.",
+                "Incorrect Parsing of Expressions\n**Description:** There might be an issue with the way expressions are being parsed in the `parse` method. Specifically, the parser might not be correctly identifying or handling expressions with side effects.\n\n**Location:** Within the `parse` method, particularly in the logic that processes and tokenizes the input JavaScript string.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the parser might not be correctly interpreting the expression.",
+                "Logic Error in `getNode` Method\n**Description:** The `getNode` method might contain a logic error that affects how expressions are processed. Specifically, it could be incorrectly wrapping or unwrapping expressions, leading to incorrect results.\n\n**Location:** Within the `getNode` method, particularly in the logic that wraps the input expression inside a variable declaration statement.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This suggests that the method might be incorrectly handling the expression.",
+                "Bug in `NodeUtil.getPureBooleanValue` Implementation\n**Description:** There might be a bug in the implementation of the `NodeUtil.getPureBooleanValue` method itself. Specifically, it could be incorrectly returning `false` for expressions that should return `TernaryValue.UNKNOWN`.\n\n**Location:** Within the `NodeUtil.getPureBooleanValue` method, particularly in the logic that determines the boolean value of an expression.\n\n**Observation:** The failure occurs when evaluating `\"void foo()\"`, which should return `TernaryValue.UNKNOWN`. The test expects `TernaryValue.UNKNOWN`, but the actual result is `false`. This directly points to a bug in the method's logic."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    9.0
+                ],
+                "2": [
+                    9,
+                    9.0
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    7.666666666666667
+                ],
+                "5": [
+                    9,
+                    6.333333333333333
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.rhino.jstype.JSType"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.rhino.jstype.JSType"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.jscomp.parsing.ParserRunner"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.rhino.jstype.TernaryValue",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.rhino.jstype.JSType",
+                    "com.google.javascript.jscomp.AbstractCompiler"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.rhino.jstype.TernaryValue": [
+                        "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(String)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.rhino.jstype.TernaryValue": [
+                        "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(String)",
+                        "com.google.javascript.rhino.Node::getType()"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(String)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ],
+                    "com.google.javascript.rhino.jstype.TernaryValue": [
+                        "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)"
+                    ],
+                    "com.google.javascript.jscomp.parsing.ParserRunner": [
+                        "com.google.javascript.jscomp.parsing.ParserRunner::parse(StaticSourceFile,String,Config,ErrorReporter,Logger)"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(String)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::getPureBooleanValue(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.rhino.jstype.TernaryValue": [
+                        "com.google.javascript.rhino.jstype.TernaryValue::forBoolean(boolean)"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(String)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ]
+                }
+            }
+        }
+    ]
+}

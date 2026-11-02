@@ -1,0 +1,935 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+        "com.google.javascript.jscomp.MarkNoSideEffectCalls",
+        "com.google.javascript.jscomp.DataFlowAnalysis",
+        "com.google.javascript.jscomp.NodeTraversal",
+        "com.google.javascript.jscomp.Compiler",
+        "com.google.javascript.jscomp.parsing.Annotation",
+        "com.google.javascript.jscomp.NodeUtil",
+        "com.google.javascript.jscomp.AbstractCompiler"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+            "method_code": "```java\n    private boolean canInline() {\n\n      // Cannot inline a parameter.\n      if (defCfgNode.isFunction()) {\n        return false;\n      }\n\n      getDefinition(defCfgNode, null);\n      getNumUseInUseCfgNode(useCfgNode, null);\n\n      // Definition was not found.\n      if (def == null) {\n        return false;\n      }\n\n      // Check that the assignment isn't used as a R-Value.\n      // TODO(user): Certain cases we can still inline.\n      if (def.isAssign() && !NodeUtil.isExprAssign(def.getParent())) {\n        return false;\n      }\n\n\n      // The right of the definition has side effect:\n      // Example, for x:\n      // x = readProp(b), modifyProp(b); print(x);\n      if (checkRightOf(def, defCfgNode, SIDE_EFFECT_PREDICATE)) {\n        return false;\n      }\n\n      // Similar check as the above but this time, all the sub-expressions\n      // left of the use of the variable.\n      // x = readProp(b); modifyProp(b), print(x);\n      if (checkLeftOf(use, useCfgNode, SIDE_EFFECT_PREDICATE)) {\n        return false;\n      }\n\n\n      // TODO(user): Side-effect is ok sometimes. As long as there are no\n      // side-effect function down all paths to the use. Once we have all the\n      // side-effect analysis tool.\n      if (NodeUtil.mayHaveSideEffects(def.getLastChild())) {\n        return false;\n      }\n\n      // TODO(user): We could inline all the uses if the expression is short.\n\n      // Finally we have to make sure that there are no more than one use\n      // in the program and in the CFG node. Even when it is semantically\n      // correctly inlining twice increases code size.\n      if (numUseWithinUseCfgNode != 1) {\n        return false;\n      }\n\n      // Make sure that the name is not within a loop\n      if (NodeUtil.isWithinLoop(use)) {\n        return false;\n      }\n\n\n      Collection<Node> uses = reachingUses.getUses(varName, defCfgNode);\n\n      if (uses.size() != 1) {\n        return false;\n      }\n\n      // We give up inling stuff with R-Value that has GETPROP, GETELEM,\n      // or anything that creates a new object.\n      // Example:\n      // var x = a.b.c; j.c = 1; print(x);\n      // Inlining print(a.b.c) is not safe consider j and be alias to a.b.\n      // TODO(user): We could get more accuracy by looking more in-detail\n      // what j is and what x is trying to into to.\n      if (NodeUtil.has(def.getLastChild(),\n          new Predicate<Node>() {\n              @Override\n              public boolean apply(Node input) {\n                switch (input.getType()) {\n                  case Token.GETELEM:\n                  case Token.GETPROP:\n                  case Token.ARRAYLIT:\n                  case Token.OBJECTLIT:\n                  case Token.REGEXP:\n                  case Token.NEW:\n                    return true;\n                }\n                return false;\n              }\n          },\n          new Predicate<Node>() {\n              @Override\n              public boolean apply(Node input) {\n                // Recurse if the node is not a function.\n                return !input.isFunction();\n              }\n          })) {\n        return false;\n      }\n\n      // We can skip the side effect check along the paths of two nodes if\n      // they are just next to each other.\n      if (NodeUtil.isStatementBlock(defCfgNode.getParent()) &&\n          defCfgNode.getNext() != useCfgNode) {\n        // Similar side effect check as above but this time the side effect is\n        // else where along the path.\n        // x = readProp(b); while(modifyProp(b)) {}; print(x);\n        CheckPathsBetweenNodes<Node, ControlFlowGraph.Branch>\n          pathCheck = new CheckPathsBetweenNodes<Node, ControlFlowGraph.Branch>(\n                 cfg,\n                 cfg.getDirectedGraphNode(defCfgNode),\n                 cfg.getDirectedGraphNode(useCfgNode),\n                 SIDE_EFFECT_PREDICATE,\n                 Predicates.\n                     <DiGraphEdge<Node, ControlFlowGraph.Branch>>alwaysTrue(),\n                 false);\n        if (pathCheck.somePathsSatisfyPredicate()) {\n          return false;\n        }\n      }\n\n      return true;\n    }\n\n```",
+            "method_doc": "This method determines whether a candidate variable can be inlined based on various conditions such as the presence of side effects, the number of uses, and the context within loops.",
+            "class_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+            "class_doc": " Inline variables when possible. Using the information from {@link MaybeReachingVariableUse} and {@link MustBeReachingVariableDef}, this pass attempts to inline a variable by placing the value at the definition where the variable is used. The basic requirements for inlining are the following:  <ul> <li> There is exactly one reaching definition at the use of that variable </li> <li> There is exactly one use for that definition of the variable </li> </ul>  <p>Other requirements can be found in {@link Candidate#canInline}. Currently this pass does not operate on the global scope due to compilation time.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it contains several checks related to side effects and usage patterns which are directly involved in the test failures. Specifically, the method fails to correctly identify side effects in function calls like `print` and `noSFX`, leading to incorrect inlining decisions.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "2": 8,
+                "3": 5,
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls$SetNoSideEffectCallProperty::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal traversal, Node node, Node parent) {\n      if (!node.isCall() && !node.isNew()) {\n        return;\n      }\n\n      Collection<Definition> definitions =\n          defFinder.getDefinitionsReferencedAt(node.getFirstChild());\n      if (definitions == null) {\n        return;\n      }\n\n      for (Definition def : definitions) {\n        Node lValue = def.getLValue();\n        Preconditions.checkNotNull(lValue);\n        if (!noSideEffectFunctionNames.contains(lValue) &&\n            definitionTypeContainsFunctionType(def)) {\n          return;\n        }\n      }\n\n      node.setSideEffectFlags(Node.NO_SIDE_EFFECTS);\n    }\n\n```",
+            "method_doc": "This method visits nodes in the AST. If a node is a call or new expression, it checks if the referenced function has a `@nosideeffect` annotation. If so, it sets the `NO_SIDE_EFFECTS` flag for the call.",
+            "class_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls",
+            "class_doc": " Set the NoSideEffects property for function and constructor calls that refer to functions that are known to have no side effects. Current implementation relies on @nosideeffects annotations at function definition sites; eventually we should traverse function bodies to determine if they have side effects.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the identification of side effects in function calls. The failure in all three tests indicates that the current logic for detecting side effects is flawed, and fixing this method could resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal t, Node n, Node parent) {\n      DiGraphNode<Node, Branch> graphNode = cfg.getDirectedGraphNode(n);\n      if (graphNode == null) {\n        // Not a CFG node.\n        return;\n      }\n      FlowState<MustDef> state = graphNode.getAnnotation();\n      final MustDef defs = state.getIn();\n      final Node cfgNode = n;\n      AbstractCfgNodeTraversalCallback gatherCb =\n          new AbstractCfgNodeTraversalCallback() {\n\n        @Override\n        public void visit(NodeTraversal t, Node n, Node parent) {\n          if (n.isName()) {\n\n            // Make sure that the name node is purely a read.\n            if ((NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == n)\n                || parent.isVar() || parent.isInc() ||\n                parent.isDec() || parent.isParamList() ||\n                parent.isCatch()) {\n              return;\n            }\n\n            String name = n.getString();\n            if (compiler.getCodingConvention().isExported(name)) {\n              return;\n            }\n\n            Node defNode = reachingDef.getDef(name, cfgNode);\n            // TODO(nicksantos): We need to add some notion of @const outer\n            // scope vars. We can inline those just fine.\n            if (defNode != null &&\n                !reachingDef.dependsOnOuterScopeVars(name, cfgNode)) {\n              candidates.add(new Candidate(name, defNode, n, cfgNode));\n            }\n          }\n        }\n      };\n\n      NodeTraversal.traverse(compiler, cfgNode, gatherCb);\n    }\n\n```",
+            "method_doc": "This method identifies potential inlining candidates by traversing the control flow graph and checking if a variable has a single reaching definition and use within the function.",
+            "class_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+            "class_doc": " Inline variables when possible. Using the information from {@link MaybeReachingVariableUse} and {@link MustBeReachingVariableDef}, this pass attempts to inline a variable by placing the value at the definition where the variable is used. The basic requirements for inlining are the following:  <ul> <li> There is exactly one reaching definition at the use of that variable </li> <li> There is exactly one use for that definition of the variable </li> </ul>  <p>Other requirements can be found in {@link Candidate#canInline}. Currently this pass does not operate on the global scope due to compilation time.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it involves identifying potential inlining candidates by traversing the control flow graph. However, the issue seems to stem from how side effects are being handled rather than the candidate gathering logic itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "2": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()",
+            "method_code": "```java\n    private void inlineVariable() {\n      Node defParent = def.getParent();\n      Node useParent = use.getParent();\n      if (def.isAssign()) {\n        Node rhs = def.getLastChild();\n        rhs.detachFromParent();\n        // Oh yes! I have grandparent to remove this.\n        Preconditions.checkState(defParent.isExprResult());\n        while (defParent.getParent().isLabel()) {\n          defParent = defParent.getParent();\n        }\n        defParent.detachFromParent();\n        useParent.replaceChild(use, rhs);\n      } else if (defParent.isVar()) {\n        Node rhs = def.getLastChild();\n        def.removeChild(rhs);\n        useParent.replaceChild(use, rhs);\n      } else {\n        Preconditions.checkState(false, \"No other definitions can be inlined.\");\n      }\n      compiler.reportCodeChange();\n    }\n\n```",
+            "method_doc": " Actual transformation. ",
+            "class_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+            "class_doc": " Inline variables when possible. Using the information from {@link MaybeReachingVariableUse} and {@link MustBeReachingVariableDef}, this pass attempts to inline a variable by placing the value at the definition where the variable is used. The basic requirements for inlining are the following:  <ul> <li> There is exactly one reaching definition at the use of that variable </li> <li> There is exactly one use for that definition of the variable </li> </ul>  <p>Other requirements can be found in {@link Candidate#canInline}. Currently this pass does not operate on the global scope due to compilation time.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly manipulates the AST nodes during inlining, which could potentially lead to issues if not handled correctly. However, given the context of the failing tests, it seems plausible that the problem lies in how side effects are being handled or detected.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    SimpleDefinitionFinder defFinder = new SimpleDefinitionFinder(compiler);\n    defFinder.process(externs, root);\n\n    // Gather the list of function nodes that have @nosideeffect annotations.\n    // For use by SetNoSideEffectCallProperty.\n    NodeTraversal.traverse(\n        compiler, externs, new GatherNoSideEffectFunctions(true));\n    NodeTraversal.traverse(\n        compiler, root, new GatherNoSideEffectFunctions(false));\n\n    NodeTraversal.traverse(compiler, root,\n                           new SetNoSideEffectCallProperty(defFinder));\n  }\n\n```",
+            "method_doc": "This method initializes the `SimpleDefinitionFinder` and processes the AST to gather function nodes with `@nosideeffect` annotations using `GatherNoSideEffectFunctions`. It then sets the `NO_SIDE_EFFECTS` flag for calls to these functions using `SetNoSideEffectCallProperty`.",
+            "class_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls",
+            "class_doc": " Set the NoSideEffects property for function and constructor calls that refer to functions that are known to have no side effects. Current implementation relies on @nosideeffects annotations at function definition sites; eventually we should traverse function bodies to determine if they have side effects.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves processing the AST to identify functions with `@nosideeffect` annotations and setting the `NO_SIDE_EFFECTS` flag for calls to these functions. However, the issue described in the test failures seems to stem from incorrect handling of side effects in function calls rather than an error in this specific method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls$GatherNoSideEffectFunctions::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal traversal, Node node, Node parent) {\n      if (!inExterns && hasNoSideEffectsAnnotation(node)) {\n        traversal.report(node, INVALID_NO_SIDE_EFFECT_ANNOTATION);\n      }\n\n      if (node.isGetProp()) {\n        if (parent.isExprResult() &&\n            hasNoSideEffectsAnnotation(node)) {\n          noSideEffectFunctionNames.add(node);\n        }\n      } else if (node.isFunction()) {\n\n        // The annotation may attached to the function node, the\n        // variable declaration or assignment expression.\n        boolean hasAnnotation = hasNoSideEffectsAnnotation(node);\n        List<Node> nameNodes = Lists.newArrayList();\n        nameNodes.add(node.getFirstChild());\n\n        Node nameNode = null;\n\n        if (parent.isName()) {\n          Node gramp = parent.getParent();\n          if (gramp.isVar() &&\n              gramp.hasOneChild() &&\n              hasNoSideEffectsAnnotation(gramp)) {\n            hasAnnotation = true;\n          }\n\n          nameNodes.add(parent);\n        } else if (parent.isAssign()) {\n          if (hasNoSideEffectsAnnotation(parent)) {\n            hasAnnotation = true;\n          }\n\n          nameNodes.add(parent.getFirstChild());\n        }\n\n        if (hasAnnotation) {\n          noSideEffectFunctionNames.addAll(nameNodes);\n        }\n      }\n    }\n\n```",
+            "method_doc": "This method visits nodes in the AST. If a node has a `@nosideeffect` annotation and is not within the externs, it reports an error. If it's a getter property or a function, it adds the node to the set of no-side-effect function names.",
+            "class_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls",
+            "class_doc": " Set the NoSideEffects property for function and constructor calls that refer to functions that are known to have no side effects. Current implementation relies on @nosideeffects annotations at function definition sites; eventually we should traverse function bodies to determine if they have side effects.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the detection of `@nosideeffect` annotations, which could be related to the issue of incorrect handling of side effects in function calls. However, the method primarily focuses on reporting errors and adding nodes to a set of no-side-effect function names, rather than directly addressing the inlining decision-making process.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)",
+            "method_code": "```java\n  final void analyze(int maxSteps) {\n    initialize();\n    int step = 0;\n    while (!orderedWorkSet.isEmpty()) {\n      if (step > maxSteps) {\n        throw new MaxIterationsExceededException(\n          \"Analysis did not terminate after \" + maxSteps + \" iterations\");\n      }\n      DiGraphNode<N, Branch> curNode = orderedWorkSet.iterator().next();\n      orderedWorkSet.remove(curNode);\n      joinInputs(curNode);\n      if (flow(curNode)) {\n        // If there is a change in the current node, we want to grab the list\n        // of nodes that this node affects.\n        List<DiGraphNode<N, Branch>> nextNodes = isForward() ?\n            cfg.getDirectedSuccNodes(curNode) :\n            cfg.getDirectedPredNodes(curNode);\n        for (DiGraphNode<N, Branch> nextNode : nextNodes) {\n          if (nextNode != cfg.getImplicitReturn()) {\n            orderedWorkSet.add(nextNode);\n          }\n        }\n      }\n      step++;\n    }\n    if (isForward()) {\n      joinInputs(getCfg().getImplicitReturn());\n    }\n  }\n\n```",
+            "method_doc": " Finds a fixed-point solution. The function has the side effect of replacing the existing node annotations with the computed solutions using {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation(Annotation)}.  <p>Initially, each node's input and output flow state contains the value given by {@link #createInitialEstimateLattice()} (with the exception of the entry node of the graph which takes on the {@link #createEntryLattice()} value. Each node will use the output state of its predecessor and compute a output state according to the instruction. At that time, any nodes that depends on the node's newly modified output value will need to recompute their output state again. Each step will perform a computation at one node until no extra computation will modify any existing output state anymore.  @param maxSteps Max number of iterations before the method stops and throw a {@link MaxIterationsExceededException}. This will prevent the analysis from going into a infinite loop. ",
+            "class_name": "com.google.javascript.jscomp.DataFlowAnalysis",
+            "class_doc": " A framework to help writing static program analysis. A subclass of this framework should specify how a single node changes the state of a program. This class finds a safe estimate (a fixed-point) for the whole program. The proven facts about the program will be annotated with {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation} to the given control flow graph's nodes in form of {@link LatticeElement} after calling {@link #analyze()}.  <p>As a guideline, the following is a list of behaviors that any analysis can take: <ol> <li>Flow Direction: Is the analysis a forward or backward analysis? <li>Lattice Elements: How does the analysis represent the state of the program at any given point? <li>JOIN Operation: Given two incoming paths and a lattice state value, what can the compiler conclude at the join point? <li>Flow Equations: How does an instruction modify the state of program in terms of lattice values? <li>Initial Entry Value: What can the compiler assume at the beginning of the program? <li>Initial Estimate: What can the compiler assume at each point of the program? (What is the BOTTOM value of the lattice) By definition this lattice JOIN {@code x} for any {@code x} must also be {@code x}. </ol> To make these behaviors known to the framework, the following steps must be taken. <ol> <li>Flow Direction: Implement {@link #isForward()}. <li>Lattice Elements: Implement {@link LatticeElement}. <li>JOIN Operation: Implement {@link JoinOp#apply}. <li>Flow Equations: Implement {@link #flowThrough(Object, LatticeElement)}. <li>Initial Entry Value: Implement {@link #createEntryLattice()}. <li>Initial Estimate: Implement {@link #createInitialEstimateLattice()}. </ol>  <p>Upon execution of the {@link #analyze()} method, nodes of the input control flow graph will be annotated with a {@link FlowState} object that represents maximum fixed point solution. Any previous annotations at the nodes of the control flow graph will be lost.   @param <N> The control flow graph's node value type. @param <L> Lattice element type. ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the flow analysis process, which could potentially affect how side effects are identified and handled during inlining. However, without further context or specific issues identified within the method, it's difficult to pinpoint exactly where the problem lies.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::flow(DiGraphNode)",
+            "method_code": "```java\n  protected boolean flow(DiGraphNode<N, Branch> node) {\n    FlowState<L> state = node.getAnnotation();\n    if (isForward()) {\n      L outBefore = state.out;\n      state.out = flowThrough(node.getValue(), state.in);\n      return !outBefore.equals(state.out);\n    } else {\n      L inBefore = state.in;\n      state.in = flowThrough(node.getValue(), state.out);\n      return !inBefore.equals(state.in);\n    }\n  }\n\n```",
+            "method_doc": " Performs a single flow through a node.  @return {@code true} if the flow state differs from the previous state. ",
+            "class_name": "com.google.javascript.jscomp.DataFlowAnalysis",
+            "class_doc": " A framework to help writing static program analysis. A subclass of this framework should specify how a single node changes the state of a program. This class finds a safe estimate (a fixed-point) for the whole program. The proven facts about the program will be annotated with {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation} to the given control flow graph's nodes in form of {@link LatticeElement} after calling {@link #analyze()}.  <p>As a guideline, the following is a list of behaviors that any analysis can take: <ol> <li>Flow Direction: Is the analysis a forward or backward analysis? <li>Lattice Elements: How does the analysis represent the state of the program at any given point? <li>JOIN Operation: Given two incoming paths and a lattice state value, what can the compiler conclude at the join point? <li>Flow Equations: How does an instruction modify the state of program in terms of lattice values? <li>Initial Entry Value: What can the compiler assume at the beginning of the program? <li>Initial Estimate: What can the compiler assume at each point of the program? (What is the BOTTOM value of the lattice) By definition this lattice JOIN {@code x} for any {@code x} must also be {@code x}. </ol> To make these behaviors known to the framework, the following steps must be taken. <ol> <li>Flow Direction: Implement {@link #isForward()}. <li>Lattice Elements: Implement {@link LatticeElement}. <li>JOIN Operation: Implement {@link JoinOp#apply}. <li>Flow Equations: Implement {@link #flowThrough(Object, LatticeElement)}. <li>Initial Entry Value: Implement {@link #createEntryLattice()}. <li>Initial Estimate: Implement {@link #createInitialEstimateLattice()}. </ol>  <p>Upon execution of the {@link #analyze()} method, nodes of the input control flow graph will be annotated with a {@link FlowState} object that represents maximum fixed point solution. Any previous annotations at the nodes of the control flow graph will be lost.   @param <N> The control flow graph's node value type. @param <L> Lattice element type. ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the flow of data through nodes in the control flow graph. However, the issue seems to be related to how side effects are being identified and handled, which is not directly addressed in this method.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)",
+            "method_code": "```java\n  protected void joinInputs(DiGraphNode<N, Branch> node) {\n    FlowState<L> state = node.getAnnotation();\n    if (isForward()) {\n      if (cfg.getEntry() == node) {\n        state.setIn(createEntryLattice());\n      } else {\n        List<DiGraphNode<N, Branch>> inNodes = cfg.getDirectedPredNodes(node);\n        if (inNodes.size() == 1) {\n          FlowState<L> inNodeState = inNodes.get(0).getAnnotation();\n          state.setIn(inNodeState.getOut());\n        } else if (inNodes.size() > 1) {\n          List<L> values = new ArrayList<L>(inNodes.size());\n          for (DiGraphNode<N, Branch> currentNode : inNodes) {\n            FlowState<L> currentNodeState = currentNode.getAnnotation();\n            values.add(currentNodeState.getOut());\n          }\n          state.setIn(joinOp.apply(values));\n        }\n      }\n    } else {\n      List<DiGraphNode<N, Branch>> inNodes = cfg.getDirectedSuccNodes(node);\n      if (inNodes.size() == 1) {\n        DiGraphNode<N, Branch> inNode = inNodes.get(0);\n        if (inNode == cfg.getImplicitReturn()) {\n          state.setOut(createEntryLattice());\n        } else {\n          FlowState<L> inNodeState = inNode.getAnnotation();\n          state.setOut(inNodeState.getIn());\n        }\n      } else if (inNodes.size() > 1) {\n        List<L> values = new ArrayList<L>(inNodes.size());\n        for (DiGraphNode<N, Branch> currentNode : inNodes) {\n          FlowState<L> currentNodeState = currentNode.getAnnotation();\n          values.add(currentNodeState.getIn());\n        }\n        state.setOut(joinOp.apply(values));\n      }\n    }\n  }\n\n```",
+            "method_doc": " Computes the new flow state at a given node's entry by merging the output (input) lattice of the node's predecessor (successor).  @param node Node to compute new join. ",
+            "class_name": "com.google.javascript.jscomp.DataFlowAnalysis",
+            "class_doc": " A framework to help writing static program analysis. A subclass of this framework should specify how a single node changes the state of a program. This class finds a safe estimate (a fixed-point) for the whole program. The proven facts about the program will be annotated with {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation} to the given control flow graph's nodes in form of {@link LatticeElement} after calling {@link #analyze()}.  <p>As a guideline, the following is a list of behaviors that any analysis can take: <ol> <li>Flow Direction: Is the analysis a forward or backward analysis? <li>Lattice Elements: How does the analysis represent the state of the program at any given point? <li>JOIN Operation: Given two incoming paths and a lattice state value, what can the compiler conclude at the join point? <li>Flow Equations: How does an instruction modify the state of program in terms of lattice values? <li>Initial Entry Value: What can the compiler assume at the beginning of the program? <li>Initial Estimate: What can the compiler assume at each point of the program? (What is the BOTTOM value of the lattice) By definition this lattice JOIN {@code x} for any {@code x} must also be {@code x}. </ol> To make these behaviors known to the framework, the following steps must be taken. <ol> <li>Flow Direction: Implement {@link #isForward()}. <li>Lattice Elements: Implement {@link LatticeElement}. <li>JOIN Operation: Implement {@link JoinOp#apply}. <li>Flow Equations: Implement {@link #flowThrough(Object, LatticeElement)}. <li>Initial Entry Value: Implement {@link #createEntryLattice()}. <li>Initial Estimate: Implement {@link #createInitialEstimateLattice()}. </ol>  <p>Upon execution of the {@link #analyze()} method, nodes of the input control flow graph will be annotated with a {@link FlowState} object that represents maximum fixed point solution. Any previous annotations at the nodes of the control flow graph will be lost.   @param <N> The control flow graph's node value type. @param <L> Lattice element type. ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the joining of lattice states, which could affect the correctness of data flow analysis. However, it is not directly related to the handling of side effects in function calls, which seems to be the root cause of the issues.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "This method returns `true` indicating that it should always traverse the nodes.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it always returns `true`, which means it does not filter out any nodes during traversal. This could potentially lead to unnecessary processing and might miss important side effect checks. However, it is not directly responsible for identifying side effects, so fixing it alone may not resolve the issue.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it handles the traversal of the parse tree, which could potentially affect how side effects are detected during inlining. However, it does not directly handle the identification of side effects, so it is unlikely to be the primary issue causing the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)",
+            "method_code": "```java\n  void traverseAtScope(Scope s) {\n    Node n = s.getRootNode();\n    if (n.isFunction()) {\n      // We need to do some extra magic to make sure that the scope doesn't\n      // get re-created when we dive into the function.\n      if (inputId == null) {\n        inputId = NodeUtil.getInputId(n);\n      }\n      sourceName = getSourceName(n);\n      curNode = n;\n      pushScope(s);\n\n      Node args = n.getFirstChild().getNext();\n      Node body = args.getNext();\n      traverseBranch(args, n);\n      traverseBranch(body, n);\n\n      popScope();\n    } else {\n      traverseWithScope(n, s);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively with a scope, starting at that scope's root. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it involves traversing the parse tree and handling scopes, which could potentially affect how side effects are identified and handled during inlining. However, without further context, it's difficult to pinpoint exactly where the issue lies.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::createMessageFormatter()",
+            "method_code": "```java\n  private MessageFormatter createMessageFormatter() {\n    boolean colorize = options.shouldColorizeErrorOutput();\n    return options.errorFormat.toFormatter(this, colorize);\n  }\n\n```",
+            "method_doc": " Creates a message formatter instance corresponding to the value of {@link CompilerOptions}. ",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves creating a message formatter based on compiler options, but there is no direct evidence linking it to the issues in the test cases involving side effects and variable handling.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)",
+            "method_code": "```java\n  public void initOptions(CompilerOptions options) {\n    this.options = options;\n    if (errorManager == null) {\n      if (outStream == null) {\n        setErrorManager(\n            new LoggerErrorManager(createMessageFormatter(), logger));\n      } else {\n        PrintStreamErrorManager printer =\n            new PrintStreamErrorManager(createMessageFormatter(), outStream);\n        printer.setSummaryDetailLevel(options.summaryDetailLevel);\n        setErrorManager(printer);\n      }\n    }\n\n    // DiagnosticGroups override the plain checkTypes option.\n    if (options.enables(DiagnosticGroups.CHECK_TYPES)) {\n      options.checkTypes = true;\n    } else if (options.disables(DiagnosticGroups.CHECK_TYPES)) {\n      options.checkTypes = false;\n    } else if (!options.checkTypes) {\n      // If DiagnosticGroups did not override the plain checkTypes\n      // option, and checkTypes is enabled, then turn off the\n      // parser type warnings.\n      options.setWarningLevel(\n          DiagnosticGroup.forType(\n              RhinoErrorReporter.TYPE_PARSE_ERROR),\n          CheckLevel.OFF);\n    }\n\n    if (options.checkGlobalThisLevel.isOn() &&\n        !options.disables(DiagnosticGroups.GLOBAL_THIS)) {\n      options.setWarningLevel(\n          DiagnosticGroups.GLOBAL_THIS,\n          options.checkGlobalThisLevel);\n    }\n\n    if (options.getLanguageIn() == LanguageMode.ECMASCRIPT5_STRICT) {\n      options.setWarningLevel(\n          DiagnosticGroups.ES5_STRICT,\n          CheckLevel.ERROR);\n    }\n\n    // Initialize the warnings guard.\n    List<WarningsGuard> guards = Lists.newArrayList();\n    guards.add(\n        new SuppressDocWarningsGuard(\n            getDiagnosticGroups().getRegisteredGroups()));\n    guards.add(options.getWarningsGuard());\n\n    ComposeWarningsGuard composedGuards = new ComposeWarningsGuard(guards);\n\n    // All passes must run the variable check. This synthesizes\n    // variables later so that the compiler doesn't crash. It also\n    // checks the externs file for validity. If you don't want to warn\n    // about missing variable declarations, we shut that specific\n    // error off.\n    if (!options.checkSymbols &&\n        !composedGuards.enables(DiagnosticGroups.CHECK_VARIABLES)) {\n      composedGuards.addGuard(new DiagnosticGroupWarningsGuard(\n          DiagnosticGroups.CHECK_VARIABLES, CheckLevel.OFF));\n    }\n\n    this.warningsGuard = composedGuards;\n  }\n\n```",
+            "method_doc": " Initialize the compiler options. Only necessary if you're not doing a normal compile() job. ",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it initializes compiler options but does not directly handle function call side effects. However, given its role in setting up the compiler environment, it could indirectly affect how side effects are processed during subsequent operations.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::setErrorManager(ErrorManager)",
+            "method_code": "```java\n  public void setErrorManager(ErrorManager errorManager) {\n    Preconditions.checkNotNull(\n        errorManager, \"the error manager cannot be null\");\n    this.errorManager = errorManager;\n  }\n\n```",
+            "method_doc": " Sets the error manager.  @param errorManager the error manager, it cannot be {@code null} ",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failures seems to be related to the handling of side effects in function calls during the compilation process, rather than the setting of an error manager.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::checkForStateChangeHelper(Node,boolean,AbstractCompiler)",
+            "method_code": "```java\n  private static boolean checkForStateChangeHelper(\n      Node n, boolean checkForNewObjects, AbstractCompiler compiler) {\n    // Rather than id which ops may have side effects, id the ones\n    // that we know to be safe\n    switch (n.getType()) {\n      // other side-effect free statements and expressions\n      case Token.AND:\n      case Token.BLOCK:\n      case Token.EXPR_RESULT:\n      case Token.HOOK:\n      case Token.IF:\n      case Token.IN:\n      case Token.PARAM_LIST:\n      case Token.NUMBER:\n      case Token.OR:\n      case Token.THIS:\n      case Token.TRUE:\n      case Token.FALSE:\n      case Token.NULL:\n      case Token.STRING:\n      case Token.SWITCH:\n      case Token.TRY:\n      case Token.EMPTY:\n        break;\n\n      // Throws are by definition side effects\n      case Token.THROW:\n        return true;\n\n      case Token.OBJECTLIT:\n        if (checkForNewObjects) {\n          return true;\n        }\n        for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {\n          if (checkForStateChangeHelper(\n                  c.getFirstChild(), checkForNewObjects, compiler)) {\n            return true;\n          }\n        }\n        return false;\n\n      case Token.ARRAYLIT:\n      case Token.REGEXP:\n        if (checkForNewObjects) {\n          return true;\n        }\n        break;\n\n      case Token.VAR:    // empty var statement (no declaration)\n      case Token.NAME:   // variable by itself\n        if (n.getFirstChild() != null) {\n          return true;\n        }\n        break;\n\n      case Token.FUNCTION:\n        // Function expressions don't have side-effects, but function\n        // declarations change the namespace. Either way, we don't need to\n        // check the children, since they aren't executed at declaration time.\n        return checkForNewObjects || !isFunctionExpression(n);\n\n      case Token.NEW:\n        if (checkForNewObjects) {\n          return true;\n        }\n\n        if (!constructorCallHasSideEffects(n)) {\n          // loop below will see if the constructor parameters have\n          // side-effects\n          break;\n        }\n        return true;\n\n      case Token.CALL:\n        // calls to functions that have no side effects have the no\n        // side effect property set.\n        if (!functionCallHasSideEffects(n, compiler)) {\n          // loop below will see if the function parameters have\n          // side-effects\n          break;\n        }\n        return true;\n\n      default:\n        if (isSimpleOperatorType(n.getType())) {\n          break;\n        }\n\n        if (isAssignmentOp(n)) {\n          Node assignTarget = n.getFirstChild();\n          if (assignTarget.isName()) {\n            return true;\n          }\n\n          // Assignments will have side effects if\n          // a) The RHS has side effects, or\n          // b) The LHS has side effects, or\n          // c) A name on the LHS will exist beyond the life of this statement.\n          if (checkForStateChangeHelper(\n                  n.getFirstChild(), checkForNewObjects, compiler) ||\n              checkForStateChangeHelper(\n                  n.getLastChild(), checkForNewObjects, compiler)) {\n            return true;\n          }\n\n          if (isGet(assignTarget)) {\n            // If the object being assigned to is a local object, don't\n            // consider this a side-effect as it can't be referenced\n            // elsewhere.  Don't do this recursively as the property might\n            // be an alias of another object, unlike a literal below.\n            Node current = assignTarget.getFirstChild();\n            if (evaluatesToLocalValue(current)) {\n              return false;\n            }\n\n            // A literal value as defined by \"isLiteralValue\" is guaranteed\n            // not to be an alias, or any components which are aliases of\n            // other objects.\n            // If the root object is a literal don't consider this a\n            // side-effect.\n            while (isGet(current)) {\n              current = current.getFirstChild();\n            }\n\n            return !isLiteralValue(current, true);\n          } else {\n            // TODO(johnlenz): remove this code and make this an exception. This\n            // is here only for legacy reasons, the AST is not valid but\n            // preserve existing behavior.\n            return !isLiteralValue(assignTarget, true);\n          }\n        }\n\n        return true;\n    }\n\n    for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {\n      if (checkForStateChangeHelper(c, checkForNewObjects, compiler)) {\n        return true;\n      }\n    }\n\n    return false;\n  }\n\n```",
+            "method_doc": " Returns true if some node in n's subtree changes application state. If {@code checkForNewObjects} is true, we assume that newly created mutable objects (like object literals) change state. Otherwise, we assume that they have no side effects. ",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Inadequate Validation of Inlining Conditions\n**Description:** The validation logic for inlining conditions is inadequate, allowing inlining to proceed under inappropriate circumstances.\n\n**Location:** Likely in the validation logic within the compiler's flow analysis module.\n\n**Observation Support:** The tests consistently show that inlining occurs even when it should not, indicating that there is insufficient validation of the inlining conditions. This suggests a weakness in the validation logic.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for checking whether a node or its subtree changes application state. The failure in the tests indicates that the current implementation of `checkForStateChangeHelper` allows inlining under inappropriate circumstances, suggesting that the validation logic within this method is inadequate. By fixing the validation logic in this method, we can ensure that inlining only proceeds when appropriate, thus resolving the test failures.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables::enterScope(NodeTraversal)",
+            "method_code": "```java\n  @Override\n  public void enterScope(NodeTraversal t) {\n\n    if (t.inGlobalScope()) {\n      return; // Don't even brother. All global variables are likely escaped.\n    }\n\n    if (LiveVariablesAnalysis.MAX_VARIABLES_TO_ANALYZE <\n        t.getScope().getVarCount()) {\n      return;\n    }\n\n    // Compute the forward reaching definition.\n    ControlFlowAnalysis cfa = new ControlFlowAnalysis(compiler, false, true);\n    // Process the body of the function.\n    Preconditions.checkState(t.getScopeRoot().isFunction());\n    cfa.process(null, t.getScopeRoot().getLastChild());\n    cfg = cfa.getCfg();\n    reachingDef = new MustBeReachingVariableDef(cfg, t.getScope(), compiler);\n    reachingDef.analyze();\n    candidates = Lists.newLinkedList();\n\n    // Using the forward reaching definition search to find all the inline\n    // candiates\n    new NodeTraversal(compiler, new GatherCandiates()).traverse(\n        t.getScopeRoot().getLastChild());\n\n    // Compute the backward reaching use. The CFG can be reused.\n    reachingUses = new MaybeReachingVariableUse(cfg, t.getScope(), compiler);\n    reachingUses.analyze();\n    for (Candidate c : candidates) {\n      if (c.canInline()) {\n        c.inlineVariable();\n      }\n    }\n  }\n\n```",
+            "method_doc": "This method initializes the flow-sensitive inlining process by checking if the current scope is global or if the number of variables exceeds the limit. It then computes the forward reaching definition using `ControlFlowAnalysis`, processes the function body, and finds potential inlining candidates using `GatherCandiates`. Afterward, it computes the backward reaching use and inlines the candidates if they meet the criteria defined in `Candidate::canInline`.",
+            "class_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+            "class_doc": " Inline variables when possible. Using the information from {@link MaybeReachingVariableUse} and {@link MustBeReachingVariableDef}, this pass attempts to inline a variable by placing the value at the definition where the variable is used. The basic requirements for inlining are the following:  <ul> <li> There is exactly one reaching definition at the use of that variable </li> <li> There is exactly one use for that definition of the variable </li> </ul>  <p>Other requirements can be found in {@link Candidate#canInline}. Currently this pass does not operate on the global scope due to compilation time.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Lack of Proper Purity Checking for Functions\n**Description:** The compiler lacks proper mechanisms to check whether functions are pure (i.e., side-effect free and referentially transparent).\n\n**Location:** Possibly in the purity checking logic within the compiler's flow analysis module.\n\n**Observation Support:** The tests indicate that functions like `noSFX` are not being correctly classified as pure, leading to inlining attempts that should not occur. This implies a deficiency in the purity checking mechanism.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it involves initializing the flow-sensitive inlining process, which could potentially affect the correctness of inlining decisions made later in the process. However, it is unlikely to be the direct cause of the specific issues observed in the test cases, as these seem to relate to purity checking rather than the initialization of the inlining process.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis$FlowState::getIn()",
+            "method_code": "```java\n    L getIn() {\n      return in;\n    }\n\n```",
+            "method_doc": "Retrieves the input state of the flow.",
+            "class_name": "com.google.javascript.jscomp.DataFlowAnalysis",
+            "class_doc": " A framework to help writing static program analysis. A subclass of this framework should specify how a single node changes the state of a program. This class finds a safe estimate (a fixed-point) for the whole program. The proven facts about the program will be annotated with {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation} to the given control flow graph's nodes in form of {@link LatticeElement} after calling {@link #analyze()}.  <p>As a guideline, the following is a list of behaviors that any analysis can take: <ol> <li>Flow Direction: Is the analysis a forward or backward analysis? <li>Lattice Elements: How does the analysis represent the state of the program at any given point? <li>JOIN Operation: Given two incoming paths and a lattice state value, what can the compiler conclude at the join point? <li>Flow Equations: How does an instruction modify the state of program in terms of lattice values? <li>Initial Entry Value: What can the compiler assume at the beginning of the program? <li>Initial Estimate: What can the compiler assume at each point of the program? (What is the BOTTOM value of the lattice) By definition this lattice JOIN {@code x} for any {@code x} must also be {@code x}. </ol> To make these behaviors known to the framework, the following steps must be taken. <ol> <li>Flow Direction: Implement {@link #isForward()}. <li>Lattice Elements: Implement {@link LatticeElement}. <li>JOIN Operation: Implement {@link JoinOp#apply}. <li>Flow Equations: Implement {@link #flowThrough(Object, LatticeElement)}. <li>Initial Entry Value: Implement {@link #createEntryLattice()}. <li>Initial Estimate: Implement {@link #createInitialEstimateLattice()}. </ol>  <p>Upon execution of the {@link #analyze()} method, nodes of the input control flow graph will be annotated with a {@link FlowState} object that represents maximum fixed point solution. Any previous annotations at the nodes of the control flow graph will be lost.   @param <N> The control flow graph's node value type. @param <L> Lattice element type. ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Insufficient Flow Analysis for Unrecognized Variables\n**Description:** The compiler's flow analysis does not handle unrecognized variables correctly, leading to incorrect inlining decisions.\n\n**Location:** Likely in the flow analysis module, particularly in the part that processes and propagates variable information.\n\n**Observation Support:** The test `testIssue698` involves an unrecognized variable `unknown`. The fact that the compiler attempts to inline operations involving this variable indicates a flaw in the flow analysis's ability to handle unrecognized variables.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the input state of the flow without performing any checks or updates. It could potentially be involved in the issue if there is a problem with how the input state is being handled or updated elsewhere in the flow analysis process.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::parseInputs()",
+            "method_code": "```java\n  Node parseInputs() {\n    boolean devMode = options.devMode != DevMode.OFF;\n\n    // If old roots exist (we are parsing a second time), detach each of the\n    // individual file parse trees.\n    if (externsRoot != null) {\n      externsRoot.detachChildren();\n    }\n    if (jsRoot != null) {\n      jsRoot.detachChildren();\n    }\n\n    // Parse main js sources.\n    jsRoot = IR.block();\n    jsRoot.setIsSyntheticBlock(true);\n\n    externsRoot = IR.block();\n    externsRoot.setIsSyntheticBlock(true);\n\n    externAndJsRoot = IR.block(externsRoot, jsRoot);\n    externAndJsRoot.setIsSyntheticBlock(true);\n\n    if (options.tracer.isOn()) {\n      tracker = new PerformanceTracker(jsRoot, options.tracer);\n      addChangeHandler(tracker.getCodeChangeHandler());\n    }\n\n    Tracer tracer = newTracer(\"parseInputs\");\n\n    try {\n      // Parse externs sources.\n      for (CompilerInput input : externs) {\n        Node n = input.getAstRoot(this);\n        if (hasErrors()) {\n          return null;\n        }\n        externsRoot.addChildToBack(n);\n      }\n\n      // Modules inferred in ProcessCommonJS pass.\n      if (options.transformAMDToCJSModules || options.processCommonJSModules) {\n        processAMDAndCommonJSModules();\n      }\n\n      // Check if inputs need to be rebuilt from modules.\n      boolean staleInputs = false;\n\n      // Check if the sources need to be re-ordered.\n      if (options.dependencyOptions.needsManagement() &&\n          options.closurePass) {\n        for (CompilerInput input : inputs) {\n          // Forward-declare all the provided types, so that they\n          // are not flagged even if they are dropped from the process.\n          for (String provide : input.getProvides()) {\n            getTypeRegistry().forwardDeclareType(provide);\n          }\n        }\n\n        try {\n          inputs =\n              (moduleGraph == null ? new JSModuleGraph(modules) : moduleGraph)\n              .manageDependencies(options.dependencyOptions, inputs);\n          staleInputs = true;\n        } catch (CircularDependencyException e) {\n          report(JSError.make(\n              JSModule.CIRCULAR_DEPENDENCY_ERROR, e.getMessage()));\n\n          // If in IDE mode, we ignore the error and keep going.\n          if (hasErrors()) {\n            return null;\n          }\n        } catch (MissingProvideException e) {\n          report(JSError.make(\n              MISSING_ENTRY_ERROR, e.getMessage()));\n\n          // If in IDE mode, we ignore the error and keep going.\n          if (hasErrors()) {\n            return null;\n          }\n        }\n      }\n\n      for (CompilerInput input : inputs) {\n        Node n = input.getAstRoot(this);\n\n        // Inputs can have a null AST during initial parse.\n        if (n == null) {\n          continue;\n        }\n\n        if (n.getJSDocInfo() != null) {\n          JSDocInfo info = n.getJSDocInfo();\n          if (info.isExterns()) {\n            // If the input file is explicitly marked as an externs file, then\n            // assume the programmer made a mistake and throw it into\n            // the externs pile anyways.\n            externsRoot.addChildToBack(n);\n            input.setIsExtern(true);\n\n            input.getModule().remove(input);\n\n            externs.add(input);\n            staleInputs = true;\n          } else if (info.isNoCompile()) {\n            input.getModule().remove(input);\n            staleInputs = true;\n          }\n        }\n      }\n\n      if (staleInputs) {\n        fillEmptyModules(modules);\n        rebuildInputsFromModules();\n      }\n\n      // Build the AST.\n      for (CompilerInput input : inputs) {\n        Node n = input.getAstRoot(this);\n        if (n == null) {\n          continue;\n        }\n\n        if (devMode) {\n          runSanityCheck();\n          if (hasErrors()) {\n            return null;\n          }\n        }\n\n        if (options.sourceMapOutputPath != null ||\n            options.nameReferenceReportPath != null) {\n\n          // Annotate the nodes in the tree with information from the\n          // input file. This information is used to construct the SourceMap.\n          SourceInformationAnnotator sia =\n              new SourceInformationAnnotator(\n                  input.getName(), options.devMode != DevMode.OFF);\n          NodeTraversal.traverse(this, n, sia);\n        }\n\n        jsRoot.addChildToBack(n);\n      }\n\n      if (hasErrors()) {\n        return null;\n      }\n      return externAndJsRoot;\n    } finally {\n      stopTracer(tracer, \"parseInputs\");\n    }\n  }\n\n```",
+            "method_doc": " Parses the externs and main inputs.  @return A synthetic root node whose two children are the externs root and the main root ",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Insufficient Flow Analysis for Unrecognized Variables\n**Description:** The compiler's flow analysis does not handle unrecognized variables correctly, leading to incorrect inlining decisions.\n\n**Location:** Likely in the flow analysis module, particularly in the part that processes and propagates variable information.\n\n**Observation Support:** The test `testIssue698` involves an unrecognized variable `unknown`. The fact that the compiler attempts to inline operations involving this variable indicates a flaw in the flow analysis's ability to handle unrecognized variables.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the parsing of JavaScript inputs, which could potentially affect variable handling and flow analysis. However, the issue seems to be related to how variables are being handled during inlining rather than the parsing itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::initCompilerOptionsIfTesting()",
+            "method_code": "```java\n  void initCompilerOptionsIfTesting() {\n    if (options == null) {\n      // initialization for tests that don't initialize the compiler\n      // by the normal mechanisms.\n      initOptions(newCompilerOptions());\n    }\n  }\n\n```",
+            "method_doc": "Initializes compiler options if testing, using default settings if none are provided.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes compiler options if testing, but there is no indication that this initialization could be related to the issues observed in the test cases. The errors suggest problems with the `inline` method's logic rather than an issue with initializing compiler options.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::getDefaultErrorReporter()",
+            "method_code": "```java\n  @Override\n  ErrorReporter getDefaultErrorReporter() {\n    return defaultErrorReporter;\n  }\n\n```",
+            "method_doc": "Retrieves the default error reporter.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+            "score": 5.0,
+            "reason": "#5# This method is not the best location that need to be fixed. The failure in the tests seems to be related to the logic of the `inline` method rather than the error reporting mechanism provided by the `getDefaultErrorReporter()` method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::toSource(Node)",
+            "method_code": "```java\n  @Override\n  String toSource(Node n) {\n    initCompilerOptionsIfTesting();\n    return toSource(n, null, true);\n  }\n\n```",
+            "method_doc": " Generates JavaScript source code for an AST, doesn't generate source map info. ",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it generates JavaScript source code from an AST but does not directly handle the logic of inlining or variable handling. The issue seems to lie within the logic of the `inline` method rather than the `toSource` method itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n) {\n    return mayHaveSideEffects(n, null);\n  }\n\n```",
+            "method_doc": " Returns true if the node which may have side effects when executed. ",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it only checks if the node itself may have side effects but does not consider the context in which the node is used. It might miss cases where side effects occur due to the evaluation of the node.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n, AbstractCompiler compiler) {\n    return checkForStateChangeHelper(n, false, compiler);\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.NodeUtil",
+            "class_doc": " NodeUtil contains utilities that get properties from the Node object.  ",
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "test_failure_causes": "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly checks for state changes using the `checkForStateChangeHelper` method. If this helper method incorrectly identifies nodes as having side effects when they do not, it could lead to incorrect inlining decisions. The failing tests suggest that the current implementation allows inlining across side effects, which is not desirable.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()": {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+            "method_code": "```java\n    private boolean canInline() {\n\n      // Cannot inline a parameter.\n      if (defCfgNode.isFunction()) {\n        return false;\n      }\n\n      getDefinition(defCfgNode, null);\n      getNumUseInUseCfgNode(useCfgNode, null);\n\n      // Definition was not found.\n      if (def == null) {\n        return false;\n      }\n\n      // Check that the assignment isn't used as a R-Value.\n      // TODO(user): Certain cases we can still inline.\n      if (def.isAssign() && !NodeUtil.isExprAssign(def.getParent())) {\n        return false;\n      }\n\n\n      // The right of the definition has side effect:\n      // Example, for x:\n      // x = readProp(b), modifyProp(b); print(x);\n      if (checkRightOf(def, defCfgNode, SIDE_EFFECT_PREDICATE)) {\n        return false;\n      }\n\n      // Similar check as the above but this time, all the sub-expressions\n      // left of the use of the variable.\n      // x = readProp(b); modifyProp(b), print(x);\n      if (checkLeftOf(use, useCfgNode, SIDE_EFFECT_PREDICATE)) {\n        return false;\n      }\n\n\n      // TODO(user): Side-effect is ok sometimes. As long as there are no\n      // side-effect function down all paths to the use. Once we have all the\n      // side-effect analysis tool.\n      if (NodeUtil.mayHaveSideEffects(def.getLastChild())) {\n        return false;\n      }\n\n      // TODO(user): We could inline all the uses if the expression is short.\n\n      // Finally we have to make sure that there are no more than one use\n      // in the program and in the CFG node. Even when it is semantically\n      // correctly inlining twice increases code size.\n      if (numUseWithinUseCfgNode != 1) {\n        return false;\n      }\n\n      // Make sure that the name is not within a loop\n      if (NodeUtil.isWithinLoop(use)) {\n        return false;\n      }\n\n\n      Collection<Node> uses = reachingUses.getUses(varName, defCfgNode);\n\n      if (uses.size() != 1) {\n        return false;\n      }\n\n      // We give up inling stuff with R-Value that has GETPROP, GETELEM,\n      // or anything that creates a new object.\n      // Example:\n      // var x = a.b.c; j.c = 1; print(x);\n      // Inlining print(a.b.c) is not safe consider j and be alias to a.b.\n      // TODO(user): We could get more accuracy by looking more in-detail\n      // what j is and what x is trying to into to.\n      if (NodeUtil.has(def.getLastChild(),\n          new Predicate<Node>() {\n              @Override\n              public boolean apply(Node input) {\n                switch (input.getType()) {\n                  case Token.GETELEM:\n                  case Token.GETPROP:\n                  case Token.ARRAYLIT:\n                  case Token.OBJECTLIT:\n                  case Token.REGEXP:\n                  case Token.NEW:\n                    return true;\n                }\n                return false;\n              }\n          },\n          new Predicate<Node>() {\n              @Override\n              public boolean apply(Node input) {\n                // Recurse if the node is not a function.\n                return !input.isFunction();\n              }\n          })) {\n        return false;\n      }\n\n      // We can skip the side effect check along the paths of two nodes if\n      // they are just next to each other.\n      if (NodeUtil.isStatementBlock(defCfgNode.getParent()) &&\n          defCfgNode.getNext() != useCfgNode) {\n        // Similar side effect check as above but this time the side effect is\n        // else where along the path.\n        // x = readProp(b); while(modifyProp(b)) {}; print(x);\n        CheckPathsBetweenNodes<Node, ControlFlowGraph.Branch>\n          pathCheck = new CheckPathsBetweenNodes<Node, ControlFlowGraph.Branch>(\n                 cfg,\n                 cfg.getDirectedGraphNode(defCfgNode),\n                 cfg.getDirectedGraphNode(useCfgNode),\n                 SIDE_EFFECT_PREDICATE,\n                 Predicates.\n                     <DiGraphEdge<Node, ControlFlowGraph.Branch>>alwaysTrue(),\n                 false);\n        if (pathCheck.somePathsSatisfyPredicate()) {\n          return false;\n        }\n      }\n\n      return true;\n    }\n\n```",
+            "method_doc": "This method determines whether a candidate variable can be inlined based on various conditions such as the presence of side effects, the number of uses, and the context within loops."
+        },
+        "com.google.javascript.jscomp.MarkNoSideEffectCalls$SetNoSideEffectCallProperty::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls$SetNoSideEffectCallProperty::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal traversal, Node node, Node parent) {\n      if (!node.isCall() && !node.isNew()) {\n        return;\n      }\n\n      Collection<Definition> definitions =\n          defFinder.getDefinitionsReferencedAt(node.getFirstChild());\n      if (definitions == null) {\n        return;\n      }\n\n      for (Definition def : definitions) {\n        Node lValue = def.getLValue();\n        Preconditions.checkNotNull(lValue);\n        if (!noSideEffectFunctionNames.contains(lValue) &&\n            definitionTypeContainsFunctionType(def)) {\n          return;\n        }\n      }\n\n      node.setSideEffectFlags(Node.NO_SIDE_EFFECTS);\n    }\n\n```",
+            "method_doc": "This method visits nodes in the AST. If a node is a call or new expression, it checks if the referenced function has a `@nosideeffect` annotation. If so, it sets the `NO_SIDE_EFFECTS` flag for the call."
+        },
+        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal t, Node n, Node parent) {\n      DiGraphNode<Node, Branch> graphNode = cfg.getDirectedGraphNode(n);\n      if (graphNode == null) {\n        // Not a CFG node.\n        return;\n      }\n      FlowState<MustDef> state = graphNode.getAnnotation();\n      final MustDef defs = state.getIn();\n      final Node cfgNode = n;\n      AbstractCfgNodeTraversalCallback gatherCb =\n          new AbstractCfgNodeTraversalCallback() {\n\n        @Override\n        public void visit(NodeTraversal t, Node n, Node parent) {\n          if (n.isName()) {\n\n            // Make sure that the name node is purely a read.\n            if ((NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == n)\n                || parent.isVar() || parent.isInc() ||\n                parent.isDec() || parent.isParamList() ||\n                parent.isCatch()) {\n              return;\n            }\n\n            String name = n.getString();\n            if (compiler.getCodingConvention().isExported(name)) {\n              return;\n            }\n\n            Node defNode = reachingDef.getDef(name, cfgNode);\n            // TODO(nicksantos): We need to add some notion of @const outer\n            // scope vars. We can inline those just fine.\n            if (defNode != null &&\n                !reachingDef.dependsOnOuterScopeVars(name, cfgNode)) {\n              candidates.add(new Candidate(name, defNode, n, cfgNode));\n            }\n          }\n        }\n      };\n\n      NodeTraversal.traverse(compiler, cfgNode, gatherCb);\n    }\n\n```",
+            "method_doc": "This method identifies potential inlining candidates by traversing the control flow graph and checking if a variable has a single reaching definition and use within the function."
+        },
+        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()": {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()",
+            "method_code": "```java\n    private void inlineVariable() {\n      Node defParent = def.getParent();\n      Node useParent = use.getParent();\n      if (def.isAssign()) {\n        Node rhs = def.getLastChild();\n        rhs.detachFromParent();\n        // Oh yes! I have grandparent to remove this.\n        Preconditions.checkState(defParent.isExprResult());\n        while (defParent.getParent().isLabel()) {\n          defParent = defParent.getParent();\n        }\n        defParent.detachFromParent();\n        useParent.replaceChild(use, rhs);\n      } else if (defParent.isVar()) {\n        Node rhs = def.getLastChild();\n        def.removeChild(rhs);\n        useParent.replaceChild(use, rhs);\n      } else {\n        Preconditions.checkState(false, \"No other definitions can be inlined.\");\n      }\n      compiler.reportCodeChange();\n    }\n\n```",
+            "method_doc": " Actual transformation. "
+        },
+        "com.google.javascript.jscomp.MarkNoSideEffectCalls::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    SimpleDefinitionFinder defFinder = new SimpleDefinitionFinder(compiler);\n    defFinder.process(externs, root);\n\n    // Gather the list of function nodes that have @nosideeffect annotations.\n    // For use by SetNoSideEffectCallProperty.\n    NodeTraversal.traverse(\n        compiler, externs, new GatherNoSideEffectFunctions(true));\n    NodeTraversal.traverse(\n        compiler, root, new GatherNoSideEffectFunctions(false));\n\n    NodeTraversal.traverse(compiler, root,\n                           new SetNoSideEffectCallProperty(defFinder));\n  }\n\n```",
+            "method_doc": "This method initializes the `SimpleDefinitionFinder` and processes the AST to gather function nodes with `@nosideeffect` annotations using `GatherNoSideEffectFunctions`. It then sets the `NO_SIDE_EFFECTS` flag for calls to these functions using `SetNoSideEffectCallProperty`."
+        },
+        "com.google.javascript.jscomp.MarkNoSideEffectCalls$GatherNoSideEffectFunctions::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.MarkNoSideEffectCalls$GatherNoSideEffectFunctions::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public void visit(NodeTraversal traversal, Node node, Node parent) {\n      if (!inExterns && hasNoSideEffectsAnnotation(node)) {\n        traversal.report(node, INVALID_NO_SIDE_EFFECT_ANNOTATION);\n      }\n\n      if (node.isGetProp()) {\n        if (parent.isExprResult() &&\n            hasNoSideEffectsAnnotation(node)) {\n          noSideEffectFunctionNames.add(node);\n        }\n      } else if (node.isFunction()) {\n\n        // The annotation may attached to the function node, the\n        // variable declaration or assignment expression.\n        boolean hasAnnotation = hasNoSideEffectsAnnotation(node);\n        List<Node> nameNodes = Lists.newArrayList();\n        nameNodes.add(node.getFirstChild());\n\n        Node nameNode = null;\n\n        if (parent.isName()) {\n          Node gramp = parent.getParent();\n          if (gramp.isVar() &&\n              gramp.hasOneChild() &&\n              hasNoSideEffectsAnnotation(gramp)) {\n            hasAnnotation = true;\n          }\n\n          nameNodes.add(parent);\n        } else if (parent.isAssign()) {\n          if (hasNoSideEffectsAnnotation(parent)) {\n            hasAnnotation = true;\n          }\n\n          nameNodes.add(parent.getFirstChild());\n        }\n\n        if (hasAnnotation) {\n          noSideEffectFunctionNames.addAll(nameNodes);\n        }\n      }\n    }\n\n```",
+            "method_doc": "This method visits nodes in the AST. If a node has a `@nosideeffect` annotation and is not within the externs, it reports an error. If it's a getter property or a function, it adds the node to the set of no-side-effect function names."
+        },
+        "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)": {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)",
+            "method_code": "```java\n  final void analyze(int maxSteps) {\n    initialize();\n    int step = 0;\n    while (!orderedWorkSet.isEmpty()) {\n      if (step > maxSteps) {\n        throw new MaxIterationsExceededException(\n          \"Analysis did not terminate after \" + maxSteps + \" iterations\");\n      }\n      DiGraphNode<N, Branch> curNode = orderedWorkSet.iterator().next();\n      orderedWorkSet.remove(curNode);\n      joinInputs(curNode);\n      if (flow(curNode)) {\n        // If there is a change in the current node, we want to grab the list\n        // of nodes that this node affects.\n        List<DiGraphNode<N, Branch>> nextNodes = isForward() ?\n            cfg.getDirectedSuccNodes(curNode) :\n            cfg.getDirectedPredNodes(curNode);\n        for (DiGraphNode<N, Branch> nextNode : nextNodes) {\n          if (nextNode != cfg.getImplicitReturn()) {\n            orderedWorkSet.add(nextNode);\n          }\n        }\n      }\n      step++;\n    }\n    if (isForward()) {\n      joinInputs(getCfg().getImplicitReturn());\n    }\n  }\n\n```",
+            "method_doc": " Finds a fixed-point solution. The function has the side effect of replacing the existing node annotations with the computed solutions using {@link com.google.javascript.jscomp.graph.GraphNode#setAnnotation(Annotation)}.  <p>Initially, each node's input and output flow state contains the value given by {@link #createInitialEstimateLattice()} (with the exception of the entry node of the graph which takes on the {@link #createEntryLattice()} value. Each node will use the output state of its predecessor and compute a output state according to the instruction. At that time, any nodes that depends on the node's newly modified output value will need to recompute their output state again. Each step will perform a computation at one node until no extra computation will modify any existing output state anymore.  @param maxSteps Max number of iterations before the method stops and throw a {@link MaxIterationsExceededException}. This will prevent the analysis from going into a infinite loop. "
+        },
+        "com.google.javascript.jscomp.DataFlowAnalysis::flow(DiGraphNode)": {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::flow(DiGraphNode)",
+            "method_code": "```java\n  protected boolean flow(DiGraphNode<N, Branch> node) {\n    FlowState<L> state = node.getAnnotation();\n    if (isForward()) {\n      L outBefore = state.out;\n      state.out = flowThrough(node.getValue(), state.in);\n      return !outBefore.equals(state.out);\n    } else {\n      L inBefore = state.in;\n      state.in = flowThrough(node.getValue(), state.out);\n      return !inBefore.equals(state.in);\n    }\n  }\n\n```",
+            "method_doc": " Performs a single flow through a node.  @return {@code true} if the flow state differs from the previous state. "
+        },
+        "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)": {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)",
+            "method_code": "```java\n  protected void joinInputs(DiGraphNode<N, Branch> node) {\n    FlowState<L> state = node.getAnnotation();\n    if (isForward()) {\n      if (cfg.getEntry() == node) {\n        state.setIn(createEntryLattice());\n      } else {\n        List<DiGraphNode<N, Branch>> inNodes = cfg.getDirectedPredNodes(node);\n        if (inNodes.size() == 1) {\n          FlowState<L> inNodeState = inNodes.get(0).getAnnotation();\n          state.setIn(inNodeState.getOut());\n        } else if (inNodes.size() > 1) {\n          List<L> values = new ArrayList<L>(inNodes.size());\n          for (DiGraphNode<N, Branch> currentNode : inNodes) {\n            FlowState<L> currentNodeState = currentNode.getAnnotation();\n            values.add(currentNodeState.getOut());\n          }\n          state.setIn(joinOp.apply(values));\n        }\n      }\n    } else {\n      List<DiGraphNode<N, Branch>> inNodes = cfg.getDirectedSuccNodes(node);\n      if (inNodes.size() == 1) {\n        DiGraphNode<N, Branch> inNode = inNodes.get(0);\n        if (inNode == cfg.getImplicitReturn()) {\n          state.setOut(createEntryLattice());\n        } else {\n          FlowState<L> inNodeState = inNode.getAnnotation();\n          state.setOut(inNodeState.getIn());\n        }\n      } else if (inNodes.size() > 1) {\n        List<L> values = new ArrayList<L>(inNodes.size());\n        for (DiGraphNode<N, Branch> currentNode : inNodes) {\n          FlowState<L> currentNodeState = currentNode.getAnnotation();\n          values.add(currentNodeState.getIn());\n        }\n        state.setOut(joinOp.apply(values));\n      }\n    }\n  }\n\n```",
+            "method_doc": " Computes the new flow state at a given node's entry by merging the output (input) lattice of the node's predecessor (successor).  @param node Node to compute new join. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "This method returns `true` indicating that it should always traverse the nodes."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)",
+            "method_code": "```java\n  void traverseAtScope(Scope s) {\n    Node n = s.getRootNode();\n    if (n.isFunction()) {\n      // We need to do some extra magic to make sure that the scope doesn't\n      // get re-created when we dive into the function.\n      if (inputId == null) {\n        inputId = NodeUtil.getInputId(n);\n      }\n      sourceName = getSourceName(n);\n      curNode = n;\n      pushScope(s);\n\n      Node args = n.getFirstChild().getNext();\n      Node body = args.getNext();\n      traverseBranch(args, n);\n      traverseBranch(body, n);\n\n      popScope();\n    } else {\n      traverseWithScope(n, s);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively with a scope, starting at that scope's root. "
+        },
+        "com.google.javascript.jscomp.Compiler::createMessageFormatter()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::createMessageFormatter()",
+            "method_code": "```java\n  private MessageFormatter createMessageFormatter() {\n    boolean colorize = options.shouldColorizeErrorOutput();\n    return options.errorFormat.toFormatter(this, colorize);\n  }\n\n```",
+            "method_doc": " Creates a message formatter instance corresponding to the value of {@link CompilerOptions}. "
+        },
+        "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)": {
+            "method_name": "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)",
+            "method_code": "```java\n  public void initOptions(CompilerOptions options) {\n    this.options = options;\n    if (errorManager == null) {\n      if (outStream == null) {\n        setErrorManager(\n            new LoggerErrorManager(createMessageFormatter(), logger));\n      } else {\n        PrintStreamErrorManager printer =\n            new PrintStreamErrorManager(createMessageFormatter(), outStream);\n        printer.setSummaryDetailLevel(options.summaryDetailLevel);\n        setErrorManager(printer);\n      }\n    }\n\n    // DiagnosticGroups override the plain checkTypes option.\n    if (options.enables(DiagnosticGroups.CHECK_TYPES)) {\n      options.checkTypes = true;\n    } else if (options.disables(DiagnosticGroups.CHECK_TYPES)) {\n      options.checkTypes = false;\n    } else if (!options.checkTypes) {\n      // If DiagnosticGroups did not override the plain checkTypes\n      // option, and checkTypes is enabled, then turn off the\n      // parser type warnings.\n      options.setWarningLevel(\n          DiagnosticGroup.forType(\n              RhinoErrorReporter.TYPE_PARSE_ERROR),\n          CheckLevel.OFF);\n    }\n\n    if (options.checkGlobalThisLevel.isOn() &&\n        !options.disables(DiagnosticGroups.GLOBAL_THIS)) {\n      options.setWarningLevel(\n          DiagnosticGroups.GLOBAL_THIS,\n          options.checkGlobalThisLevel);\n    }\n\n    if (options.getLanguageIn() == LanguageMode.ECMASCRIPT5_STRICT) {\n      options.setWarningLevel(\n          DiagnosticGroups.ES5_STRICT,\n          CheckLevel.ERROR);\n    }\n\n    // Initialize the warnings guard.\n    List<WarningsGuard> guards = Lists.newArrayList();\n    guards.add(\n        new SuppressDocWarningsGuard(\n            getDiagnosticGroups().getRegisteredGroups()));\n    guards.add(options.getWarningsGuard());\n\n    ComposeWarningsGuard composedGuards = new ComposeWarningsGuard(guards);\n\n    // All passes must run the variable check. This synthesizes\n    // variables later so that the compiler doesn't crash. It also\n    // checks the externs file for validity. If you don't want to warn\n    // about missing variable declarations, we shut that specific\n    // error off.\n    if (!options.checkSymbols &&\n        !composedGuards.enables(DiagnosticGroups.CHECK_VARIABLES)) {\n      composedGuards.addGuard(new DiagnosticGroupWarningsGuard(\n          DiagnosticGroups.CHECK_VARIABLES, CheckLevel.OFF));\n    }\n\n    this.warningsGuard = composedGuards;\n  }\n\n```",
+            "method_doc": " Initialize the compiler options. Only necessary if you're not doing a normal compile() job. "
+        },
+        "com.google.javascript.jscomp.Compiler::setErrorManager(ErrorManager)": {
+            "method_name": "com.google.javascript.jscomp.Compiler::setErrorManager(ErrorManager)",
+            "method_code": "```java\n  public void setErrorManager(ErrorManager errorManager) {\n    Preconditions.checkNotNull(\n        errorManager, \"the error manager cannot be null\");\n    this.errorManager = errorManager;\n  }\n\n```",
+            "method_doc": " Sets the error manager.  @param errorManager the error manager, it cannot be {@code null} "
+        },
+        "com.google.javascript.jscomp.NodeUtil::checkForStateChangeHelper(Node,boolean,AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::checkForStateChangeHelper(Node,boolean,AbstractCompiler)",
+            "method_code": "```java\n  private static boolean checkForStateChangeHelper(\n      Node n, boolean checkForNewObjects, AbstractCompiler compiler) {\n    // Rather than id which ops may have side effects, id the ones\n    // that we know to be safe\n    switch (n.getType()) {\n      // other side-effect free statements and expressions\n      case Token.AND:\n      case Token.BLOCK:\n      case Token.EXPR_RESULT:\n      case Token.HOOK:\n      case Token.IF:\n      case Token.IN:\n      case Token.PARAM_LIST:\n      case Token.NUMBER:\n      case Token.OR:\n      case Token.THIS:\n      case Token.TRUE:\n      case Token.FALSE:\n      case Token.NULL:\n      case Token.STRING:\n      case Token.SWITCH:\n      case Token.TRY:\n      case Token.EMPTY:\n        break;\n\n      // Throws are by definition side effects\n      case Token.THROW:\n        return true;\n\n      case Token.OBJECTLIT:\n        if (checkForNewObjects) {\n          return true;\n        }\n        for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {\n          if (checkForStateChangeHelper(\n                  c.getFirstChild(), checkForNewObjects, compiler)) {\n            return true;\n          }\n        }\n        return false;\n\n      case Token.ARRAYLIT:\n      case Token.REGEXP:\n        if (checkForNewObjects) {\n          return true;\n        }\n        break;\n\n      case Token.VAR:    // empty var statement (no declaration)\n      case Token.NAME:   // variable by itself\n        if (n.getFirstChild() != null) {\n          return true;\n        }\n        break;\n\n      case Token.FUNCTION:\n        // Function expressions don't have side-effects, but function\n        // declarations change the namespace. Either way, we don't need to\n        // check the children, since they aren't executed at declaration time.\n        return checkForNewObjects || !isFunctionExpression(n);\n\n      case Token.NEW:\n        if (checkForNewObjects) {\n          return true;\n        }\n\n        if (!constructorCallHasSideEffects(n)) {\n          // loop below will see if the constructor parameters have\n          // side-effects\n          break;\n        }\n        return true;\n\n      case Token.CALL:\n        // calls to functions that have no side effects have the no\n        // side effect property set.\n        if (!functionCallHasSideEffects(n, compiler)) {\n          // loop below will see if the function parameters have\n          // side-effects\n          break;\n        }\n        return true;\n\n      default:\n        if (isSimpleOperatorType(n.getType())) {\n          break;\n        }\n\n        if (isAssignmentOp(n)) {\n          Node assignTarget = n.getFirstChild();\n          if (assignTarget.isName()) {\n            return true;\n          }\n\n          // Assignments will have side effects if\n          // a) The RHS has side effects, or\n          // b) The LHS has side effects, or\n          // c) A name on the LHS will exist beyond the life of this statement.\n          if (checkForStateChangeHelper(\n                  n.getFirstChild(), checkForNewObjects, compiler) ||\n              checkForStateChangeHelper(\n                  n.getLastChild(), checkForNewObjects, compiler)) {\n            return true;\n          }\n\n          if (isGet(assignTarget)) {\n            // If the object being assigned to is a local object, don't\n            // consider this a side-effect as it can't be referenced\n            // elsewhere.  Don't do this recursively as the property might\n            // be an alias of another object, unlike a literal below.\n            Node current = assignTarget.getFirstChild();\n            if (evaluatesToLocalValue(current)) {\n              return false;\n            }\n\n            // A literal value as defined by \"isLiteralValue\" is guaranteed\n            // not to be an alias, or any components which are aliases of\n            // other objects.\n            // If the root object is a literal don't consider this a\n            // side-effect.\n            while (isGet(current)) {\n              current = current.getFirstChild();\n            }\n\n            return !isLiteralValue(current, true);\n          } else {\n            // TODO(johnlenz): remove this code and make this an exception. This\n            // is here only for legacy reasons, the AST is not valid but\n            // preserve existing behavior.\n            return !isLiteralValue(assignTarget, true);\n          }\n        }\n\n        return true;\n    }\n\n    for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {\n      if (checkForStateChangeHelper(c, checkForNewObjects, compiler)) {\n        return true;\n      }\n    }\n\n    return false;\n  }\n\n```",
+            "method_doc": " Returns true if some node in n's subtree changes application state. If {@code checkForNewObjects} is true, we assume that newly created mutable objects (like object literals) change state. Otherwise, we assume that they have no side effects. "
+        },
+        "com.google.javascript.jscomp.FlowSensitiveInlineVariables::enterScope(NodeTraversal)": {
+            "method_name": "com.google.javascript.jscomp.FlowSensitiveInlineVariables::enterScope(NodeTraversal)",
+            "method_code": "```java\n  @Override\n  public void enterScope(NodeTraversal t) {\n\n    if (t.inGlobalScope()) {\n      return; // Don't even brother. All global variables are likely escaped.\n    }\n\n    if (LiveVariablesAnalysis.MAX_VARIABLES_TO_ANALYZE <\n        t.getScope().getVarCount()) {\n      return;\n    }\n\n    // Compute the forward reaching definition.\n    ControlFlowAnalysis cfa = new ControlFlowAnalysis(compiler, false, true);\n    // Process the body of the function.\n    Preconditions.checkState(t.getScopeRoot().isFunction());\n    cfa.process(null, t.getScopeRoot().getLastChild());\n    cfg = cfa.getCfg();\n    reachingDef = new MustBeReachingVariableDef(cfg, t.getScope(), compiler);\n    reachingDef.analyze();\n    candidates = Lists.newLinkedList();\n\n    // Using the forward reaching definition search to find all the inline\n    // candiates\n    new NodeTraversal(compiler, new GatherCandiates()).traverse(\n        t.getScopeRoot().getLastChild());\n\n    // Compute the backward reaching use. The CFG can be reused.\n    reachingUses = new MaybeReachingVariableUse(cfg, t.getScope(), compiler);\n    reachingUses.analyze();\n    for (Candidate c : candidates) {\n      if (c.canInline()) {\n        c.inlineVariable();\n      }\n    }\n  }\n\n```",
+            "method_doc": "This method initializes the flow-sensitive inlining process by checking if the current scope is global or if the number of variables exceeds the limit. It then computes the forward reaching definition using `ControlFlowAnalysis`, processes the function body, and finds potential inlining candidates using `GatherCandiates`. Afterward, it computes the backward reaching use and inlines the candidates if they meet the criteria defined in `Candidate::canInline`."
+        },
+        "com.google.javascript.jscomp.DataFlowAnalysis$FlowState::getIn()": {
+            "method_name": "com.google.javascript.jscomp.DataFlowAnalysis$FlowState::getIn()",
+            "method_code": "```java\n    L getIn() {\n      return in;\n    }\n\n```",
+            "method_doc": "Retrieves the input state of the flow."
+        },
+        "com.google.javascript.jscomp.Compiler::parseInputs()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::parseInputs()",
+            "method_code": "```java\n  Node parseInputs() {\n    boolean devMode = options.devMode != DevMode.OFF;\n\n    // If old roots exist (we are parsing a second time), detach each of the\n    // individual file parse trees.\n    if (externsRoot != null) {\n      externsRoot.detachChildren();\n    }\n    if (jsRoot != null) {\n      jsRoot.detachChildren();\n    }\n\n    // Parse main js sources.\n    jsRoot = IR.block();\n    jsRoot.setIsSyntheticBlock(true);\n\n    externsRoot = IR.block();\n    externsRoot.setIsSyntheticBlock(true);\n\n    externAndJsRoot = IR.block(externsRoot, jsRoot);\n    externAndJsRoot.setIsSyntheticBlock(true);\n\n    if (options.tracer.isOn()) {\n      tracker = new PerformanceTracker(jsRoot, options.tracer);\n      addChangeHandler(tracker.getCodeChangeHandler());\n    }\n\n    Tracer tracer = newTracer(\"parseInputs\");\n\n    try {\n      // Parse externs sources.\n      for (CompilerInput input : externs) {\n        Node n = input.getAstRoot(this);\n        if (hasErrors()) {\n          return null;\n        }\n        externsRoot.addChildToBack(n);\n      }\n\n      // Modules inferred in ProcessCommonJS pass.\n      if (options.transformAMDToCJSModules || options.processCommonJSModules) {\n        processAMDAndCommonJSModules();\n      }\n\n      // Check if inputs need to be rebuilt from modules.\n      boolean staleInputs = false;\n\n      // Check if the sources need to be re-ordered.\n      if (options.dependencyOptions.needsManagement() &&\n          options.closurePass) {\n        for (CompilerInput input : inputs) {\n          // Forward-declare all the provided types, so that they\n          // are not flagged even if they are dropped from the process.\n          for (String provide : input.getProvides()) {\n            getTypeRegistry().forwardDeclareType(provide);\n          }\n        }\n\n        try {\n          inputs =\n              (moduleGraph == null ? new JSModuleGraph(modules) : moduleGraph)\n              .manageDependencies(options.dependencyOptions, inputs);\n          staleInputs = true;\n        } catch (CircularDependencyException e) {\n          report(JSError.make(\n              JSModule.CIRCULAR_DEPENDENCY_ERROR, e.getMessage()));\n\n          // If in IDE mode, we ignore the error and keep going.\n          if (hasErrors()) {\n            return null;\n          }\n        } catch (MissingProvideException e) {\n          report(JSError.make(\n              MISSING_ENTRY_ERROR, e.getMessage()));\n\n          // If in IDE mode, we ignore the error and keep going.\n          if (hasErrors()) {\n            return null;\n          }\n        }\n      }\n\n      for (CompilerInput input : inputs) {\n        Node n = input.getAstRoot(this);\n\n        // Inputs can have a null AST during initial parse.\n        if (n == null) {\n          continue;\n        }\n\n        if (n.getJSDocInfo() != null) {\n          JSDocInfo info = n.getJSDocInfo();\n          if (info.isExterns()) {\n            // If the input file is explicitly marked as an externs file, then\n            // assume the programmer made a mistake and throw it into\n            // the externs pile anyways.\n            externsRoot.addChildToBack(n);\n            input.setIsExtern(true);\n\n            input.getModule().remove(input);\n\n            externs.add(input);\n            staleInputs = true;\n          } else if (info.isNoCompile()) {\n            input.getModule().remove(input);\n            staleInputs = true;\n          }\n        }\n      }\n\n      if (staleInputs) {\n        fillEmptyModules(modules);\n        rebuildInputsFromModules();\n      }\n\n      // Build the AST.\n      for (CompilerInput input : inputs) {\n        Node n = input.getAstRoot(this);\n        if (n == null) {\n          continue;\n        }\n\n        if (devMode) {\n          runSanityCheck();\n          if (hasErrors()) {\n            return null;\n          }\n        }\n\n        if (options.sourceMapOutputPath != null ||\n            options.nameReferenceReportPath != null) {\n\n          // Annotate the nodes in the tree with information from the\n          // input file. This information is used to construct the SourceMap.\n          SourceInformationAnnotator sia =\n              new SourceInformationAnnotator(\n                  input.getName(), options.devMode != DevMode.OFF);\n          NodeTraversal.traverse(this, n, sia);\n        }\n\n        jsRoot.addChildToBack(n);\n      }\n\n      if (hasErrors()) {\n        return null;\n      }\n      return externAndJsRoot;\n    } finally {\n      stopTracer(tracer, \"parseInputs\");\n    }\n  }\n\n```",
+            "method_doc": " Parses the externs and main inputs.  @return A synthetic root node whose two children are the externs root and the main root "
+        },
+        "com.google.javascript.jscomp.Compiler::initCompilerOptionsIfTesting()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::initCompilerOptionsIfTesting()",
+            "method_code": "```java\n  void initCompilerOptionsIfTesting() {\n    if (options == null) {\n      // initialization for tests that don't initialize the compiler\n      // by the normal mechanisms.\n      initOptions(newCompilerOptions());\n    }\n  }\n\n```",
+            "method_doc": "Initializes compiler options if testing, using default settings if none are provided."
+        },
+        "com.google.javascript.jscomp.Compiler::getDefaultErrorReporter()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::getDefaultErrorReporter()",
+            "method_code": "```java\n  @Override\n  ErrorReporter getDefaultErrorReporter() {\n    return defaultErrorReporter;\n  }\n\n```",
+            "method_doc": "Retrieves the default error reporter."
+        },
+        "com.google.javascript.jscomp.Compiler::toSource(Node)": {
+            "method_name": "com.google.javascript.jscomp.Compiler::toSource(Node)",
+            "method_code": "```java\n  @Override\n  String toSource(Node n) {\n    initCompilerOptionsIfTesting();\n    return toSource(n, null, true);\n  }\n\n```",
+            "method_doc": " Generates JavaScript source code for an AST, doesn't generate source map info. "
+        },
+        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n) {\n    return mayHaveSideEffects(n, null);\n  }\n\n```",
+            "method_doc": " Returns true if the node which may have side effects when executed. "
+        },
+        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+            "method_code": "```java\n  static boolean mayHaveSideEffects(Node n, AbstractCompiler compiler) {\n    return checkForStateChangeHelper(n, false, compiler);\n  }\n\n```",
+            "method_doc": ""
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.FlowSensitiveInlineVariablesTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of Side Effects in Function Calls\n**Description:** The compiler incorrectly identifies side effects in function calls, leading to incorrect decisions about whether to inline those calls.\n\n**Location:** Likely in the logic responsible for identifying side effects within function calls in the compiler's flow analysis module.\n\n**Observation Support:** All three tests involve functions with side effects (`print`, `noSFX`) that are not properly identified as such, allowing the compiler to attempt inlining despite the potential side effects. This suggests a flaw in how side effects are detected and handled.",
+                "Lack of Proper Purity Checking for Functions\n**Description:** The compiler lacks proper mechanisms to check whether functions are pure (i.e., side-effect free and referentially transparent).\n\n**Location:** Possibly in the purity checking logic within the compiler's flow analysis module.\n\n**Observation Support:** The tests indicate that functions like `noSFX` are not being correctly classified as pure, leading to inlining attempts that should not occur. This implies a deficiency in the purity checking mechanism.",
+                "Insufficient Flow Analysis for Unrecognized Variables\n**Description:** The compiler's flow analysis does not handle unrecognized variables correctly, leading to incorrect inlining decisions.\n\n**Location:** Likely in the flow analysis module, particularly in the part that processes and propagates variable information.\n\n**Observation Support:** The test `testIssue698` involves an unrecognized variable `unknown`. The fact that the compiler attempts to inline operations involving this variable indicates a flaw in the flow analysis's ability to handle unrecognized variables.",
+                "Misinterpretation of Inline Method Logic\n**Description:** There is a misinterpretation or bug in the logic of the `inline` method, causing it to allow inlining under conditions that should not permit it.\n\n**Location:** Within the implementation of the `inline` method in the compiler.\n\n**Observation Support:** The `inline` method is supposed to prevent inlining under certain conditions (e.g., presence of side effects). However, the tests show that inlining still occurs, suggesting a bug in the `inline` method's logic.",
+                "Inadequate Validation of Inlining Conditions\n**Description:** The validation logic for inlining conditions is inadequate, allowing inlining to proceed under inappropriate circumstances.\n\n**Location:** Likely in the validation logic within the compiler's flow analysis module.\n\n**Observation Support:** The tests consistently show that inlining occurs even when it should not, indicating that there is insufficient validation of the inlining conditions. This suggests a weakness in the validation logic."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    8,
+                    7.0
+                ],
+                "2": [
+                    8,
+                    6.0
+                ],
+                "3": [
+                    5,
+                    5.0
+                ],
+                "4": [
+                    5,
+                    5.0
+                ],
+                "5": [
+                    8,
+                    7.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+                    "com.google.javascript.jscomp.MarkNoSideEffectCalls",
+                    "com.google.javascript.jscomp.DataFlowAnalysis",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.Compiler"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+                    "com.google.javascript.jscomp.parsing.Annotation"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+                    "com.google.javascript.jscomp.DataFlowAnalysis",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.Compiler"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+                    "com.google.javascript.jscomp.Compiler",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.jscomp.AbstractCompiler"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables",
+                    "com.google.javascript.jscomp.DataFlowAnalysis",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.jscomp.Compiler"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables": [
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()"
+                    ],
+                    "com.google.javascript.jscomp.MarkNoSideEffectCalls": [
+                        "com.google.javascript.jscomp.MarkNoSideEffectCalls::process(Node,Node)",
+                        "com.google.javascript.jscomp.MarkNoSideEffectCalls$GatherNoSideEffectFunctions::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.MarkNoSideEffectCalls$SetNoSideEffectCallProperty::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.DataFlowAnalysis": [
+                        "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis::flow(DiGraphNode)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)"
+                    ],
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::setErrorManager(ErrorManager)",
+                        "com.google.javascript.jscomp.Compiler::createMessageFormatter()",
+                        "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables": [
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables::enterScope(NodeTraversal)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables": [
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()"
+                    ],
+                    "com.google.javascript.jscomp.DataFlowAnalysis": [
+                        "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis$FlowState::getIn()"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)"
+                    ],
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::parseInputs()",
+                        "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)",
+                        "com.google.javascript.jscomp.Compiler::createMessageFormatter()"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables": [
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()"
+                    ],
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::initCompilerOptionsIfTesting()",
+                        "com.google.javascript.jscomp.Compiler::getDefaultErrorReporter()",
+                        "com.google.javascript.jscomp.Compiler::toSource(Node)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)"
+                    ],
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+                        "com.google.javascript.jscomp.NodeUtil::checkForStateChangeHelper(Node,boolean,AbstractCompiler)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.FlowSensitiveInlineVariables": [
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$GatherCandiates::visit(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::canInline()",
+                        "com.google.javascript.jscomp.FlowSensitiveInlineVariables$Candidate::inlineVariable()"
+                    ],
+                    "com.google.javascript.jscomp.DataFlowAnalysis": [
+                        "com.google.javascript.jscomp.DataFlowAnalysis::analyze(int)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis::flow(DiGraphNode)",
+                        "com.google.javascript.jscomp.DataFlowAnalysis::joinInputs(DiGraphNode)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseAtScope(Scope)"
+                    ],
+                    "com.google.javascript.jscomp.NodeUtil": [
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node)",
+                        "com.google.javascript.jscomp.NodeUtil::mayHaveSideEffects(Node,AbstractCompiler)",
+                        "com.google.javascript.jscomp.NodeUtil::checkForStateChangeHelper(Node,boolean,AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::setErrorManager(ErrorManager)",
+                        "com.google.javascript.jscomp.Compiler::createMessageFormatter()",
+                        "com.google.javascript.jscomp.Compiler::initOptions(CompilerOptions)"
+                    ]
+                }
+            }
+        }
+    ]
+}

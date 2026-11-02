@@ -1,0 +1,1006 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.TypeCheck",
+        "com.google.javascript.rhino.jstype.JSTypeRegistry",
+        "com.google.javascript.jscomp.JSError",
+        "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter",
+        "com.google.javascript.jscomp.JsAst",
+        "com.google.javascript.jscomp.NodeTraversal",
+        "com.google.javascript.rhino.jstype.ObjectType",
+        "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter",
+        "com.google.javascript.rhino.jstype.FunctionType",
+        "com.google.javascript.jscomp.CompilerInput"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.STRING_KEY:\n        typeable = false;\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE:\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        // We do not want to warn about explicit comparisons to VOID. People\n        // often do this if they think their type annotations screwed up.\n        //\n        // We do want to warn about cases where people compare things like\n        // (Array|null) == (Function|null)\n        // because it probably means they screwed up.\n        //\n        // This heuristic here is not perfect, but should catch cases we\n        // care about without too many false negatives.\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n\n        TernaryValue result = TernaryValue.UNKNOWN;\n        if (n.getType() == Token.EQ || n.getType() == Token.NE) {\n          result = leftTypeRestricted.testForEquality(\n              rightTypeRestricted);\n          if (n.isNE()) {\n            result = result.not();\n          }\n        } else {\n          // SHEQ or SHNE\n          if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                  rightTypeRestricted)) {\n            result = n.getType() == Token.SHEQ ?\n                TernaryValue.FALSE : TernaryValue.TRUE;\n          }\n        }\n\n        if (result != TernaryValue.UNKNOWN) {\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it handles various types of JavaScript nodes and performs type checks. The failure in the test suggests that there might be an issue with how the method handles certain types, particularly interfaces and objects. Given the nature of the method, fixing issues within it would likely resolve the test failures.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 8,
+                "3": 8,
+                "4": 8,
+                "5": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType findPropertyType(String propertyName) {\n    return hasProperty(propertyName) ?\n        getPropertyType(propertyName) : null;\n  }\n\n```",
+            "method_doc": "This method retrieves the type of a property if it exists. Otherwise, it returns `null`.",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it directly handles the retrieval of property types from an object type. The issue described in the test failure involves the incorrect handling of the return type when retrieving properties, which suggests that the logic within this method might be flawed. By fixing the implementation of `findPropertyType`, we can ensure that the correct type is returned, thus resolving the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 8
+            },
+            "rank_key": [
+                1,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is explicitly declared by the programmer. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it directly involves the definition of properties on an object type. The issue described in the test failure suggests that there might be a problem with how properties are being declared or handled within this method, particularly when dealing with interfaces like `TwoNumbers`. By ensuring that the property definitions are correctly registered and handled, this method could help resolve the inconsistency in the return type.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineInferredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    StaticSlot<JSType> originalSlot = getSlot(propertyName);\n    if (hasProperty(propertyName)) {\n      if (isPropertyTypeDeclared(propertyName)) {\n        // We never want to hide a declared property with an inferred property.\n        return true;\n      }\n      JSType originalType = getPropertyType(propertyName);\n      type = originalType == null ? type :\n          originalType.getLeastSupertype(type);\n    }\n\n    boolean result = defineProperty(propertyName, type, true,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is inferred. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the inferred definition of property that might later be accessed using {@code getPropertyNode}. ",
+            "class_name": "com.google.javascript.rhino.jstype.ObjectType",
+            "class_doc": " Object type.  In JavaScript, all object types have properties, and each of those properties has a type. Property types may be DECLARED, INFERRED, or UNKNOWN.  DECLARED properties have an explicit type annotation, as in: <code> xx @type {number} x/ Foo.prototype.bar = 1; </code> This property may only hold number values, and an assignment to any other type of value is an error.  INFERRED properties do not have an explicit type annotation. Rather, we try to find all the possible types that this property can hold. <code> Foo.prototype.bar = 1; </code> If the programmer assigns other types of values to this property, the property will take on the union of all these types.  UNKNOWN properties are properties on the UNKNOWN type. The UNKNOWN type has all properties, but we do not know whether they are declared or inferred.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 7.0,
+            "reason": "#7# This method is likely to be the best location that needs to be fixed, because it handles the definition of properties, including inferred ones. The issue seems related to how the type system infers and manages properties, which directly impacts the behavior of methods like `f()` that return objects of interfaces.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 7
+            },
+            "rank_key": [
+                1,
+                7.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+            "method_code": "```java\n  public void check(Node node, boolean externs) {\n    Preconditions.checkNotNull(node);\n\n    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);\n    inExterns = externs;\n    t.traverseWithScope(node, topScope);\n    if (externs) {\n      inferJSDocInfo.process(node, null);\n    } else {\n      inferJSDocInfo.process(null, node);\n    }\n  }\n\n```",
+            "method_doc": "This method initializes a `NodeTraversal` object, sets the `inExterns` flag, and traverses the node using the `visit` method.",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes a `NodeTraversal` object and traverses the node, which could potentially affect type checking. However, the issue described seems to be related to the interface definition and its usage, rather than the traversal logic itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "4": 7,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. ",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious as it resets various internal state of the JSTypeRegistry, which could potentially affect the behavior of type checking during subsequent runs. However, without further context about the root cause of the issue, it's difficult to pinpoint if this method is directly responsible for the failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 5,
+                "3": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type is an interface. Compares `kind` with `Kind.INTERFACE`.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it correctly identifies whether a function type is an interface based on its kind. However, the issue lies elsewhere in the codebase, specifically in how interfaces are being handled during type checking. The `isInterface()` method itself does not appear to be the root cause of the problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Retrieves the return type of the function.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it directly returns the return type stored in the `call` object. However, the issue seems to stem from how the type is being inferred or checked elsewhere in the codebase, rather than a fundamental flaw in this method itself.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()",
+            "method_code": "```java\n  public boolean isReturnTypeInferred() {\n    return call.returnTypeInferred;\n  }\n\n```",
+            "method_doc": "Checks if the return type is inferred.",
+            "class_name": "com.google.javascript.rhino.jstype.FunctionType",
+            "class_doc": " This derived type provides extended information about a function, including its return type and argument types.<p>  Note: the parameters list is the LP node that is the parent of the actual NAME node containing the parsed argument list (annotated with JSDOC_TYPE_PROP's for the compile-time type of each argument. ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it checks if the return type is inferred, which could be related to the issue of inconsistent return types. However, the root cause seems to be the incorrect handling of the `TwoNumbers` interface and the initialization of `SOME_DEFAULT`. Fixing this method alone may not resolve the underlying problem.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 5
+            },
+            "rank_key": [
+                1,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Preconditions.checkNotNull(scopeCreator);\n    Preconditions.checkNotNull(topScope);\n\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    if (externsRoot != null) {\n      check(externsRoot, true);\n    }\n    check(jsRoot, false);\n  }\n\n```",
+            "method_doc": " Main entry point for this phase of processing. This follows the pattern for JSCompiler phases.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 2.0,
+            "reason": "#2# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the type checking of variables and interfaces, which is handled within the TypeCheck class itself rather than in the process method. The process method appears to be a general entry point for type checking, while the specific type-related issues are likely addressed in other methods within the same class.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 2,
+                "4": 5,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                2.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message indicates issues with the type inference related to the `TwoNumbers` interface and its usage in the `f` function. The `getErrorReporter()` method simply returns an error reporter instance and does not directly contribute to the type checking logic. Therefore, it is unlikely that fixing this method alone would resolve the test failure.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0,
+                "5": 5
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Returns whether this type registry tolerates undefined values.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the handling of interfaces and their initialization, rather than the tolerance of undefined values in the type registry.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                3
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter::ChainableReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)",
+            "method_code": "```java\n  public ChainableReverseAbstractInterpreter(CodingConvention convention,\n      JSTypeRegistry typeRegistry) {\n    Preconditions.checkNotNull(convention);\n    this.convention = convention;\n    this.typeRegistry = typeRegistry;\n    firstLink = this;\n    nextLink = null;\n  }\n\n```",
+            "method_doc": " Constructs an interpreter, which is the only link in a chain. Interpreters can be appended using {@link #append}. ",
+            "class_name": "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter",
+            "class_doc": " Chainable reverse abstract interpreter providing basic functionality.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the type inference of the `TwoNumbers` interface, not directly with the `ChainableReverseAbstractInterpreter` constructor.",
+            "hypothesis": 3,
+            "selected_hypothesis": true,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 0
+            },
+            "rank_key": [
+                1,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitReturn(NodeTraversal,Node)",
+            "method_code": "```java\n  private void visitReturn(NodeTraversal t, Node n) {\n    Node function = t.getEnclosingFunction();\n\n    // This is a misplaced return, but the real JS will fail to compile,\n    // so let it go.\n    if (function == null) {\n      return;\n    }\n    JSType jsType = getJSType(function);\n\n    if (jsType.isFunctionType()) {\n      FunctionType functionType = jsType.toMaybeFunctionType();\n\n      JSType returnType = functionType.getReturnType();\n\n      // if no return type is specified, undefined must be returned\n      // (it's a void function)\n      if (returnType == null) {\n        returnType = getNativeType(VOID_TYPE);\n      }\n\n      // fetching the returned value's type\n      Node valueNode = n.getFirstChild();\n      JSType actualReturnType;\n      if (valueNode == null) {\n        actualReturnType = getNativeType(VOID_TYPE);\n        valueNode = n;\n      } else {\n        actualReturnType = getJSType(valueNode);\n      }\n\n      // verifying\n      validator.expectCanAssignTo(t, valueNode, actualReturnType, returnType,\n          \"inconsistent return type\");\n    }\n  }\n\n```",
+            "method_doc": " Visits a RETURN node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Null Check in Function Return\n**Description:** The function `f()` might be missing a null check before returning `SOME_DEFAULT`. Since `SOME_DEFAULT` can potentially be `null`, the function should explicitly handle this case to ensure it always returns a valid number.\n\n**Location:** The implementation of the `f()` function:\n```javascript\n/** @return {number} */ function f() { return SOME_DEFAULT; }\n```\n\n**Observation Support:** The stack trace points to a comparison failure involving `(TwoNumbers|null)` and `number`, indicating that the function is returning a value that cannot be directly cast to a number without explicit handling.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for checking the return type of functions, which is where the inconsistency arises in the test case.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::ensureTyped(NodeTraversal,Node,JSType)",
+            "method_code": "```java\n  private void ensureTyped(NodeTraversal t, Node n, JSType type) {\n    // Make sure FUNCTION nodes always get function type.\n    Preconditions.checkState(!n.isFunction() ||\n            type.isFunctionType() ||\n            type.isUnknownType());\n    JSDocInfo info = n.getJSDocInfo();\n    if (info != null) {\n      if (info.hasType()) {\n        JSType infoType = info.getType().evaluate(t.getScope(), typeRegistry);\n        validator.expectCanCast(t, n, infoType, type);\n        type = infoType;\n      }\n\n      if (info.isImplicitCast() && !inExterns) {\n        String propName = n.isGetProp() ?\n            n.getLastChild().getString() : \"(missing)\";\n        compiler.report(\n            t.makeError(n, ILLEGAL_IMPLICIT_CAST, propName));\n      }\n    }\n\n    if (n.getJSType() == null) {\n      n.setJSType(type);\n    }\n  }\n\n```",
+            "method_doc": " Enforces type casts, and ensures the node is typed.  A cast in the way that we use it in JSDoc annotations never alters the generated code and therefore never can induce any runtime operation. What this means is that a 'cast' is really just a compile time constraint on the underlying value. In the future, we may add support for run-time casts for compiled tests.  To ensure some shred of sanity, we enforce the notion that the type you are casting to may only meaningfully be a narrower type than the underlying declared type. We also invalidate optimizations on bad type casts.  @param t The traversal object needed to report errors. @param n The node getting a type assigned to it. @param type The type to be assigned. ",
+            "class_name": "com.google.javascript.jscomp.TypeCheck",
+            "class_doc": " <p>Checks the types of JS expressions against any declared type information.</p>  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Missing Null Check in Function Return\n**Description:** The function `f()` might be missing a null check before returning `SOME_DEFAULT`. Since `SOME_DEFAULT` can potentially be `null`, the function should explicitly handle this case to ensure it always returns a valid number.\n\n**Location:** The implementation of the `f()` function:\n```javascript\n/** @return {number} */ function f() { return SOME_DEFAULT; }\n```\n\n**Observation Support:** The stack trace points to a comparison failure involving `(TwoNumbers|null)` and `number`, indicating that the function is returning a value that cannot be directly cast to a number without explicit handling.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it is responsible for ensuring that nodes are properly typed, which includes handling cases where a node might be `null`. The issue in the test suggests that the function `f()` is returning a value that could be `null`, and the `ensureTyped` method would be the appropriate place to add a null check before assigning the type.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2
+            ],
+            "scores_by_hypothesis": {
+                "2": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    PrototypeObjectType TOP_LEVEL_PROTOTYPE =\n        new PrototypeObjectType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n\n    OBJECT_FUNCTION_TYPE.setPrototype(TOP_LEVEL_PROTOTYPE, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (null,void)\n    JSType NULL_VOID =\n        createUnionType(NULL_TYPE, VOID_TYPE);\n    registerNativeType(JSTypeNative.NULL_VOID, NULL_VOID);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createNativeFunctionTypeWithVarArgs(NO_TYPE, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n        createNativeFunctionTypeWithVarArgs(ALL_TYPE, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes the built-in types. Calls various constructors for different types like `BooleanType`, `NullType`, etc. Registers these types using `registerNativeType()`.",
+            "class_name": "com.google.javascript.rhino.jstype.JSTypeRegistry",
+            "class_doc": " The type registry is used to resolve named types.  <p>This class is not thread-safe.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 8.0,
+            "reason": "#8# This method is very likely to be the best location that need to be fixed, because it initializes the built-in types which could potentially affect the type checking logic in the compiler.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 8
+            },
+            "rank_key": [
+                0,
+                8.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, Node n,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, n, type, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError from a file and Node position.  @param sourceName The source file name @param n Determines the line and char position within the source file name @param type The DiagnosticType @param arguments Arguments to be incorporated into the message ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it creates instances of JSError, which could potentially lead to issues if the parameters passed to it are incorrect or inconsistent. However, the error seems to be related to the return type of the function `f()` rather than the creation of JError objects.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::getType()",
+            "method_code": "```java\n  public DiagnosticType getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the DiagnosticType associated with the JSError. This method does not call any other methods in the Covered Methods List.",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it simply returns the `DiagnosticType` associated with the `JSError`. While it doesn't directly involve complex logic, its return value seems to be part of the issue causing the test failure. The error message indicates a mismatch between the found type `(TwoNumbers|null)` and the required type `number`, which could be influenced by how `getType()` is used elsewhere in the codebase.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                1,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "1": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler)",
+            "method_code": "```java\n  private void parse(AbstractCompiler compiler) {\n    try {\n      logger_.fine(\"Parsing: \" + sourceFile.getName());\n      root = ParserRunner.parse(sourceFile, sourceFile.getCode(),\n          compiler.getParserConfig(),\n          compiler.getDefaultErrorReporter(),\n          logger_);\n    } catch (IOException e) {\n      compiler.report(\n          JSError.make(AbstractCompiler.READ_ERROR, sourceFile.getName()));\n    }\n\n    if (root == null || compiler.hasHaltingErrors()) {\n      // There was a parse error or IOException, so use a dummy block.\n      root = IR.script();\n    } else {\n      compiler.prepareAst(root);\n    }\n\n    // Set the source name so that the compiler passes can track\n    // the source file and module.\n    root.setStaticSourceFile(sourceFile);\n  }\n\n```",
+            "method_doc": "This method parses the JavaScript source file into an AST using the `ParserRunner.parse` method. It logs the parsing process, handles exceptions, and prepares the AST for further processing. If there is a parse error or exception, it uses a dummy block as the root.",
+            "class_name": "com.google.javascript.jscomp.JsAst",
+            "class_doc": " Generates an AST for a JavaScript source file.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation\n**Description:** The issue might stem from an incorrect type annotation in the `SOME_DEFAULT` constant. Specifically, the `@const` annotation suggests that `SOME_DEFAULT` should be treated as a constant, but its actual value is an object of type `TwoNumbers`. This discrepancy could lead to type inference issues during compilation.\n\n**Location:** The line where `SOME_DEFAULT` is defined:\n```javascript\n/** @const */ var SOME_DEFAULT =\n```\n\n**Observation Support:** The test output indicates that the found type is `(TwoNumbers|null)`, suggesting that the compiler is interpreting `SOME_DEFAULT` as an object of type `TwoNumbers` rather than a simple number.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it involves parsing JavaScript source files into an Abstract Syntax Tree (AST). While the method itself does not directly handle type annotations, it is responsible for preparing the AST for further processing, which includes type checking. Given that the failure is related to inconsistent return types, it's plausible that issues in the AST generation or preparation could indirectly affect type checking. However, since the method primarily deals with parsing and AST preparation, pinpointing the exact issue would require a deeper understanding of how the AST is used within the broader context of type checking.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " NodeTraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it always returns `true`, which means it does not perform any checks or decisions based on the nodes being traversed. Given that the test failure involves inconsistent return types, it's plausible that the absence of proper filtering or validation in the traversal process could lead to incorrect type assumptions downstream.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " NodeTraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the traversal of the parse tree, which could potentially impact type checking. However, the specific error message indicates an issue with return types, so the problem might lie elsewhere in the type checking logic rather than the traversal itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node.",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " NodeTraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it handles the traversal of node trees, which could potentially impact how types are checked during the traversal process. However, the specific issue described seems to be related to type inference rather than the traversal logic itself.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 0,
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    Node root = ast.getAstRoot(compiler);\n    // The root maybe null if the AST can not be created.\n    if (root != null) {\n      Preconditions.checkState(root.isScript());\n      Preconditions.checkNotNull(root.getInputId());\n    }\n    return root;\n  }\n\n```",
+            "method_doc": "Retrieves the Abstract Syntax Tree (AST) root node for this input. This method ensures that the root is not null and checks its type and ID.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it retrieves the AST root node, which could potentially be causing issues when dealing with type checking. However, the method itself does not directly handle type information, so it's less likely to be the primary source of the bug.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,boolean)",
+            "method_code": "```java\n  public CompilerInput(SourceAst ast, boolean isExtern) {\n    this(ast, ast.getInputId(), isExtern);\n  }\n\n```",
+            "method_doc": "Initializes a new instance of `CompilerInput` using a `SourceAst`. Calls the overloaded constructor to complete initialization.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes a new instance of `CompilerInput` using a `SourceAst`, but it does not directly handle the type checking logic. The issue seems to be related to the handling of type annotations and object literals, which might be better addressed in other parts of the codebase responsible for type inference and validation.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,InputId,boolean)",
+            "method_code": "```java\n  public CompilerInput(SourceAst ast, InputId inputId, boolean isExtern) {\n    this.ast = ast;\n    this.id = inputId;\n\n    // TODO(nicksantos): Add a precondition check here. People are passing\n    // in null, but they should not be.\n    if (ast != null && ast.getSourceFile() != null) {\n      ast.getSourceFile().setIsExtern(isExtern);\n    }\n  }\n\n```",
+            "method_doc": "Initializes a new instance of `CompilerInput` using a `SourceAst`, an `InputId`, and a boolean indicating if it's external. Sets the source file's external status accordingly.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 5.0,
+            "reason": "#5# This method is moderately suspicious because it initializes the `CompilerInput` with a `SourceAst` and sets the external status of the source file. However, the error message indicates an inconsistency in the return type, which suggests that the issue might lie elsewhere in the type checking logic rather than in the initialization of the `CompilerInput`. Further investigation into the type checking process would be necessary to pinpoint the exact cause of the failure.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 5
+            },
+            "rank_key": [
+                0,
+                5.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JSError::getCharno()",
+            "method_code": "```java\n  public int getCharno() {\n    return charno;\n  }\n\n```",
+            "method_doc": " Get the character number. ",
+            "class_name": "com.google.javascript.jscomp.JSError",
+            "class_doc": " Compile error description  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The error message indicates a problem with the return type of the function `f`, which is inconsistent with the expected type. The `getCharno()` method does not directly relate to the return type of functions or the handling of object literals, so it is unlikely to be the source of the bug.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter::SemanticReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)",
+            "method_code": "```java\n  public SemanticReverseAbstractInterpreter(CodingConvention convention,\n      JSTypeRegistry typeRegistry) {\n    super(convention, typeRegistry);\n  }\n\n```",
+            "method_doc": " Creates a semantic reverse abstract interpreter. ",
+            "class_name": "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter",
+            "class_doc": " A reverse abstract interpreter using the semantics of the JavaScript language as a means to reverse interpret computations. This interpreter expects the parse tree inputs to be typed.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation\n**Description:** The issue might stem from an incorrect type annotation in the `SOME_DEFAULT` constant. Specifically, the `@const` annotation suggests that `SOME_DEFAULT` should be treated as a constant, but its actual value is an object of type `TwoNumbers`. This discrepancy could lead to type inference issues during compilation.\n\n**Location:** The line where `SOME_DEFAULT` is defined:\n```javascript\n/** @const */ var SOME_DEFAULT =\n```\n\n**Observation Support:** The test output indicates that the found type is `(TwoNumbers|null)`, suggesting that the compiler is interpreting `SOME_DEFAULT` as an object of type `TwoNumbers` rather than a simple number.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The failure in the test case is related to the type annotation of the constant `SOME_DEFAULT`, which is incorrectly annotated as `@const` instead of `@type {number}`. The `SemanticReverseAbstractInterpreter` class is responsible for interpreting the types of expressions, but it does not directly cause the type mismatch in this specific test case.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)",
+            "method_code": "```java\n  public JsAst(SourceFile sourceFile) {\n    this.inputId = new InputId(sourceFile.getName());\n    this.sourceFile = sourceFile;\n    this.fileName = sourceFile.getName();\n  }\n\n```",
+            "method_doc": "This constructor initializes a new `JsAst` object with the provided `sourceFile`. It creates an `InputId` from the source file's name and assigns the source file to the `sourceFile` field.",
+            "class_name": "com.google.javascript.jscomp.JsAst",
+            "class_doc": " Generates an AST for a JavaScript source file.  ",
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "test_failure_causes": "Incorrect Type Annotation\n**Description:** The issue might stem from an incorrect type annotation in the `SOME_DEFAULT` constant. Specifically, the `@const` annotation suggests that `SOME_DEFAULT` should be treated as a constant, but its actual value is an object of type `TwoNumbers`. This discrepancy could lead to type inference issues during compilation.\n\n**Location:** The line where `SOME_DEFAULT` is defined:\n```javascript\n/** @const */ var SOME_DEFAULT =\n```\n\n**Observation Support:** The test output indicates that the found type is `(TwoNumbers|null)`, suggesting that the compiler is interpreting `SOME_DEFAULT` as an object of type `TwoNumbers` rather than a simple number.",
+            "score": 0.0,
+            "reason": "#0# This method is not the best location that need to be fixed. The issue described in the test failure seems to be related to the type annotations and the initialization of the `SOME_DEFAULT` constant, rather than the construction of the AST itself.",
+            "hypothesis": 1,
+            "selected_hypothesis": false,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 0
+            },
+            "rank_key": [
+                0,
+                0.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)",
+            "method_code": "```java\n  @Override\n  public void visit(NodeTraversal t, Node n, Node parent) {\n    JSType childType;\n    JSType leftType, rightType;\n    Node left, right;\n    // To be explicitly set to false if the node is not typeable.\n    boolean typeable = true;\n\n    switch (n.getType()) {\n      case Token.NAME:\n        typeable = visitName(t, n, parent);\n        break;\n\n      case Token.PARAM_LIST:\n        // If this is under a FUNCTION node, it is a parameter list and can be\n        // ignored here.\n        if (!parent.isFunction()) {\n          ensureTyped(t, n, getJSType(n.getFirstChild()));\n        } else {\n          typeable = false;\n        }\n        break;\n\n      case Token.COMMA:\n        ensureTyped(t, n, getJSType(n.getLastChild()));\n        break;\n\n      case Token.TRUE:\n      case Token.FALSE:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.THIS:\n        ensureTyped(t, n, t.getScope().getTypeOfThis());\n        break;\n\n      case Token.NULL:\n        ensureTyped(t, n, NULL_TYPE);\n        break;\n\n      case Token.NUMBER:\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.STRING:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.STRING_KEY:\n        typeable = false;\n        break;\n\n      case Token.GETTER_DEF:\n      case Token.SETTER_DEF:\n        // Object literal keys are handled with OBJECTLIT\n        break;\n\n      case Token.ARRAYLIT:\n        ensureTyped(t, n, ARRAY_TYPE);\n        break;\n\n      case Token.REGEXP:\n        ensureTyped(t, n, REGEXP_TYPE);\n        break;\n\n      case Token.GETPROP:\n        visitGetProp(t, n, parent);\n        typeable = !(parent.isAssign() &&\n                     parent.getFirstChild() == n);\n        break;\n\n      case Token.GETELEM:\n        visitGetElem(t, n);\n        // The type of GETELEM is always unknown, so no point counting that.\n        // If that unknown leaks elsewhere (say by an assignment to another\n        // variable), then it will be counted.\n        typeable = false;\n        break;\n\n      case Token.VAR:\n        visitVar(t, n);\n        typeable = false;\n        break;\n\n      case Token.NEW:\n        visitNew(t, n);\n        typeable = true;\n        break;\n\n      case Token.CALL:\n        visitCall(t, n);\n        typeable = !parent.isExprResult();\n        break;\n\n      case Token.RETURN:\n        visitReturn(t, n);\n        typeable = false;\n        break;\n\n      case Token.DEC:\n      case Token.INC:\n        left = n.getFirstChild();\n        validator.expectNumber(\n            t, left, getJSType(left), \"increment/decrement\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.NOT:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.VOID:\n        ensureTyped(t, n, VOID_TYPE);\n        break;\n\n      case Token.TYPEOF:\n        ensureTyped(t, n, STRING_TYPE);\n        break;\n\n      case Token.BITNOT:\n        childType = getJSType(n.getFirstChild());\n        if (!childType.matchesInt32Context()) {\n          report(t, n, BIT_OPERATION, NodeUtil.opToStr(n.getType()),\n              childType.toString());\n        }\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.POS:\n      case Token.NEG:\n        left = n.getFirstChild();\n        validator.expectNumber(t, left, getJSType(left), \"sign operator\");\n        ensureTyped(t, n, NUMBER_TYPE);\n        break;\n\n      case Token.EQ:\n      case Token.NE:\n      case Token.SHEQ:\n      case Token.SHNE: {\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n\n        // We do not want to warn about explicit comparisons to VOID. People\n        // often do this if they think their type annotations screwed up.\n        //\n        // We do want to warn about cases where people compare things like\n        // (Array|null) == (Function|null)\n        // because it probably means they screwed up.\n        //\n        // This heuristic here is not perfect, but should catch cases we\n        // care about without too many false negatives.\n        JSType leftTypeRestricted = leftType.restrictByNotNullOrUndefined();\n        JSType rightTypeRestricted = rightType.restrictByNotNullOrUndefined();\n\n        TernaryValue result = TernaryValue.UNKNOWN;\n        if (n.getType() == Token.EQ || n.getType() == Token.NE) {\n          result = leftTypeRestricted.testForEquality(\n              rightTypeRestricted);\n          if (n.isNE()) {\n            result = result.not();\n          }\n        } else {\n          // SHEQ or SHNE\n          if (!leftTypeRestricted.canTestForShallowEqualityWith(\n                  rightTypeRestricted)) {\n            result = n.getType() == Token.SHEQ ?\n                TernaryValue.FALSE : TernaryValue.TRUE;\n          }\n        }\n\n        if (result != TernaryValue.UNKNOWN) {\n          report(t, n, DETERMINISTIC_TEST, leftType.toString(),\n              rightType.toString(), result.toString());\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n      }\n\n      case Token.LT:\n      case Token.LE:\n      case Token.GT:\n      case Token.GE:\n        leftType = getJSType(n.getFirstChild());\n        rightType = getJSType(n.getLastChild());\n        if (rightType.isNumber()) {\n          validator.expectNumber(\n              t, n, leftType, \"left side of numeric comparison\");\n        } else if (leftType.isNumber()) {\n          validator.expectNumber(\n              t, n, rightType, \"right side of numeric comparison\");\n        } else if (leftType.matchesNumberContext() &&\n                   rightType.matchesNumberContext()) {\n          // OK.\n        } else {\n          // Whether the comparison is numeric will be determined at runtime\n          // each time the expression is evaluated. Regardless, both operands\n          // should match a string context.\n          String message = \"left side of comparison\";\n          validator.expectString(t, n, leftType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, leftType, message, getNativeType(STRING_TYPE));\n          message = \"right side of comparison\";\n          validator.expectString(t, n, rightType, message);\n          validator.expectNotNullOrUndefined(\n              t, n, rightType, message, getNativeType(STRING_TYPE));\n        }\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.IN:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right);\n        validator.expectObject(t, n, rightType, \"'in' requires an object\");\n        validator.expectString(t, left, leftType, \"left side of 'in'\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.INSTANCEOF:\n        left = n.getFirstChild();\n        right = n.getLastChild();\n        leftType = getJSType(left);\n        rightType = getJSType(right).restrictByNotNullOrUndefined();\n\n        validator.expectAnyObject(\n            t, left, leftType, \"deterministic instanceof yields false\");\n        validator.expectActualObject(\n            t, right, rightType, \"instanceof requires an object\");\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.ASSIGN:\n        visitAssign(t, n);\n        typeable = false;\n        break;\n\n      case Token.ASSIGN_LSH:\n      case Token.ASSIGN_RSH:\n      case Token.ASSIGN_URSH:\n      case Token.ASSIGN_DIV:\n      case Token.ASSIGN_MOD:\n      case Token.ASSIGN_BITOR:\n      case Token.ASSIGN_BITXOR:\n      case Token.ASSIGN_BITAND:\n      case Token.ASSIGN_SUB:\n      case Token.ASSIGN_ADD:\n      case Token.ASSIGN_MUL:\n      case Token.LSH:\n      case Token.RSH:\n      case Token.URSH:\n      case Token.DIV:\n      case Token.MOD:\n      case Token.BITOR:\n      case Token.BITXOR:\n      case Token.BITAND:\n      case Token.SUB:\n      case Token.ADD:\n      case Token.MUL:\n        visitBinaryOperator(n.getType(), t, n);\n        break;\n\n      case Token.DELPROP:\n        ensureTyped(t, n, BOOLEAN_TYPE);\n        break;\n\n      case Token.CASE:\n        JSType switchType = getJSType(parent.getFirstChild());\n        JSType caseType = getJSType(n.getFirstChild());\n        validator.expectSwitchMatchesCase(t, n, switchType, caseType);\n        typeable = false;\n        break;\n\n      case Token.WITH: {\n        Node child = n.getFirstChild();\n        childType = getJSType(child);\n        validator.expectObject(\n            t, child, childType, \"with requires an object\");\n        typeable = false;\n        break;\n      }\n\n      case Token.FUNCTION:\n        visitFunction(t, n);\n        break;\n\n      // These nodes have no interesting type behavior.\n      case Token.LABEL:\n      case Token.LABEL_NAME:\n      case Token.SWITCH:\n      case Token.BREAK:\n      case Token.CATCH:\n      case Token.TRY:\n      case Token.SCRIPT:\n      case Token.EXPR_RESULT:\n      case Token.BLOCK:\n      case Token.EMPTY:\n      case Token.DEFAULT_CASE:\n      case Token.CONTINUE:\n      case Token.DEBUGGER:\n      case Token.THROW:\n        typeable = false;\n        break;\n\n      // These nodes require data flow analysis.\n      case Token.DO:\n      case Token.FOR:\n      case Token.IF:\n      case Token.WHILE:\n        typeable = false;\n        break;\n\n      // These nodes are typed during the type inference.\n      case Token.AND:\n      case Token.HOOK:\n      case Token.OBJECTLIT:\n      case Token.OR:\n        if (n.getJSType() != null) { // If we didn't run type inference.\n          ensureTyped(t, n);\n        } else {\n          // If this is an enum, then give that type to the objectlit as well.\n          if ((n.isObjectLit())\n              && (parent.getJSType() instanceof EnumType)) {\n            ensureTyped(t, n, parent.getJSType());\n          } else {\n            ensureTyped(t, n);\n          }\n        }\n        if (n.isObjectLit()) {\n          for (Node key : n.children()) {\n            visitObjLitKey(t, key, n);\n          }\n        }\n        break;\n\n      default:\n        report(t, n, UNEXPECTED_TOKEN, Token.name(n.getType()));\n        ensureTyped(t, n);\n        break;\n    }\n\n    // Don't count externs since the user's code may not even use that part.\n    typeable = typeable && !inExterns;\n\n    if (typeable) {\n      doPercentTypedAccounting(t, n);\n    }\n\n    checkNoTypeCheckSection(n, false);\n  }\n\n```",
+            "method_doc": " This is the meat of the type checking.  It is basically one big switch, with each case representing one type of parse tree node.  The individual cases are usually pretty straightforward.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. @param parent The parent of the node n. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)",
+            "method_code": "```java\n  @Override\n  public JSType findPropertyType(String propertyName) {\n    return hasProperty(propertyName) ?\n        getPropertyType(propertyName) : null;\n  }\n\n```",
+            "method_doc": "This method retrieves the type of a property if it exists. Otherwise, it returns `null`."
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineDeclaredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    boolean result = defineProperty(propertyName, type, false,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is explicitly declared by the programmer. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the declaration of property which might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)": {
+            "method_name": "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+            "method_code": "```java\n  public final boolean defineInferredProperty(String propertyName,\n      JSType type, Node propertyNode) {\n    StaticSlot<JSType> originalSlot = getSlot(propertyName);\n    if (hasProperty(propertyName)) {\n      if (isPropertyTypeDeclared(propertyName)) {\n        // We never want to hide a declared property with an inferred property.\n        return true;\n      }\n      JSType originalType = getPropertyType(propertyName);\n      type = originalType == null ? type :\n          originalType.getLeastSupertype(type);\n    }\n\n    boolean result = defineProperty(propertyName, type, true,\n        propertyNode);\n\n    // All property definitions go through this method\n    // or defineDeclaredProperty. Because the properties defined an an\n    // object can affect subtyping, it's slightly more efficient\n    // to register this after defining the property.\n    registry.registerPropertyOnType(propertyName, this);\n\n    return result;\n  }\n\n```",
+            "method_doc": " Defines a property whose type is inferred. @param propertyName the property's name @param type the type @param propertyNode the node corresponding to the inferred definition of property that might later be accessed using {@code getPropertyNode}. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+            "method_code": "```java\n  public void check(Node node, boolean externs) {\n    Preconditions.checkNotNull(node);\n\n    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);\n    inExterns = externs;\n    t.traverseWithScope(node, topScope);\n    if (externs) {\n      inferJSDocInfo.process(node, null);\n    } else {\n      inferJSDocInfo.process(null, node);\n    }\n  }\n\n```",
+            "method_doc": "This method initializes a `NodeTraversal` object, sets the `inExterns` flag, and traverses the node using the `visit` method."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+            "method_code": "```java\n  public void resetForTypeCheck() {\n    typesIndexedByProperty.clear();\n    eachRefTypeIndexedByProperty.clear();\n    initializeBuiltInTypes();\n    namesToTypes.clear();\n    namespaces.clear();\n    initializeRegistry();\n  }\n\n```",
+            "method_doc": " Reset to run the TypeCheck pass. "
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isInterface()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+            "method_code": "```java\n  @Override\n  public boolean isInterface() {\n    return kind == Kind.INTERFACE;\n  }\n\n```",
+            "method_doc": "Checks if the function type is an interface. Compares `kind` with `Kind.INTERFACE`."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+            "method_code": "```java\n  public JSType getReturnType() {\n    return call.returnType;\n  }\n\n```",
+            "method_doc": "Retrieves the return type of the function."
+        },
+        "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()": {
+            "method_name": "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()",
+            "method_code": "```java\n  public boolean isReturnTypeInferred() {\n    return call.returnTypeInferred;\n  }\n\n```",
+            "method_doc": "Checks if the return type is inferred."
+        },
+        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externsRoot, Node jsRoot) {\n    Preconditions.checkNotNull(scopeCreator);\n    Preconditions.checkNotNull(topScope);\n\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    if (externsRoot != null) {\n      check(externsRoot, true);\n    }\n    check(jsRoot, false);\n  }\n\n```",
+            "method_doc": " Main entry point for this phase of processing. This follows the pattern for JSCompiler phases.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+            "method_code": "```java\n  public ErrorReporter getErrorReporter() {\n    return reporter;\n  }\n\n```",
+            "method_doc": "Returns the error reporter associated with this type registry."
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+            "method_code": "```java\n  public boolean shouldTolerateUndefinedValues() {\n    return tolerateUndefinedValues;\n  }\n\n```",
+            "method_doc": "Returns whether this type registry tolerates undefined values."
+        },
+        "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter::ChainableReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)": {
+            "method_name": "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter::ChainableReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)",
+            "method_code": "```java\n  public ChainableReverseAbstractInterpreter(CodingConvention convention,\n      JSTypeRegistry typeRegistry) {\n    Preconditions.checkNotNull(convention);\n    this.convention = convention;\n    this.typeRegistry = typeRegistry;\n    firstLink = this;\n    nextLink = null;\n  }\n\n```",
+            "method_doc": " Constructs an interpreter, which is the only link in a chain. Interpreters can be appended using {@link #append}. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::visitReturn(NodeTraversal,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::visitReturn(NodeTraversal,Node)",
+            "method_code": "```java\n  private void visitReturn(NodeTraversal t, Node n) {\n    Node function = t.getEnclosingFunction();\n\n    // This is a misplaced return, but the real JS will fail to compile,\n    // so let it go.\n    if (function == null) {\n      return;\n    }\n    JSType jsType = getJSType(function);\n\n    if (jsType.isFunctionType()) {\n      FunctionType functionType = jsType.toMaybeFunctionType();\n\n      JSType returnType = functionType.getReturnType();\n\n      // if no return type is specified, undefined must be returned\n      // (it's a void function)\n      if (returnType == null) {\n        returnType = getNativeType(VOID_TYPE);\n      }\n\n      // fetching the returned value's type\n      Node valueNode = n.getFirstChild();\n      JSType actualReturnType;\n      if (valueNode == null) {\n        actualReturnType = getNativeType(VOID_TYPE);\n        valueNode = n;\n      } else {\n        actualReturnType = getJSType(valueNode);\n      }\n\n      // verifying\n      validator.expectCanAssignTo(t, valueNode, actualReturnType, returnType,\n          \"inconsistent return type\");\n    }\n  }\n\n```",
+            "method_doc": " Visits a RETURN node.  @param t The node traversal object that supplies context, such as the scope chain to use in name lookups as well as error reporting. @param n The node being visited. "
+        },
+        "com.google.javascript.jscomp.TypeCheck::ensureTyped(NodeTraversal,Node,JSType)": {
+            "method_name": "com.google.javascript.jscomp.TypeCheck::ensureTyped(NodeTraversal,Node,JSType)",
+            "method_code": "```java\n  private void ensureTyped(NodeTraversal t, Node n, JSType type) {\n    // Make sure FUNCTION nodes always get function type.\n    Preconditions.checkState(!n.isFunction() ||\n            type.isFunctionType() ||\n            type.isUnknownType());\n    JSDocInfo info = n.getJSDocInfo();\n    if (info != null) {\n      if (info.hasType()) {\n        JSType infoType = info.getType().evaluate(t.getScope(), typeRegistry);\n        validator.expectCanCast(t, n, infoType, type);\n        type = infoType;\n      }\n\n      if (info.isImplicitCast() && !inExterns) {\n        String propName = n.isGetProp() ?\n            n.getLastChild().getString() : \"(missing)\";\n        compiler.report(\n            t.makeError(n, ILLEGAL_IMPLICIT_CAST, propName));\n      }\n    }\n\n    if (n.getJSType() == null) {\n      n.setJSType(type);\n    }\n  }\n\n```",
+            "method_doc": " Enforces type casts, and ensures the node is typed.  A cast in the way that we use it in JSDoc annotations never alters the generated code and therefore never can induce any runtime operation. What this means is that a 'cast' is really just a compile time constraint on the underlying value. In the future, we may add support for run-time casts for compiled tests.  To ensure some shred of sanity, we enforce the notion that the type you are casting to may only meaningfully be a narrower type than the underlying declared type. We also invalidate optimizations on bad type casts.  @param t The traversal object needed to report errors. @param n The node getting a type assigned to it. @param type The type to be assigned. "
+        },
+        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()": {
+            "method_name": "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()",
+            "method_code": "```java\n  private void initializeBuiltInTypes() {\n    // These locals shouldn't be all caps.\n    BooleanType BOOLEAN_TYPE = new BooleanType(this);\n    registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);\n\n    NullType NULL_TYPE = new NullType(this);\n    registerNativeType(JSTypeNative.NULL_TYPE, NULL_TYPE);\n\n    NumberType NUMBER_TYPE = new NumberType(this);\n    registerNativeType(JSTypeNative.NUMBER_TYPE, NUMBER_TYPE);\n\n    StringType STRING_TYPE = new StringType(this);\n    registerNativeType(JSTypeNative.STRING_TYPE, STRING_TYPE);\n\n    UnknownType UNKNOWN_TYPE = new UnknownType(this, false);\n    registerNativeType(JSTypeNative.UNKNOWN_TYPE, UNKNOWN_TYPE);\n    registerNativeType(\n        JSTypeNative.CHECKED_UNKNOWN_TYPE, new UnknownType(this, true));\n\n    VoidType VOID_TYPE = new VoidType(this);\n    registerNativeType(JSTypeNative.VOID_TYPE, VOID_TYPE);\n\n    AllType ALL_TYPE = new AllType(this);\n    registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);\n\n    // Top Level Prototype (the One)\n    // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE\n    // use each other's results, so at least one of them will get null\n    // instead of an actual type; however, this seems to be benign.\n    PrototypeObjectType TOP_LEVEL_PROTOTYPE =\n        new PrototypeObjectType(this, null, null, true);\n    registerNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE, TOP_LEVEL_PROTOTYPE);\n\n    // Object\n    FunctionType OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Object\", null,\n            createArrowType(createOptionalParameters(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n\n    OBJECT_FUNCTION_TYPE.setPrototype(TOP_LEVEL_PROTOTYPE, null);\n    registerNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE, OBJECT_FUNCTION_TYPE);\n\n    ObjectType OBJECT_TYPE = OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.OBJECT_TYPE, OBJECT_TYPE);\n\n    ObjectType OBJECT_PROTOTYPE = OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.OBJECT_PROTOTYPE, OBJECT_PROTOTYPE);\n\n    // Function\n    FunctionType FUNCTION_FUNCTION_TYPE =\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),\n            null, null, true, true);\n    FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);\n\n    ObjectType FUNCTION_PROTOTYPE = FUNCTION_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.FUNCTION_PROTOTYPE, FUNCTION_PROTOTYPE);\n\n    NoType NO_TYPE = new NoType(this);\n    registerNativeType(JSTypeNative.NO_TYPE, NO_TYPE);\n\n    NoObjectType NO_OBJECT_TYPE = new NoObjectType(this);\n    registerNativeType(JSTypeNative.NO_OBJECT_TYPE, NO_OBJECT_TYPE);\n\n    NoObjectType NO_RESOLVED_TYPE = new NoResolvedType(this);\n    registerNativeType(JSTypeNative.NO_RESOLVED_TYPE, NO_RESOLVED_TYPE);\n\n    // Array\n    FunctionType ARRAY_FUNCTION_TYPE =\n      new FunctionType(this, \"Array\", null,\n          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),\n          null, null, true, true);\n    ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =\n        ARRAY_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType arrayPrototype = ARRAY_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.ARRAY_FUNCTION_TYPE, ARRAY_FUNCTION_TYPE);\n\n    ObjectType ARRAY_TYPE = ARRAY_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ARRAY_TYPE, ARRAY_TYPE);\n\n    // Boolean\n    FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Boolean\", null,\n            createArrowType(createParameters(false, ALL_TYPE), BOOLEAN_TYPE),\n            null, null, true, true);\n    ObjectType booleanPrototype = BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,\n        BOOLEAN_OBJECT_FUNCTION_TYPE);\n\n    ObjectType BOOLEAN_OBJECT_TYPE =\n        BOOLEAN_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.BOOLEAN_OBJECT_TYPE, BOOLEAN_OBJECT_TYPE);\n\n    // Date\n    FunctionType DATE_FUNCTION_TYPE =\n      new FunctionType(this, \"Date\", null,\n          createArrowType(\n              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,\n                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),\n              STRING_TYPE),\n          null, null, true, true);\n    ObjectType datePrototype = DATE_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);\n\n    ObjectType DATE_TYPE = DATE_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.DATE_TYPE, DATE_TYPE);\n\n    // Error\n    FunctionType ERROR_FUNCTION_TYPE = new ErrorFunctionType(this, \"Error\");\n    registerNativeType(JSTypeNative.ERROR_FUNCTION_TYPE, ERROR_FUNCTION_TYPE);\n\n    ObjectType ERROR_TYPE = ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.ERROR_TYPE, ERROR_TYPE);\n\n    // EvalError\n    FunctionType EVAL_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"EvalError\");\n    EVAL_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.EVAL_ERROR_FUNCTION_TYPE, EVAL_ERROR_FUNCTION_TYPE);\n\n    ObjectType EVAL_ERROR_TYPE = EVAL_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.EVAL_ERROR_TYPE, EVAL_ERROR_TYPE);\n\n    // RangeError\n    FunctionType RANGE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"RangeError\");\n    RANGE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.RANGE_ERROR_FUNCTION_TYPE, RANGE_ERROR_FUNCTION_TYPE);\n\n    ObjectType RANGE_ERROR_TYPE = RANGE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.RANGE_ERROR_TYPE, RANGE_ERROR_TYPE);\n\n    // ReferenceError\n    FunctionType REFERENCE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"ReferenceError\");\n    REFERENCE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.REFERENCE_ERROR_FUNCTION_TYPE,\n        REFERENCE_ERROR_FUNCTION_TYPE);\n\n    ObjectType REFERENCE_ERROR_TYPE =\n        REFERENCE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REFERENCE_ERROR_TYPE, REFERENCE_ERROR_TYPE);\n\n    // SyntaxError\n    FunctionType SYNTAX_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"SyntaxError\");\n    SYNTAX_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.SYNTAX_ERROR_FUNCTION_TYPE, SYNTAX_ERROR_FUNCTION_TYPE);\n\n    ObjectType SYNTAX_ERROR_TYPE = SYNTAX_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.SYNTAX_ERROR_TYPE, SYNTAX_ERROR_TYPE);\n\n    // TypeError\n    FunctionType TYPE_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"TypeError\");\n    TYPE_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.TYPE_ERROR_FUNCTION_TYPE, TYPE_ERROR_FUNCTION_TYPE);\n\n    ObjectType TYPE_ERROR_TYPE = TYPE_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.TYPE_ERROR_TYPE, TYPE_ERROR_TYPE);\n\n    // URIError\n    FunctionType URI_ERROR_FUNCTION_TYPE =\n        new ErrorFunctionType(this, \"URIError\");\n    URI_ERROR_FUNCTION_TYPE.setPrototypeBasedOn(ERROR_TYPE);\n    registerNativeType(\n        JSTypeNative.URI_ERROR_FUNCTION_TYPE, URI_ERROR_FUNCTION_TYPE);\n\n    ObjectType URI_ERROR_TYPE = URI_ERROR_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.URI_ERROR_TYPE, URI_ERROR_TYPE);\n\n    // Number\n    FunctionType NUMBER_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"Number\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType numberPrototype = NUMBER_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);\n\n    ObjectType NUMBER_OBJECT_TYPE =\n        NUMBER_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.NUMBER_OBJECT_TYPE, NUMBER_OBJECT_TYPE);\n\n    // RegExp\n    FunctionType REGEXP_FUNCTION_TYPE =\n      new FunctionType(this, \"RegExp\", null,\n          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),\n          null, null, true, true);\n    REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =\n        REGEXP_FUNCTION_TYPE.getInstanceType();\n\n    ObjectType regexpPrototype = REGEXP_FUNCTION_TYPE.getPrototype();\n    registerNativeType(JSTypeNative.REGEXP_FUNCTION_TYPE, REGEXP_FUNCTION_TYPE);\n\n    ObjectType REGEXP_TYPE = REGEXP_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(JSTypeNative.REGEXP_TYPE, REGEXP_TYPE);\n\n    // String\n    FunctionType STRING_OBJECT_FUNCTION_TYPE =\n        new FunctionType(this, \"String\", null,\n            createArrowType(createParameters(false, ALL_TYPE), STRING_TYPE),\n            null, null, true, true);\n    ObjectType stringPrototype = STRING_OBJECT_FUNCTION_TYPE.getPrototype();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);\n\n    ObjectType STRING_OBJECT_TYPE =\n        STRING_OBJECT_FUNCTION_TYPE.getInstanceType();\n    registerNativeType(\n        JSTypeNative.STRING_OBJECT_TYPE, STRING_OBJECT_TYPE);\n\n    // (null,void)\n    JSType NULL_VOID =\n        createUnionType(NULL_TYPE, VOID_TYPE);\n    registerNativeType(JSTypeNative.NULL_VOID, NULL_VOID);\n\n    // (Object,string,number)\n    JSType OBJECT_NUMBER_STRING =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING, OBJECT_NUMBER_STRING);\n\n    // (Object,string,number,boolean)\n    JSType OBJECT_NUMBER_STRING_BOOLEAN =\n        createUnionType(OBJECT_TYPE, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.OBJECT_NUMBER_STRING_BOOLEAN,\n        OBJECT_NUMBER_STRING_BOOLEAN);\n\n    // (string,number,boolean)\n    JSType NUMBER_STRING_BOOLEAN =\n        createUnionType(NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING_BOOLEAN,\n        NUMBER_STRING_BOOLEAN);\n\n    // (string,number)\n    JSType NUMBER_STRING = createUnionType(NUMBER_TYPE, STRING_TYPE);\n    registerNativeType(JSTypeNative.NUMBER_STRING, NUMBER_STRING);\n\n    // Native object properties are filled in by externs...\n\n    // (String, string)\n    JSType STRING_VALUE_OR_OBJECT_TYPE =\n        createUnionType(STRING_OBJECT_TYPE, STRING_TYPE);\n    registerNativeType(\n        JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE, STRING_VALUE_OR_OBJECT_TYPE);\n\n    // (Number, number)\n    JSType NUMBER_VALUE_OR_OBJECT_TYPE =\n        createUnionType(NUMBER_OBJECT_TYPE, NUMBER_TYPE);\n    registerNativeType(\n        JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE, NUMBER_VALUE_OR_OBJECT_TYPE);\n\n    // unknown function type, i.e. (?...) -> ?\n    FunctionType U2U_FUNCTION_TYPE =\n        createFunctionType(UNKNOWN_TYPE, true, UNKNOWN_TYPE);\n    registerNativeType(JSTypeNative.U2U_FUNCTION_TYPE, U2U_FUNCTION_TYPE);\n\n    // unknown constructor type, i.e. (?...) -> ? with the NoObject type\n    // as instance type\n    FunctionType U2U_CONSTRUCTOR_TYPE =\n        // This is equivalent to\n        // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,\n        // in addition, overrides getInstanceType() to return the NoObject type\n        // instead of a new anonymous object.\n        new FunctionType(this, \"Function\", null,\n            createArrowType(\n                createParametersWithVarArgs(UNKNOWN_TYPE),\n                UNKNOWN_TYPE),\n            NO_OBJECT_TYPE, null, true, true) {\n          private static final long serialVersionUID = 1L;\n\n          @Override public FunctionType getConstructor() {\n            return registry.getNativeFunctionType(\n                JSTypeNative.FUNCTION_FUNCTION_TYPE);\n          }\n        };\n\n    // The U2U_CONSTRUCTOR is weird, because it's the supertype of its\n    // own constructor.\n    registerNativeType(JSTypeNative.U2U_CONSTRUCTOR_TYPE, U2U_CONSTRUCTOR_TYPE);\n    registerNativeType(\n        JSTypeNative.FUNCTION_INSTANCE_TYPE, U2U_CONSTRUCTOR_TYPE);\n\n    FUNCTION_FUNCTION_TYPE.setInstanceType(U2U_CONSTRUCTOR_TYPE);\n    U2U_CONSTRUCTOR_TYPE.setImplicitPrototype(FUNCTION_PROTOTYPE);\n\n    // least function type, i.e. (All...) -> NoType\n    FunctionType LEAST_FUNCTION_TYPE =\n        createNativeFunctionTypeWithVarArgs(NO_TYPE, ALL_TYPE);\n    registerNativeType(JSTypeNative.LEAST_FUNCTION_TYPE, LEAST_FUNCTION_TYPE);\n\n    // the 'this' object in the global scope\n    FunctionType GLOBAL_THIS_CTOR =\n        new FunctionType(this, \"global this\", null,\n            createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),\n            null, null, true, true);\n    ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();\n    registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);\n\n    // greatest function type, i.e. (NoType...) -> All\n    FunctionType GREATEST_FUNCTION_TYPE =\n        createNativeFunctionTypeWithVarArgs(ALL_TYPE, NO_TYPE);\n    registerNativeType(JSTypeNative.GREATEST_FUNCTION_TYPE,\n        GREATEST_FUNCTION_TYPE);\n\n    // Register the prototype property. See the comments below in\n    // registerPropertyOnType about the bootstrapping process.\n    registerPropertyOnType(\"prototype\", OBJECT_FUNCTION_TYPE);\n  }\n\n```",
+            "method_doc": "Initializes the built-in types. Calls various constructors for different types like `BooleanType`, `NullType`, etc. Registers these types using `registerNativeType()`."
+        },
+        "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])": {
+            "method_name": "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+            "method_code": "```java\n  public static JSError make(String sourceName, Node n,\n                             DiagnosticType type, String... arguments) {\n    return new JSError(sourceName, n, type, arguments);\n  }\n\n```",
+            "method_doc": " Creates a JSError from a file and Node position.  @param sourceName The source file name @param n Determines the line and char position within the source file name @param type The DiagnosticType @param arguments Arguments to be incorporated into the message "
+        },
+        "com.google.javascript.jscomp.JSError::getType()": {
+            "method_name": "com.google.javascript.jscomp.JSError::getType()",
+            "method_code": "```java\n  public DiagnosticType getType() {\n    return type;\n  }\n\n```",
+            "method_doc": "Returns the DiagnosticType associated with the JSError. This method does not call any other methods in the Covered Methods List."
+        },
+        "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler)",
+            "method_code": "```java\n  private void parse(AbstractCompiler compiler) {\n    try {\n      logger_.fine(\"Parsing: \" + sourceFile.getName());\n      root = ParserRunner.parse(sourceFile, sourceFile.getCode(),\n          compiler.getParserConfig(),\n          compiler.getDefaultErrorReporter(),\n          logger_);\n    } catch (IOException e) {\n      compiler.report(\n          JSError.make(AbstractCompiler.READ_ERROR, sourceFile.getName()));\n    }\n\n    if (root == null || compiler.hasHaltingErrors()) {\n      // There was a parse error or IOException, so use a dummy block.\n      root = IR.script();\n    } else {\n      compiler.prepareAst(root);\n    }\n\n    // Set the source name so that the compiler passes can track\n    // the source file and module.\n    root.setStaticSourceFile(sourceFile);\n  }\n\n```",
+            "method_doc": "This method parses the JavaScript source file into an AST using the `ParserRunner.parse` method. It logs the parsing process, handles exceptions, and prepares the AST for further processing. If there is a parse error or exception, it uses a dummy block as the root."
+        },
+        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+            "method_code": "```java\n    @Override\n    public final boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,\n        Node parent) {\n      return true;\n    }\n\n```",
+            "method_doc": "Returns `true` indicating that the traversal should continue."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+            "method_code": "```java\n  public void traverse(Node root) {\n    try {\n      inputId = NodeUtil.getInputId(root);\n      sourceName = \"\";\n      curNode = root;\n      pushScope(root);\n      traverseBranch(root, null);\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": " Traverses a parse tree recursively. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)",
+            "method_code": "```java\n  public void traverseRoots(List<Node> roots) {\n    if (roots.isEmpty()) {\n      return;\n    }\n\n    try {\n      Node scopeRoot = roots.get(0).getParent();\n      Preconditions.checkState(scopeRoot != null);\n\n      inputId = NodeUtil.getInputId(scopeRoot);\n      sourceName = \"\";\n      curNode = scopeRoot;\n      pushScope(scopeRoot);\n\n      for (Node root : roots) {\n        Preconditions.checkState(root.getParent() == scopeRoot);\n        traverseBranch(root, scopeRoot);\n      }\n\n      popScope();\n    } catch (Exception unexpectedException) {\n      throwUnexpectedException(unexpectedException);\n    }\n  }\n\n```",
+            "method_doc": "Traverses a list of node trees. Calls `traverseBranch` for each root node."
+        },
+        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    Node root = ast.getAstRoot(compiler);\n    // The root maybe null if the AST can not be created.\n    if (root != null) {\n      Preconditions.checkState(root.isScript());\n      Preconditions.checkNotNull(root.getInputId());\n    }\n    return root;\n  }\n\n```",
+            "method_doc": "Retrieves the Abstract Syntax Tree (AST) root node for this input. This method ensures that the root is not null and checks its type and ID."
+        },
+        "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,boolean)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,boolean)",
+            "method_code": "```java\n  public CompilerInput(SourceAst ast, boolean isExtern) {\n    this(ast, ast.getInputId(), isExtern);\n  }\n\n```",
+            "method_doc": "Initializes a new instance of `CompilerInput` using a `SourceAst`. Calls the overloaded constructor to complete initialization."
+        },
+        "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,InputId,boolean)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,InputId,boolean)",
+            "method_code": "```java\n  public CompilerInput(SourceAst ast, InputId inputId, boolean isExtern) {\n    this.ast = ast;\n    this.id = inputId;\n\n    // TODO(nicksantos): Add a precondition check here. People are passing\n    // in null, but they should not be.\n    if (ast != null && ast.getSourceFile() != null) {\n      ast.getSourceFile().setIsExtern(isExtern);\n    }\n  }\n\n```",
+            "method_doc": "Initializes a new instance of `CompilerInput` using a `SourceAst`, an `InputId`, and a boolean indicating if it's external. Sets the source file's external status accordingly."
+        },
+        "com.google.javascript.jscomp.JSError::getCharno()": {
+            "method_name": "com.google.javascript.jscomp.JSError::getCharno()",
+            "method_code": "```java\n  public int getCharno() {\n    return charno;\n  }\n\n```",
+            "method_doc": " Get the character number. "
+        },
+        "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter::SemanticReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)": {
+            "method_name": "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter::SemanticReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)",
+            "method_code": "```java\n  public SemanticReverseAbstractInterpreter(CodingConvention convention,\n      JSTypeRegistry typeRegistry) {\n    super(convention, typeRegistry);\n  }\n\n```",
+            "method_doc": " Creates a semantic reverse abstract interpreter. "
+        },
+        "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)": {
+            "method_name": "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)",
+            "method_code": "```java\n  public JsAst(SourceFile sourceFile) {\n    this.inputId = new InputId(sourceFile.getName());\n    this.sourceFile = sourceFile;\n    this.fileName = sourceFile.getName();\n  }\n\n```",
+            "method_doc": "This constructor initializes a new `JsAst` object with the provided `sourceFile`. It creates an `InputId` from the source file's name and assigns the source file to the `sourceFile` field."
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.TypeCheckTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Type Annotation\n**Description:** The issue might stem from an incorrect type annotation in the `SOME_DEFAULT` constant. Specifically, the `@const` annotation suggests that `SOME_DEFAULT` should be treated as a constant, but its actual value is an object of type `TwoNumbers`. This discrepancy could lead to type inference issues during compilation.\n\n**Location:** The line where `SOME_DEFAULT` is defined:\n```javascript\n/** @const */ var SOME_DEFAULT =\n```\n\n**Observation Support:** The test output indicates that the found type is `(TwoNumbers|null)`, suggesting that the compiler is interpreting `SOME_DEFAULT` as an object of type `TwoNumbers` rather than a simple number.",
+                "Missing Null Check in Function Return\n**Description:** The function `f()` might be missing a null check before returning `SOME_DEFAULT`. Since `SOME_DEFAULT` can potentially be `null`, the function should explicitly handle this case to ensure it always returns a valid number.\n\n**Location:** The implementation of the `f()` function:\n```javascript\n/** @return {number} */ function f() { return SOME_DEFAULT; }\n```\n\n**Observation Support:** The stack trace points to a comparison failure involving `(TwoNumbers|null)` and `number`, indicating that the function is returning a value that cannot be directly cast to a number without explicit handling.",
+                "Incomplete Interface Definition\n**Description:** The interface `TwoNumbers` might be incomplete or incorrectly defined, leading to ambiguity in the type system. Specifically, the absence of a default constructor or a way to enforce that all properties are initialized properly could cause type inference problems.\n\n**Location:** The definition of the `TwoNumbers` interface:\n```javascript\n/** @interface */\nfunction TwoNumbers() {}\n/** @type number */\nTwoNumbers.prototype.first;\n/** @type number */\nTwoNumbers.prototype.second;\n```\n\n**Observation Support:** The test output mentions that the found type is `{first: number, second: number}`, implying that the compiler is treating `SOME_DEFAULT` as an object with specific properties rather than a simple number.",
+                "Compiler Bug in Type Inference\n**Description:** There might be a bug in the JavaScript compiler's type inference engine that incorrectly handles the combination of `@const` annotations and object literals. This could lead to incorrect type deductions during compilation.\n\n**Location:** Internal logic of the JavaScript compiler's type inference engine.\n\n**Observation Support:** The stack trace shows a comparison failure between `(TwoNumbers|null)` and `number`, suggesting that there is a fundamental issue with how the compiler is processing the type information.",
+                "External Dependencies or Configuration Issue\n**Description:** The issue might be related to external dependencies or configuration settings that affect the behavior of the JavaScript compiler. For example, certain flags or configurations might influence how the compiler interprets type annotations and object literals.\n\n**Location:** External dependencies or configuration files used by the JavaScript compiler.\n\n**Observation Support:** The stack trace and test output do not provide direct evidence pointing to external factors, but the complexity of the type system and the nature of the error suggest that some external setting might be influencing the outcome."
+            ],
+            "selected": 3,
+            "plausibility": {
+                "1": [
+                    8,
+                    6.0
+                ],
+                "2": [
+                    8,
+                    5.333333333333333
+                ],
+                "3": [
+                    8,
+                    7.666666666666667
+                ],
+                "4": [
+                    8,
+                    6.666666666666667
+                ],
+                "5": [
+                    8,
+                    7.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.jscomp.JSError",
+                    "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter",
+                    "com.google.javascript.jscomp.JsAst"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.rhino.jstype.ObjectType",
+                    "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter",
+                    "com.google.javascript.rhino.jstype.FunctionType"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.TypeCheck"
+                ],
+                "5": [
+                    "com.google.javascript.jscomp.TypeCheck",
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry",
+                    "com.google.javascript.jscomp.JSError",
+                    "com.google.javascript.jscomp.CompilerInput",
+                    "com.google.javascript.jscomp.NodeTraversal"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.jscomp.JSError": [
+                        "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+                        "com.google.javascript.jscomp.JSError::getType()"
+                    ],
+                    "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter": [
+                        "com.google.javascript.jscomp.type.SemanticReverseAbstractInterpreter::SemanticReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.jscomp.JsAst": [
+                        "com.google.javascript.jscomp.JsAst::parse(AbstractCompiler)",
+                        "com.google.javascript.jscomp.JsAst::JsAst(SourceFile)"
+                    ]
+                },
+                "2": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::visitReturn(NodeTraversal,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::ensureTyped(NodeTraversal,Node,JSType)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::shouldTolerateUndefinedValues()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()"
+                    ],
+                    "com.google.javascript.rhino.jstype.ObjectType": [
+                        "com.google.javascript.rhino.jstype.ObjectType::defineDeclaredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::defineInferredProperty(String,JSType,Node)",
+                        "com.google.javascript.rhino.jstype.ObjectType::findPropertyType(String)"
+                    ],
+                    "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter": [
+                        "com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter::ChainableReverseAbstractInterpreter(CodingConvention,JSTypeRegistry)"
+                    ],
+                    "com.google.javascript.rhino.jstype.FunctionType": [
+                        "com.google.javascript.rhino.jstype.FunctionType::isInterface()",
+                        "com.google.javascript.rhino.jstype.FunctionType::getReturnType()",
+                        "com.google.javascript.rhino.jstype.FunctionType::isReturnTypeInferred()"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.jscomp.TypeCheck": [
+                        "com.google.javascript.jscomp.TypeCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeCheck::check(Node,boolean)",
+                        "com.google.javascript.jscomp.TypeCheck::visit(NodeTraversal,Node,Node)"
+                    ],
+                    "com.google.javascript.rhino.jstype.JSTypeRegistry": [
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::getErrorReporter()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::resetForTypeCheck()",
+                        "com.google.javascript.rhino.jstype.JSTypeRegistry::initializeBuiltInTypes()"
+                    ],
+                    "com.google.javascript.jscomp.JSError": [
+                        "com.google.javascript.jscomp.JSError::make(String,Node,DiagnosticType,String[])",
+                        "com.google.javascript.jscomp.JSError::getType()",
+                        "com.google.javascript.jscomp.JSError::getCharno()"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,boolean)",
+                        "com.google.javascript.jscomp.CompilerInput::CompilerInput(SourceAst,InputId,boolean)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal$AbstractPostOrderCallback::shouldTraverse(NodeTraversal,Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseRoots(List)"
+                    ]
+                }
+            }
+        }
+    ]
+}

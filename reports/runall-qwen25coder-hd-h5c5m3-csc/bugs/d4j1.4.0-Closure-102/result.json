@@ -1,0 +1,1104 @@
+{
+    "buggy_classes": [
+        "com.google.javascript.jscomp.OptimizeArgumentsArray",
+        "com.google.javascript.jscomp.AbstractCompilerRunner",
+        "com.google.javascript.jscomp.NodeTraversal",
+        "com.google.javascript.jscomp.NodeUtil",
+        "com.google.javascript.jscomp.AbstractCompiler",
+        "com.google.javascript.jscomp.CompilerInput",
+        "com.google.javascript.jscomp.Compiler",
+        "com.google.javascript.rhino.Node",
+        "com.google.javascript.jscomp.VariableReferenceCheck",
+        "com.google.javascript.jscomp.VariableNameGenerator",
+        "com.google.javascript.jscomp.VariableMap",
+        "com.google.javascript.jscomp.FunctionTypeBuilder",
+        "com.google.javascript.jscomp.TypeInferencePass"
+    ],
+    "buggy_methods": [
+        {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::exitScope(NodeTraversal)",
+            "method_code": "```java\n  @Override\n  public void exitScope(NodeTraversal traversal) {\n    Preconditions.checkNotNull(traversal);\n\n    // This is the case when we are exiting the global scope where we had never\n    // collected argument access list. Since we do not perform this optimization\n    // for the global scope, we will skip this exit point.\n    if (currentArgumentsAccess == null) {\n      return;\n    }\n\n    // Attempt to replace the argument access and if the AST has been change,\n    // report back to the compiler.\n    if (tryReplaceArguments(traversal.getScope())) {\n      traversal.getCompiler().reportCodeChange();\n    }\n\n    // After the attempt to replace the arguments. The currentArgumentsAccess\n    // is stale and as we exit the Scope, no longer holds all the access to the\n    // current scope anymore. We'll pop the access list from the outer scope\n    // and set it as currentArgumentsAcess if the outer scope is not the global\n    // scope.\n    if (!argumentsAccessStack.isEmpty()) {\n      currentArgumentsAccess = argumentsAccessStack.pop();\n    } else {\n      currentArgumentsAccess = null;\n    }\n  }\n\n```",
+            "method_doc": "This method attempts to replace arguments array accesses with named parameters and reports changes if any modifications are made.",
+            "class_name": "com.google.javascript.jscomp.OptimizeArgumentsArray",
+            "class_doc": " Optimization for functions that have {@code var_args} or access the arguments array.  <p>Example: <pre> function() { alert(arguments[0] + argument[1]) } </pre> to: <pre> function(a, b) { alert(a, b) } </pre>  Each newly inserted variable name will be unique very much like the output of the AST found after the {@link Normalize} pass.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly deals with the handling of the `arguments` keyword and its replacement with named parameters. The issue described in the test failure involves discrepancies in the AST, specifically related to the presence or absence of the `var` declaration for `arguments`. Given that the method is responsible for optimizing the use of the `arguments` keyword, it is highly probable that fixing issues within this method could resolve the test failures.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::tryReplaceArguments(Scope)",
+            "method_code": "```java\n  private boolean tryReplaceArguments(Scope scope) {\n\n    Node parametersList = scope.getRootNode().getFirstChild().getNext();\n    Preconditions.checkState(parametersList.getType() == Token.LP);\n\n    // Keep track of rather this function modified the AST and needs to be\n    // reported back to the compiler later.\n    boolean changed = false;\n\n    // Number of parameter that can be accessed without using the arguments\n    // array.\n    int numNamedParameter = parametersList.getChildCount();\n\n    // We want to guess what the highest index that has been access from the\n    // arguments array. We will guess that it does not use anything index higher\n    // than the named parameter list first until we see other wise.\n    int highestIndex = numNamedParameter - 1;\n\n    // Iterate through all the references to arguments array in the function to\n    // determine the real highestIndex.\n    for (Node ref : currentArgumentsAccess) {\n\n      Node getElem = ref.getParent();\n      \n      // Bail on anything but argument[c] access where c is a constant.\n      // TODO(user): We might not need to bail out all the time, there might\n      // be more cases that we can cover.\n      if (getElem.getType() != Token.GETELEM) {\n        return false;\n      }\n\n      Node index = ref.getNext();\n\n      // We have something like arguments[x] where x is not a constant. That\n      // means at least one of the access is not known.\n      if (index.getType() != Token.NUMBER) {\n        // TODO(user): Its possible not to give up just yet. The type\n        // inference did a 'semi value propagation'. If we know that string\n        // is never a subclass of the type of the index. We'd know that\n        // it is never 'callee'.\n        return false; // Give up.\n      }\n      \n      Node getElemParent = getElem.getParent();\n      // When we have argument[0](), replacing it with a() is semantically\n      // different if argument[0] is a function call that refers to 'this'\n      if (NodeUtil.isCall(getElemParent) &&\n          getElemParent.getFirstChild() == getElem) {\n        // TODO(user): We can consider using .call() if aliasing that\n        // argument allows shorter alias for other arguments.\n        return false;\n      }\n\n      // Replace the highest index if we see an access that has a higher index\n      // than all the one we saw before.\n      int value = (int) index.getDouble();\n      if (value > highestIndex) {\n        highestIndex = value;\n      }\n    }\n\n    // Number of extra arguments we need.\n    // For example: function() { arguments[3] } access index 3 so\n    // it will need 4 extra named arguments to changed into:\n    // function(a,b,c,d) { d }.\n    int numExtraArgs = highestIndex - numNamedParameter + 1;\n\n    // Temporary holds the new names as string for quick access later.\n    String[] argNames = new String[numExtraArgs];\n\n    // Insert the formal parameter to the method's signature.\n    // Example: function() --> function(r0, r1, r2)\n    for (int i = 0; i < numExtraArgs; i++) {\n      String name = getNewName();\n      argNames[i] = name;\n      parametersList.addChildrenToBack(Node.newString(Token.NAME, name));\n      changed = true;\n    }\n\n    // This loop performs the replacement of arguments[x] -> a if x is known.\n    for (Node ref : currentArgumentsAccess) {\n      Node index = ref.getNext();\n\n      // Skip if it is unknown.\n      if (index.getType() != Token.NUMBER) {\n        continue;\n      }\n      int value = (int) index.getDouble();\n\n      // Unnamed parameter.\n      if (value >= numNamedParameter) {\n        ref.getParent().getParent().replaceChild(ref.getParent(),\n            Node.newString(Token.NAME, argNames[value - numNamedParameter]));\n      } else {\n\n        // Here, for no apparent reason, the user is accessing a named parameter\n        // with arguments[idx]. We can replace it with the actual name for them.\n        Node name = parametersList.getFirstChild();\n\n        // This is a linear search for the actual name from the signature.\n        // It is not necessary to make this fast because chances are the user\n        // will not deliberately write code like this.\n        for (int i = 0; i < value; i++) {\n          name = name.getNext();\n        }\n        ref.getParent().getParent().replaceChild(ref.getParent(),\n            Node.newString(Token.NAME, name.getString()));\n      }\n      changed = true;\n    }\n\n    return changed;\n  }\n\n```",
+            "method_doc": " Tries to optimize all the arguments array access in this scope by assigning a name to each element.  @param scope scope of the function @return true if any modification has been done to the AST ",
+            "class_name": "com.google.javascript.jscomp.OptimizeArgumentsArray",
+            "class_doc": " Optimization for functions that have {@code var_args} or access the arguments array.  <p>Example: <pre> function() { alert(arguments[0] + argument[1]) } </pre> to: <pre> function(a, b) { alert(a, b) } </pre>  Each newly inserted variable name will be unique very much like the output of the AST found after the {@link Normalize} pass.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the optimization of arguments arrays, which is where the issue seems to arise. The method attempts to replace accesses to the `arguments` object with named parameters, but it appears to be incorrectly handling the `var` declaration for `arguments`. Fixing this method could resolve the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)",
+            "method_code": "```java\n  protected void initOptionsFromFlags(CompilerOptions options) {\n\n    DiagnosticGroups diagnosticGroups = getDiagnoticGroups();\n\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_error.get(),\n        CheckLevel.ERROR);\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_warning.get(),\n        CheckLevel.WARNING);\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_off.get(),\n        CheckLevel.OFF);\n\n    createDefineReplacements(FLAG_define.get(), options);\n  }\n\n```",
+            "method_doc": "This method initializes the warning levels and define replacements based on the flags. It calls `getDiagnosticGroups()` to set warning levels and `createDefineReplacements()` to handle define replacements.",
+            "class_name": "com.google.javascript.jscomp.AbstractCompilerRunner",
+            "class_doc": " Implementations of AbstractCompilerRunner translate flags into Java API calls on the Compiler. AbstractCompiler contains common flags and logic to make that happen.  This class may be extended and used to create other Java classes that behave the same as running the Compiler from the command line. Example:  <pre> class MyCompilerRunner extends AbstractCompilerRunner<MyCompiler, MyOptions> { MyCompilerRunner(String[] args) { super(args); }  &#064;Override protected MyOptions createOptions() { MyOptions options = new MyOptions(); CompilerFlagTranslator.setOptionsFromFlags(options); addMyCrazyCompilerPassThatOutputsAnExtraFile(options); return options; }  &#064;Override protected MyCompiler createCompiler() { return new MyCompiler(); }  public static void main(String[] args) { (new MyCompilerRunner(args)).run(); } } </pre>   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the initialization of warning levels and define replacements based on flags. Given the observed issue with the `arguments` keyword transformation, it is plausible that the method's implementation could be causing the unexpected behavior. By ensuring that the `arguments` keyword is correctly handled during the initialization process, the root cause of the test failure can potentially be resolved.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)",
+            "method_code": "```java\n  @VisibleForTesting\n  static void createDefineReplacements(List<String> definitions,\n      CompilerOptions options) {\n    // Parse the definitions\n    for (String override : definitions) {\n      String[] assignment = override.split(\"=\", 2);\n      String defName = assignment[0];\n\n      if (defName.length() > 0) {\n        if (assignment.length == 1) {\n          options.setDefineToBooleanLiteral(defName, true);\n          continue;\n        } else {\n          String defValue = assignment[1];\n\n          if (defValue.equals(\"true\")) {\n            options.setDefineToBooleanLiteral(defName, true);\n            continue;\n          } else if (defValue.equals(\"false\")) {\n            options.setDefineToBooleanLiteral(defName, false);\n            continue;\n          } else if (defValue.length() > 1 &&\n              defValue.charAt(0) == '\\'' &&\n              defValue.charAt(defValue.length() - 1) == '\\'') {\n            // If the value starts and ends with a single quote,\n            // we assume that it's a string.\n            String maybeStringVal =\n                defValue.substring(1, defValue.length() - 1);\n            if (maybeStringVal.indexOf('\\'') == -1) {\n              options.setDefineToStringLiteral(defName, maybeStringVal);\n              continue;\n            }\n          } else {\n            try {\n              options.setDefineToDoubleLiteral(defName,\n                  Double.parseDouble(defValue));\n              continue;\n            } catch (NumberFormatException e) {\n              // do nothing, it will be caught at the end\n            }\n          }\n        }\n      }\n\n      throw new RuntimeException(\n          \"--define flag syntax invalid: \" + override);\n    }\n  }\n\n```",
+            "method_doc": " Create a map of constant names to constant values from a textual description of the map.  @param definitions A list of overriding definitions for defines in the form <name>[=<val>], where <val> is a number, boolean, or single-quoted string without single quotes. ",
+            "class_name": "com.google.javascript.jscomp.AbstractCompilerRunner",
+            "class_doc": " Implementations of AbstractCompilerRunner translate flags into Java API calls on the Compiler. AbstractCompiler contains common flags and logic to make that happen.  This class may be extended and used to create other Java classes that behave the same as running the Compiler from the command line. Example:  <pre> class MyCompilerRunner extends AbstractCompilerRunner<MyCompiler, MyOptions> { MyCompilerRunner(String[] args) { super(args); }  &#064;Override protected MyOptions createOptions() { MyOptions options = new MyOptions(); CompilerFlagTranslator.setOptionsFromFlags(options); addMyCrazyCompilerPassThatOutputsAnExtraFile(options); return options; }  &#064;Override protected MyCompiler createCompiler() { return new MyCompiler(); }  public static void main(String[] args) { (new MyCompilerRunner(args)).run(); } } </pre>   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the parsing and application of define replacements, which could potentially affect how the `arguments` keyword is handled during compilation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "2": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.CATCH:\n        Preconditions.checkState(n.getChildCount() == 3);\n        Preconditions.checkState(n.getFirstChild().getType() == Token.NAME);\n        // the first child is the catch var and the third child\n        // is the code block\n        traverseBranch(n.getFirstChild(), n);\n        traverseBranch(n.getFirstChild().getNext().getNext(), n);\n        break;\n\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it handles the traversal of nodes in the parse tree, including functions and variables. The issue described involves the handling of the `arguments` keyword, which is a special variable in JavaScript. It is plausible that the method is incorrectly optimizing or transforming the `arguments` variable, leading to discrepancies in the AST. Therefore, fixing this method could resolve the test failure.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)",
+            "method_code": "```java\n  private void traverseFunction(Node n, Node parent) {\n    Preconditions.checkState(n.getChildCount() == 3);\n    Preconditions.checkState(n.getType() == Token.FUNCTION);\n\n    final Node fnName = n.getFirstChild();\n\n    boolean anonymous = parent != null && NodeUtil.isFunctionAnonymous(n);\n\n    if (!anonymous) {\n      // Named functions are parent of the containing scope.\n      traverseBranch(fnName, n);\n    }\n\n    curNode = n;\n    pushScope(n);\n\n    if (anonymous) {\n      // Anonymous function names are parent of the contained scope.\n      traverseBranch(fnName, n);\n    }\n\n    final Node args = fnName.getNext();\n    final Node body = args.getNext();\n\n    // Args\n    traverseBranch(args, n);\n\n    // Body\n    Preconditions.checkState(body.getNext() == null &&\n            body.getType() == Token.BLOCK);\n    traverseBranch(body, n);\n\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a function. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it handles the traversal of function nodes, including named and anonymous functions. The issue described involves the handling of the `arguments` keyword, which could potentially be altered or removed during the traversal process. Given that the `arguments` keyword is crucial for maintaining the correct behavior of JavaScript functions, ensuring its proper handling in this method is essential.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "1": 9,
+                "4": 9
+            },
+            "rank_key": [
+                1,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::OptimizeArgumentsArray(AbstractCompiler)",
+            "method_code": "```java\n  OptimizeArgumentsArray(AbstractCompiler compiler) {\n    this(compiler, PARAMETER_PREFIX);\n  }\n\n```",
+            "method_doc": " Construct this pass and use {@link #PARAMETER_PREFIX} as the prefix for all parameter names that it introduces. ",
+            "class_name": "com.google.javascript.jscomp.OptimizeArgumentsArray",
+            "class_doc": " Optimization for functions that have {@code var_args} or access the arguments array.  <p>Example: <pre> function() { alert(arguments[0] + argument[1]) } </pre> to: <pre> function(a, b) { alert(a, b) } </pre>  Each newly inserted variable name will be unique very much like the output of the AST found after the {@link Normalize} pass.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes the class with a compiler instance and a parameter prefix. It does not directly handle the `arguments` keyword or perform any operations that could affect its transformation.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1,
+                2
+            ],
+            "scores_by_hypothesis": {
+                "1": 3,
+                "2": 3
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::NodeTraversal(AbstractCompiler,Callback)",
+            "method_code": "```java\n  public NodeTraversal(AbstractCompiler compiler, Callback cb) {\n    this(compiler, cb, new SyntacticScopeCreator(compiler));\n  }\n\n```",
+            "method_doc": " Creates a node traversal using the specified callback interface. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes the NodeTraversal object with the provided AbstractCompiler and Callback. It does not directly handle the `arguments` keyword or perform any operations that could affect its handling.",
+            "hypothesis": 1,
+            "selected_hypothesis": true,
+            "support": [
+                1
+            ],
+            "scores_by_hypothesis": {
+                "1": 3
+            },
+            "rank_key": [
+                1,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Bug in the Optimization Level\n**Description:** There might be a bug in the implementation of the `SIMPLE_OPTIMIZATIONS` level that affects how the `arguments` keyword is handled.\n\n**Location:** Within the `SimpleOptimizations` pass of the compiler.\n\n**Observation Support:** The test output shows that the `arguments` keyword is being treated differently in the optimized version compared to the unoptimized version. This discrepancy is indicative of a bug in the optimization logic.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly retrieves the AST root from the underlying `SourceAst`, which could be affected by the optimization level set in the compiler.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 9,
+                "4": 3,
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::check()",
+            "method_code": "```java\n  public void check() {\n    runCustomPasses(CustomPassExecutionTime.BEFORE_CHECKS);\n\n    PhaseOptimizer phaseOptimizer = new PhaseOptimizer(this, tracker);\n    if (options_.devMode == DevMode.EVERY_PASS) {\n      phaseOptimizer.setSanityCheck(sanityCheck);\n    }\n    phaseOptimizer.consume(getPassConfig().getChecks());\n    phaseOptimizer.process(externsRoot, jsRoot);\n    if (hasErrors()) {\n      return;\n    }\n\n    // TODO(nicksantos): clean this up. The flow here is too hard to follow.\n    if (options_.nameAnonymousFunctionsOnly) {\n      return;\n    }\n\n    if (options_.removeTryCatchFinally) {\n      removeTryCatchFinally();\n    }\n\n    if (!options_.stripTypes.isEmpty() ||\n        !options_.stripNameSuffixes.isEmpty() ||\n        !options_.stripTypePrefixes.isEmpty() ||\n        !options_.stripNamePrefixes.isEmpty()) {\n      stripCode(options_.stripTypes, options_.stripNameSuffixes,\n          options_.stripTypePrefixes, options_.stripNamePrefixes);\n    }\n\n    runCustomPasses(CustomPassExecutionTime.BEFORE_OPTIMIZATIONS);\n\n    // Ideally, this pass should be the first pass run, however:\n    // 1) VariableReferenceCheck reports unexpected warnings if Normalize\n    // is done first.\n    // 2) ReplaceMessages, stripCode, and potentially custom passes rely on\n    // unmodified local names.\n    normalize();\n  }\n\n```",
+            "method_doc": "This method performs various checks and optimizations on the code, including variable renaming and constant folding.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it encompasses a wide range of checks and optimizations that could potentially affect the handling of the `arguments` variable. Given that the failure involves an issue with variable declaration hoisting, it is reasonable to suspect that the problem lies within the logic that processes variable declarations and their scopes during the compilation process.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 9,
+                "4": 3
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::afterExitScope(NodeTraversal,Map)",
+            "method_code": "```java\n    @Override\n    public void afterExitScope(NodeTraversal t,\n        Map<Var, ReferenceCollection> referenceMap) {\n\n      // Check all vars after finishing a scope\n      for (Iterator<Var> it = t.getScope().getVars(); it.hasNext();) {\n        Var v = it.next();\n        checkVar(t, v, referenceMap.get(v).references);\n      }\n    }\n\n```",
+            "method_doc": "After exiting a scope, this method iterates over all variables in the current scope and calls `checkVar` for each one.",
+            "class_name": "com.google.javascript.jscomp.VariableReferenceCheck",
+            "class_doc": " Checks variables to see if they are referenced before their declaration, or if they are redeclared in a way that is suspicious (i.e. not dictated by control structures). This is a more aggressive version of {@link VarCheck}, but it lacks the cross-module checks.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly interacts with variable declarations and references within scopes, which could potentially identify issues related to variable hoisting and declaration order.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::checkVar(NodeTraversal,Var,List)",
+            "method_code": "```java\n    private void checkVar(NodeTraversal t, Var v, List<Reference> references) {\n      blocksWithDeclarations.clear();\n      boolean isDeclaredInScope = false;\n      boolean isUnhoistedNamedFunction = false;\n      Reference hoistedFn = null;\n\n      // Look for hoisted functions.\n      for (Reference reference : references) {\n        if (reference.isHoistedFunction()) {\n          blocksWithDeclarations.add(reference.getBasicBlock());\n          isDeclaredInScope = true;\n          hoistedFn = reference;\n          break;\n        } else if (NodeUtil.isFunctionDeclaration(\n            reference.getNameNode().getParent())) {\n          isUnhoistedNamedFunction = true;\n        }\n      }\n\n      for (Reference reference : references) {\n        if (reference == hoistedFn) {\n          continue;\n        }\n\n        BasicBlock basicBlock = reference.getBasicBlock();\n        boolean isDeclaration = reference.isDeclaration();\n\n        if (isDeclaration) {\n          // Look through all the declarations we've found so far, and\n          // check if any of them are before this block.\n          for (BasicBlock declaredBlock : blocksWithDeclarations) {\n            if (declaredBlock.provablyExecutesBefore(basicBlock)) {\n              compiler.report(\n                  JSError.make(reference.getSourceName(),\n                      reference.getNameNode(),\n                      checkLevel,\n                      REDECLARED_VARIABLE, v.name));\n              break;\n            }\n          }\n        }\n\n        if (CHECK_UNHOISTED_NAMED_FUNCTIONS && isUnhoistedNamedFunction\n            && !isDeclaration && isDeclaredInScope) {\n          // Only allow an unhoisted named function to be used within the\n          // block it is declared.\n          for (BasicBlock declaredBlock : blocksWithDeclarations) {\n            if (!declaredBlock.provablyExecutesBefore(basicBlock)) {\n              compiler.report(\n                  JSError.make(reference.getSourceName(),\n                      reference.getNameNode(),\n                      checkLevel,\n                      AMBIGUOUS_FUNCTION_DECL, v.name));\n              break;\n            }\n          }\n        }\n\n        if (!isDeclaration && !isDeclaredInScope) {\n          // Special case to deal with var goog = goog || {}\n          Node grandparent = reference.getGrandparent();\n          if (grandparent.getType() == Token.NAME\n              && grandparent.getString() == v.name) {\n            continue;\n          }\n\n          // Only generate warnings if the scopes do not match in order\n          // to deal with possible forward declarations and recursion\n          if (reference.getScope() == v.scope) {\n            compiler.report(\n                JSError.make(reference.getSourceName(),\n                             reference.getNameNode(),\n                             checkLevel,\n                             UNDECLARED_REFERENCE, v.name));\n          }\n        }\n\n        if (isDeclaration) {\n          blocksWithDeclarations.add(basicBlock);\n          isDeclaredInScope = true;\n        }\n      }\n    }\n\n```",
+            "method_doc": " If the variable is declared more than once in a basic block, generate a warning. Also check if a variable is used in a given scope before it is declared, which suggest a likely error. Relies on the fact that references is in parse-tree order. ",
+            "class_name": "com.google.javascript.jscomp.VariableReferenceCheck",
+            "class_doc": " Checks variables to see if they are referenced before their declaration, or if they are redeclared in a way that is suspicious (i.e. not dictated by control structures). This is a more aggressive version of {@link VarCheck}, but it lacks the cross-module checks.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly deals with variable declarations and references, which seems to be the root cause of the issue. The method checks for variable redeclarations and uses before declarations, which aligns with the observed behavior in the test output.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableNameGenerator::VariableNameGenerator(Scope)",
+            "method_code": "```java\n  VariableNameGenerator(Scope scope) {\n    Set<String> usedNames = Sets.newHashSet();\n    for (Iterator<Var> i = scope.getVars(); i.hasNext();) {\n      usedNames.add(i.next().getName());\n    }\n    names = new NameGenerator(usedNames, \"\", null);\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.VariableNameGenerator",
+            "class_doc": " Generates new variables names that would not collide with existing names in a scope.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves generating variable names and managing collisions, which could potentially affect the behavior of the `arguments` variable if not handled correctly.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(Node,JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferParameterTypes(@Nullable Node argsParent,\n      @Nullable JSDocInfo info) {\n    if (argsParent == null) {\n      if (info == null) {\n        return this;\n      } else {\n        return inferParameterTypes(info);\n      }\n    }\n\n    // arguments\n    FunctionParamBuilder builder = new FunctionParamBuilder(typeRegistry);\n    boolean warnedAboutArgList = false;\n    Set<String> allJsDocParams = (info == null) ?\n        Sets.<String>newHashSet() :\n        Sets.newHashSet(info.getParameterNames());\n    boolean foundTemplateType = false;\n    for (Node arg : argsParent.children()) {\n      String argumentName = arg.getString();\n      allJsDocParams.remove(argumentName);\n\n      // type from JSDocInfo\n      JSType parameterType =\n          info != null && info.hasParameterType(argumentName) ?\n          info.getParameterType(argumentName).evaluate(scope) :\n          typeRegistry.getNativeType(UNKNOWN_TYPE);\n      if (templateTypeName != null &&\n          parameterType.restrictByNotNullOrUndefined().isTemplateType()) {\n        if (foundTemplateType) {\n          reportError(TEMPLATE_TYPE_DUPLICATED, fnName);\n        }\n        foundTemplateType = true;\n      }\n      warnedAboutArgList |= addParameter(\n          builder, parameterType, warnedAboutArgList,\n          isOptionalParameter(arg, info),\n          isVarArgsParameter(arg, info));\n    }\n\n    if (templateTypeName != null && !foundTemplateType) {\n      reportError(TEMPLATE_TYPE_EXPECTED, fnName);\n    }\n\n    for (String inexistentName : allJsDocParams) {\n      reportWarning(INEXISTANT_PARAM, inexistentName, fnName);\n    }\n\n    parametersNode = builder.build();\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the parameter types from the list of argument names and the doc info. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly handles the inference of parameter types, which seems to be causing the issue in the test case. The method processes the arguments and JSDocInfo to determine the parameter types, and any bugs in this process could lead to incorrect transformations.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::buildAndRegister()",
+            "method_code": "```java\n  FunctionType buildAndRegister() {\n    if (returnType == null || parametersNode == null) {\n      throw new IllegalStateException(\n          \"All Function types must have params and a return type\");\n    }\n\n    FunctionType fnType;\n    if (isConstructor) {\n      fnType = getOrCreateConstructor();\n    } else if (isInterface) {\n      fnType = typeRegistry.createInterfaceType(fnName, sourceNode);\n      if (scope.isGlobal() && !fnName.isEmpty()) {\n        typeRegistry.declareType(fnName, fnType.getInstanceType());\n      }\n      maybeSetBaseType(fnType);\n    } else {\n      fnType = new FunctionType(typeRegistry, fnName, sourceNode,\n          parametersNode, returnType, thisType, templateTypeName);\n      maybeSetBaseType(fnType);\n    }\n\n    if (implementedInterfaces != null) {\n      fnType.setImplementedInterfaces(implementedInterfaces);\n    }\n\n    typeRegistry.clearTemplateTypeName();\n\n    return fnType;\n  }\n\n```",
+            "method_doc": " Builds the function type, and puts it in the registry. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves the creation and registration of function types, which could potentially lead to issues when handling special cases like the 'arguments' variable.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)",
+            "method_code": "```java\n  void inferTypes(NodeTraversal t, Node n, Scope scope) {\n    TypeInference typeInference =\n        new TypeInference(\n            compiler, computeCfg(n), reverseInterpreter, scope,\n            getUnflowableVars(scope));\n    try {\n      typeInference.analyze();\n      escapedLocalVars.putAll(typeInference.getAssignedOuterLocalVars());\n\n      // Resolve any new type names found during the inference.\n      compiler.getTypeRegistry().resolveTypesInScope(scope);\n\n    } catch (DataFlowAnalysis.MaxIterationsExceededException e) {\n      compiler.report(JSError.make(t, n, DATAFLOW_ERROR));\n    }\n  }\n\n```",
+            "method_doc": "This method performs the actual type inference analysis within a given scope. It uses `TypeInference` to analyze the AST nodes.",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it directly involves the type inference process, which could lead to issues if the types are not correctly inferred. The failure in the test case suggests that there might be an incorrect transformation or handling of the `Function` node, which is a critical part of the type inference process.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass$TypeInferringCallback::enterScope(NodeTraversal)",
+            "method_code": "```java\n    public void enterScope(NodeTraversal t) {\n      Scope scope = t.getScope();\n      Node node = t.getCurrentNode();\n      if (scope.isGlobal()) {\n        inferTypes(t, node, scope);\n      }\n    }\n\n```",
+            "method_doc": "This callback method is invoked when entering a scope; it triggers type inference for global scopes.",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 9.0,
+            "reason": "#9# This method is very likely to be the best location that need to be fixed, because it is responsible for triggering type inference for global scopes. The issue described involves a transformation problem within the `Function` node, which could be related to how the compiler handles scope and variable declarations during type inference.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 9
+            },
+            "rank_key": [
+                0,
+                9.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. ",
+            "class_name": "com.google.javascript.jscomp.NodeTraversal",
+            "class_doc": " Nodetraversal allows an iteration through the nodes in the parse tree, and facilitates the optimizations on the parse tree.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Bug in the Abstract Syntax Tree Comparison Logic\n**Description:** There might be a bug in the logic used to compare the ASTs of the original and compiled code, leading to false negatives when the ASTs are actually equivalent.\n\n**Location:** Within the AST comparison logic of the test framework.\n\n**Observation Support:** The test output shows that the ASTs are considered unequal despite being semantically equivalent. This discrepancy is indicative of a bug in the AST comparison logic.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes a new instance of NodeTraversal and calls its traverse method. The actual traversal logic is implemented in the NodeTraversal class itself, not in this static method.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)",
+            "method_code": "```java\n  public CompilerInput(JSSourceFile file, boolean isExtern) {\n    this.ast = new JsAst(file);\n    this.name = file.getName();\n    this.isExtern = isExtern;\n  }\n\n```",
+            "method_doc": "Initializes a new `CompilerInput` instance with the given `JSSourceFile` and a flag indicating if it's an external file. This constructor creates a new `JsAst` instance and initializes the `name`, `isExtern`, and `ast` fields accordingly. It does not call any other methods from the Covered Methods List.",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Bug in the Optimization Level\n**Description:** There might be a bug in the implementation of the `SIMPLE_OPTIMIZATIONS` level that affects how the `arguments` keyword is handled.\n\n**Location:** Within the `SimpleOptimizations` pass of the compiler.\n\n**Observation Support:** The test output shows that the `arguments` keyword is being treated differently in the optimized version compared to the unoptimized version. This discrepancy is indicative of a bug in the optimization logic.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes the `CompilerInput` instance with the given `JSSourceFile` and a flag indicating if it's an external file. It does not directly handle the `arguments` keyword or perform any optimizations related to it.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "2": 3,
+                "4": 3,
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */",
+            "class_name": "com.google.javascript.jscomp.CompilerInput",
+            "class_doc": " A class for the internal representation of an input to the compiler. Wraps a {@link SourceAst} and maintain state such as module for the input and whether the input is an extern. Also calculates provided and required types.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Bug in the Optimization Level\n**Description:** There might be a bug in the implementation of the `SIMPLE_OPTIMIZATIONS` level that affects how the `arguments` keyword is handled.\n\n**Location:** Within the `SimpleOptimizations` pass of the compiler.\n\n**Observation Support:** The test output shows that the `arguments` keyword is being treated differently in the optimized version compared to the unoptimized version. This discrepancy is indicative of a bug in the optimization logic.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it simply returns a name for the input and does not directly handle the `arguments` keyword. The issue seems to be related to the handling of the `arguments` keyword during optimization, which is likely within the `SimpleOptimizations` pass rather than the `getName()` method.",
+            "hypothesis": 2,
+            "selected_hypothesis": false,
+            "support": [
+                2,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "2": 3,
+                "4": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::compileInternal()",
+            "method_code": "```java\n  private void compileInternal() {\n    parse();\n    if (hasErrors()) {\n      return;\n    }\n\n    if (!precheck()) {\n      return;\n    }\n\n    if (options_.nameAnonymousFunctionsOnly) {\n      // TODO(nicksantos): Move this into an instrument() phase maybe?\n      check();\n      return;\n    }\n\n    if (!options_.skipAllPasses) {\n      check();\n      if (hasErrors()) {\n        return;\n      }\n\n      if (options_.externExportsPath != null) {\n        externExports();\n      }\n\n      // IDE-mode is defined to stop here, before the heavy rewriting begins.\n      if (!options_.ideMode) {\n        optimize();\n      }\n    }\n\n    if (options_.recordFunctionInformation) {\n      recordFunctionInformation();\n    }\n\n    if (options_.devMode == DevMode.START_AND_END) {\n      runSanityCheck();\n    }\n  }\n\n```",
+            "method_doc": "This method orchestrates the internal compilation steps, including parsing, checking, optimization, and recording function information.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it orchestrates the internal compilation steps but does not directly handle variable declarations or the `arguments` object.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                4
+            ],
+            "scores_by_hypothesis": {
+                "3": 3,
+                "4": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::parse()",
+            "method_code": "```java\n  public void parse() {\n    parseInputs();\n  }\n\n```",
+            "method_doc": "This method parses the inputs using the `parseInputs()` method.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only calls another method `parseInputs()` without any additional processing. The issue described seems related to variable declaration hoisting, which is likely happening during the parsing process rather than after it.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.Compiler::process(CompilerPass)",
+            "method_code": "```java\n  void process(CompilerPass p) {\n    p.process(externsRoot, jsRoot);\n  }\n\n```",
+            "method_doc": "This method processes a given compiler pass on the AST.",
+            "class_name": "com.google.javascript.jscomp.Compiler",
+            "class_doc": " Compiler (and the other classes in this package) does the following: <ul> <li>parses JS code <li>checks for undefined variables <li>performs optimizations such as constant folding and constants inlining <li>renames variables (to short names) <li>outputs compact javascript code </ul>  External variables are declared in 'externs' files. For instance, the file may include definitions for global javascript/browser objects such as window, document.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Bug in the Abstract Syntax Tree Comparison Logic\n**Description:** There might be a bug in the logic used to compare the ASTs of the original and compiled code, leading to false negatives when the ASTs are actually equivalent.\n\n**Location:** Within the AST comparison logic of the test framework.\n\n**Observation Support:** The test output shows that the ASTs are considered unequal despite being semantically equivalent. This discrepancy is indicative of a bug in the AST comparison logic.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it simply delegates the processing to another method (`p.process(externsRoot, jsRoot)`). The issue described seems to be related to the AST comparison logic rather than the processing itself.",
+            "hypothesis": 4,
+            "selected_hypothesis": false,
+            "support": [
+                4
+            ],
+            "scores_by_hypothesis": {
+                "4": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::propToString(int)",
+            "method_code": "```java\n    private static final String propToString(int propType) {\n        switch (propType) {\n            case LOCAL_BLOCK_PROP:   return \"local_block\";\n            case OBJECT_IDS_PROP:    return \"object_ids_prop\";\n            case CATCH_SCOPE_PROP:   return \"catch_scope_prop\";\n            case LABEL_ID_PROP:      return \"label_id_prop\";\n            case TARGET_PROP:        return \"target\";\n            case BREAK_PROP:         return \"break\";\n            case CONTINUE_PROP:      return \"continue\";\n            case ENUM_PROP:          return \"enum\";\n            case FUNCTION_PROP:      return \"function\";\n            case TEMP_PROP:          return \"temp\";\n            case LOCAL_PROP:         return \"local\";\n            case CODEOFFSET_PROP:    return \"codeoffset\";\n            case FIXUPS_PROP:        return \"fixups\";\n            case VARS_PROP:          return \"vars\";\n            case USES_PROP:          return \"uses\";\n            case REGEXP_PROP:        return \"regexp\";\n            case CASES_PROP:         return \"cases\";\n            case DEFAULT_PROP:       return \"default\";\n            case CASEARRAY_PROP:     return \"casearray\";\n            case SOURCENAME_PROP:    return \"sourcename\";\n            case TYPE_PROP:          return \"type\";\n            case SPECIAL_PROP_PROP:  return \"special_prop\";\n            case LABEL_PROP:         return \"label\";\n            case FINALLY_PROP:       return \"finally\";\n            case LOCALCOUNT_PROP:    return \"localcount\";\n\n            case TARGETBLOCK_PROP:   return \"targetblock\";\n            case VARIABLE_PROP:      return \"variable\";\n            case LASTUSE_PROP:       return \"lastuse\";\n            case ISNUMBER_PROP:      return \"isnumber\";\n            case DIRECTCALL_PROP:    return \"directcall\";\n\n            case SPECIALCALL_PROP:   return \"specialcall\";\n            case DEBUGSOURCE_PROP:   return \"debugsource\";\n\n            case JSDOC_INFO_PROP:    return \"jsdoc_info\";\n\n            case SKIP_INDEXES_PROP:  return \"skip_indexes\";\n            case INCRDECR_PROP:      return \"incrdecr\";\n            case MEMBER_TYPE_PROP:   return \"member_type\";\n            case NAME_PROP:          return \"name\";\n            case PARENTHESIZED_PROP: return \"parenthesized\";\n            case QUOTED_PROP:        return \"quoted\";\n\n            case SYNTHETIC_BLOCK_PROP: return \"synthetic\";\n            case SOURCEFILE_PROP: return \"sourcefile\";\n            case EMPTY_BLOCK: return \"empty_block\";\n            case ORIGINALNAME_PROP: return \"originalname\";\n            case NO_SIDE_EFFECTS_CALL: return \"no_side_effects_call\";\n\n            case IS_CONSTANT_NAME:   return \"is_constant_name\";\n            case IS_OPTIONAL_PARAM:  return \"is_optional_param\";\n            case IS_VAR_ARGS_PARAM:  return \"is_var_args_param\";\n            case IS_NAMESPACE:       return \"is_namespace\";\n            case IS_DISPATCHER:      return \"is_dispatcher\";\n            case DIRECTIVES:         return \"directives\";\n            case DIRECT_EVAL:        return \"direct_eval\";\n            default:\n              Kit.codeBug();\n\n\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "x..y or x..@i",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it does not directly relate to the issue of variable declaration hoisting or the 'arguments' variable.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 3,
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::newNumber(double)",
+            "method_code": "```java\n    public static Node newNumber(double number) {\n        return new NumberNode(number);\n    }\n\n```",
+            "method_doc": "Creates a new NumberNode with the specified number.",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only creates a new NumberNode and does not directly involve variable declaration hoisting or the 'arguments' object.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 3,
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.rhino.Node::newString(int,String)",
+            "method_code": "```java\n    public static Node newString(int type, String str) {\n        return new StringNode(type, str);\n    }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.rhino.Node",
+            "class_doc": " This class implements the root of the intermediate representation.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only creates a new string node and does not involve any variable declarations or hoisting mechanisms.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3,
+                5
+            ],
+            "scores_by_hypothesis": {
+                "3": 3,
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    ReferenceCollectingCallback callback = new ReferenceCollectingCallback(\n        compiler, new ReferenceCheckingBehavior());\n    callback.process(externs, root);\n  }\n\n```",
+            "method_doc": "This method initializes a `ReferenceCollectingCallback` with a `ReferenceCheckingBehavior` and processes the AST using this callback.",
+            "class_name": "com.google.javascript.jscomp.VariableReferenceCheck",
+            "class_doc": " Checks variables to see if they are referenced before their declaration, or if they are redeclared in a way that is suspicious (i.e. not dictated by control structures). This is a more aggressive version of {@link VarCheck}, but it lacks the cross-module checks.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes a `ReferenceCollectingCallback` and processes the AST using this callback. It does not directly handle variable declarations or references, making it unlikely to be the source of the issue described.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableNameGenerator::getNameNewName()",
+            "method_code": "```java\n  String getNameNewName() {\n    return names.generateNextName();\n  }\n\n```",
+            "method_doc": "",
+            "class_name": "com.google.javascript.jscomp.VariableNameGenerator",
+            "class_doc": " Generates new variables names that would not collide with existing names in a scope.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only generates new variable names and does not directly interact with the 'arguments' variable. The issue seems to be related to variable declaration hoisting within the compiler, rather than the generation of variable names.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.VariableMap::VariableMap(Map)",
+            "method_code": "```java\n  VariableMap(Map<String, String> map) {\n    this.map = Collections.unmodifiableMap(map);\n  }\n\n```",
+            "method_doc": "This constructor initializes the `map` field with an unmodifiable view of the provided `Map<String, String>` parameter. It does not call any other methods from the Covered Methods List.",
+            "class_name": "com.google.javascript.jscomp.VariableMap",
+            "class_doc": " Stores the mapping from original variable name to new variable names. @see RenameVars ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it only initializes the `map` field with an unmodifiable view of the provided `Map<String, String>` parameter. There is no indication that this method is directly related to the issue with the `arguments` variable declaration hoisting.",
+            "hypothesis": 3,
+            "selected_hypothesis": false,
+            "support": [
+                3
+            ],
+            "scores_by_hypothesis": {
+                "3": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::setSourceNode(Node)",
+            "method_code": "```java\n  FunctionTypeBuilder setSourceNode(@Nullable Node sourceNode) {\n    this.sourceNode = sourceNode;\n    return this;\n  }\n\n```",
+            "method_doc": " Sets the FUNCTION node of this function. ",
+            "class_name": "com.google.javascript.jscomp.FunctionTypeBuilder",
+            "class_doc": " A builder for FunctionTypes, because FunctionTypes are so ridiculously complex. All methods return {@code this} for ease of use.  Right now, this mostly uses JSDocInfo to infer type information about functions. In the long term, developers should extend it to use other signals by overloading the various \"inferXXX\" methods. For example, we might want to use {@code goog.inherits} calls as a signal for inheritance, or {@code return} statements as a signal for return type.  NOTE(nicksantos): Organizationally, this feels like it should be in Rhino. But it depends on some coding convention stuff that's really part of JSCompiler.    ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because the issue seems to be related to the transformation of the `Function` node rather than setting its source node.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        },
+        {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+            "method_code": "```java\n  public void process(Node externsRoot, Node jsRoot) {\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    inferTypes(externsAndJs);\n  }\n\n```",
+            "method_doc": " Main entry point for type inference when running over the whole tree.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. ",
+            "class_name": "com.google.javascript.jscomp.TypeInferencePass",
+            "class_doc": " A compiler pass to run the type inference analysis.   ",
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "test_failure_causes": "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug.",
+            "score": 3.0,
+            "reason": "#3# This method is not the best location that need to be fixed, because it does not directly handle the transformation of `Function` nodes. The issue seems to be related to how the `Function` node is being handled during the type inference process, which is likely happening elsewhere in the code.",
+            "hypothesis": 5,
+            "selected_hypothesis": false,
+            "support": [
+                5
+            ],
+            "scores_by_hypothesis": {
+                "5": 3
+            },
+            "rank_key": [
+                0,
+                3.0
+            ]
+        }
+    ],
+    "buggy_codes": {
+        "com.google.javascript.jscomp.OptimizeArgumentsArray::exitScope(NodeTraversal)": {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::exitScope(NodeTraversal)",
+            "method_code": "```java\n  @Override\n  public void exitScope(NodeTraversal traversal) {\n    Preconditions.checkNotNull(traversal);\n\n    // This is the case when we are exiting the global scope where we had never\n    // collected argument access list. Since we do not perform this optimization\n    // for the global scope, we will skip this exit point.\n    if (currentArgumentsAccess == null) {\n      return;\n    }\n\n    // Attempt to replace the argument access and if the AST has been change,\n    // report back to the compiler.\n    if (tryReplaceArguments(traversal.getScope())) {\n      traversal.getCompiler().reportCodeChange();\n    }\n\n    // After the attempt to replace the arguments. The currentArgumentsAccess\n    // is stale and as we exit the Scope, no longer holds all the access to the\n    // current scope anymore. We'll pop the access list from the outer scope\n    // and set it as currentArgumentsAcess if the outer scope is not the global\n    // scope.\n    if (!argumentsAccessStack.isEmpty()) {\n      currentArgumentsAccess = argumentsAccessStack.pop();\n    } else {\n      currentArgumentsAccess = null;\n    }\n  }\n\n```",
+            "method_doc": "This method attempts to replace arguments array accesses with named parameters and reports changes if any modifications are made."
+        },
+        "com.google.javascript.jscomp.OptimizeArgumentsArray::tryReplaceArguments(Scope)": {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::tryReplaceArguments(Scope)",
+            "method_code": "```java\n  private boolean tryReplaceArguments(Scope scope) {\n\n    Node parametersList = scope.getRootNode().getFirstChild().getNext();\n    Preconditions.checkState(parametersList.getType() == Token.LP);\n\n    // Keep track of rather this function modified the AST and needs to be\n    // reported back to the compiler later.\n    boolean changed = false;\n\n    // Number of parameter that can be accessed without using the arguments\n    // array.\n    int numNamedParameter = parametersList.getChildCount();\n\n    // We want to guess what the highest index that has been access from the\n    // arguments array. We will guess that it does not use anything index higher\n    // than the named parameter list first until we see other wise.\n    int highestIndex = numNamedParameter - 1;\n\n    // Iterate through all the references to arguments array in the function to\n    // determine the real highestIndex.\n    for (Node ref : currentArgumentsAccess) {\n\n      Node getElem = ref.getParent();\n      \n      // Bail on anything but argument[c] access where c is a constant.\n      // TODO(user): We might not need to bail out all the time, there might\n      // be more cases that we can cover.\n      if (getElem.getType() != Token.GETELEM) {\n        return false;\n      }\n\n      Node index = ref.getNext();\n\n      // We have something like arguments[x] where x is not a constant. That\n      // means at least one of the access is not known.\n      if (index.getType() != Token.NUMBER) {\n        // TODO(user): Its possible not to give up just yet. The type\n        // inference did a 'semi value propagation'. If we know that string\n        // is never a subclass of the type of the index. We'd know that\n        // it is never 'callee'.\n        return false; // Give up.\n      }\n      \n      Node getElemParent = getElem.getParent();\n      // When we have argument[0](), replacing it with a() is semantically\n      // different if argument[0] is a function call that refers to 'this'\n      if (NodeUtil.isCall(getElemParent) &&\n          getElemParent.getFirstChild() == getElem) {\n        // TODO(user): We can consider using .call() if aliasing that\n        // argument allows shorter alias for other arguments.\n        return false;\n      }\n\n      // Replace the highest index if we see an access that has a higher index\n      // than all the one we saw before.\n      int value = (int) index.getDouble();\n      if (value > highestIndex) {\n        highestIndex = value;\n      }\n    }\n\n    // Number of extra arguments we need.\n    // For example: function() { arguments[3] } access index 3 so\n    // it will need 4 extra named arguments to changed into:\n    // function(a,b,c,d) { d }.\n    int numExtraArgs = highestIndex - numNamedParameter + 1;\n\n    // Temporary holds the new names as string for quick access later.\n    String[] argNames = new String[numExtraArgs];\n\n    // Insert the formal parameter to the method's signature.\n    // Example: function() --> function(r0, r1, r2)\n    for (int i = 0; i < numExtraArgs; i++) {\n      String name = getNewName();\n      argNames[i] = name;\n      parametersList.addChildrenToBack(Node.newString(Token.NAME, name));\n      changed = true;\n    }\n\n    // This loop performs the replacement of arguments[x] -> a if x is known.\n    for (Node ref : currentArgumentsAccess) {\n      Node index = ref.getNext();\n\n      // Skip if it is unknown.\n      if (index.getType() != Token.NUMBER) {\n        continue;\n      }\n      int value = (int) index.getDouble();\n\n      // Unnamed parameter.\n      if (value >= numNamedParameter) {\n        ref.getParent().getParent().replaceChild(ref.getParent(),\n            Node.newString(Token.NAME, argNames[value - numNamedParameter]));\n      } else {\n\n        // Here, for no apparent reason, the user is accessing a named parameter\n        // with arguments[idx]. We can replace it with the actual name for them.\n        Node name = parametersList.getFirstChild();\n\n        // This is a linear search for the actual name from the signature.\n        // It is not necessary to make this fast because chances are the user\n        // will not deliberately write code like this.\n        for (int i = 0; i < value; i++) {\n          name = name.getNext();\n        }\n        ref.getParent().getParent().replaceChild(ref.getParent(),\n            Node.newString(Token.NAME, name.getString()));\n      }\n      changed = true;\n    }\n\n    return changed;\n  }\n\n```",
+            "method_doc": " Tries to optimize all the arguments array access in this scope by assigning a name to each element.  @param scope scope of the function @return true if any modification has been done to the AST "
+        },
+        "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)",
+            "method_code": "```java\n  protected void initOptionsFromFlags(CompilerOptions options) {\n\n    DiagnosticGroups diagnosticGroups = getDiagnoticGroups();\n\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_error.get(),\n        CheckLevel.ERROR);\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_warning.get(),\n        CheckLevel.WARNING);\n    diagnosticGroups.setWarningLevels(\n        options, AbstractCompilerRunner.FLAG_jscomp_off.get(),\n        CheckLevel.OFF);\n\n    createDefineReplacements(FLAG_define.get(), options);\n  }\n\n```",
+            "method_doc": "This method initializes the warning levels and define replacements based on the flags. It calls `getDiagnosticGroups()` to set warning levels and `createDefineReplacements()` to handle define replacements."
+        },
+        "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)": {
+            "method_name": "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)",
+            "method_code": "```java\n  @VisibleForTesting\n  static void createDefineReplacements(List<String> definitions,\n      CompilerOptions options) {\n    // Parse the definitions\n    for (String override : definitions) {\n      String[] assignment = override.split(\"=\", 2);\n      String defName = assignment[0];\n\n      if (defName.length() > 0) {\n        if (assignment.length == 1) {\n          options.setDefineToBooleanLiteral(defName, true);\n          continue;\n        } else {\n          String defValue = assignment[1];\n\n          if (defValue.equals(\"true\")) {\n            options.setDefineToBooleanLiteral(defName, true);\n            continue;\n          } else if (defValue.equals(\"false\")) {\n            options.setDefineToBooleanLiteral(defName, false);\n            continue;\n          } else if (defValue.length() > 1 &&\n              defValue.charAt(0) == '\\'' &&\n              defValue.charAt(defValue.length() - 1) == '\\'') {\n            // If the value starts and ends with a single quote,\n            // we assume that it's a string.\n            String maybeStringVal =\n                defValue.substring(1, defValue.length() - 1);\n            if (maybeStringVal.indexOf('\\'') == -1) {\n              options.setDefineToStringLiteral(defName, maybeStringVal);\n              continue;\n            }\n          } else {\n            try {\n              options.setDefineToDoubleLiteral(defName,\n                  Double.parseDouble(defValue));\n              continue;\n            } catch (NumberFormatException e) {\n              // do nothing, it will be caught at the end\n            }\n          }\n        }\n      }\n\n      throw new RuntimeException(\n          \"--define flag syntax invalid: \" + override);\n    }\n  }\n\n```",
+            "method_doc": " Create a map of constant names to constant values from a textual description of the map.  @param definitions A list of overriding definitions for defines in the form <name>[=<val>], where <val> is a number, boolean, or single-quoted string without single quotes. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+            "method_code": "```java\n  @SuppressWarnings(\"fallthrough\")\n  private void traverseBranch(Node n, Node parent) {\n    int type = n.getType();\n    if (type == Token.SCRIPT) {\n      sourceName = getSourceName(n);\n    }\n\n    curNode = n;\n    if (!callback.shouldTraverse(this, n, parent)) return;\n\n    switch (type) {\n      case Token.CATCH:\n        Preconditions.checkState(n.getChildCount() == 3);\n        Preconditions.checkState(n.getFirstChild().getType() == Token.NAME);\n        // the first child is the catch var and the third child\n        // is the code block\n        traverseBranch(n.getFirstChild(), n);\n        traverseBranch(n.getFirstChild().getNext().getNext(), n);\n        break;\n\n      case Token.FUNCTION:\n        traverseFunction(n, parent);\n        break;\n\n      default:\n        for (Node child = n.getFirstChild(); child != null; ) {\n          // child could be replaced, in which case our child node\n          // would no longer point to the true next\n          Node next = child.getNext();\n          traverseBranch(child, n);\n          child = next;\n        }\n        break;\n    }\n\n    curNode = n;\n    callback.visit(this, n, parent);\n  }\n\n```",
+            "method_doc": " Traverses a branch. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)",
+            "method_code": "```java\n  private void traverseFunction(Node n, Node parent) {\n    Preconditions.checkState(n.getChildCount() == 3);\n    Preconditions.checkState(n.getType() == Token.FUNCTION);\n\n    final Node fnName = n.getFirstChild();\n\n    boolean anonymous = parent != null && NodeUtil.isFunctionAnonymous(n);\n\n    if (!anonymous) {\n      // Named functions are parent of the containing scope.\n      traverseBranch(fnName, n);\n    }\n\n    curNode = n;\n    pushScope(n);\n\n    if (anonymous) {\n      // Anonymous function names are parent of the contained scope.\n      traverseBranch(fnName, n);\n    }\n\n    final Node args = fnName.getNext();\n    final Node body = args.getNext();\n\n    // Args\n    traverseBranch(args, n);\n\n    // Body\n    Preconditions.checkState(body.getNext() == null &&\n            body.getType() == Token.BLOCK);\n    traverseBranch(body, n);\n\n    popScope();\n  }\n\n```",
+            "method_doc": " Traverses a function. "
+        },
+        "com.google.javascript.jscomp.OptimizeArgumentsArray::OptimizeArgumentsArray(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.OptimizeArgumentsArray::OptimizeArgumentsArray(AbstractCompiler)",
+            "method_code": "```java\n  OptimizeArgumentsArray(AbstractCompiler compiler) {\n    this(compiler, PARAMETER_PREFIX);\n  }\n\n```",
+            "method_doc": " Construct this pass and use {@link #PARAMETER_PREFIX} as the prefix for all parameter names that it introduces. "
+        },
+        "com.google.javascript.jscomp.NodeTraversal::NodeTraversal(AbstractCompiler,Callback)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::NodeTraversal(AbstractCompiler,Callback)",
+            "method_code": "```java\n  public NodeTraversal(AbstractCompiler compiler, Callback cb) {\n    this(compiler, cb, new SyntacticScopeCreator(compiler));\n  }\n\n```",
+            "method_doc": " Creates a node traversal using the specified callback interface. "
+        },
+        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+            "method_code": "```java\n  @Override\n  public Node getAstRoot(AbstractCompiler compiler) {\n    return ast.getAstRoot(compiler);\n  }\n\n```",
+            "method_doc": "Retrieves the AST root node for the input using the provided `AbstractCompiler`. This method calls `ast.getAstRoot(compiler)` to obtain the AST root."
+        },
+        "com.google.javascript.jscomp.Compiler::check()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::check()",
+            "method_code": "```java\n  public void check() {\n    runCustomPasses(CustomPassExecutionTime.BEFORE_CHECKS);\n\n    PhaseOptimizer phaseOptimizer = new PhaseOptimizer(this, tracker);\n    if (options_.devMode == DevMode.EVERY_PASS) {\n      phaseOptimizer.setSanityCheck(sanityCheck);\n    }\n    phaseOptimizer.consume(getPassConfig().getChecks());\n    phaseOptimizer.process(externsRoot, jsRoot);\n    if (hasErrors()) {\n      return;\n    }\n\n    // TODO(nicksantos): clean this up. The flow here is too hard to follow.\n    if (options_.nameAnonymousFunctionsOnly) {\n      return;\n    }\n\n    if (options_.removeTryCatchFinally) {\n      removeTryCatchFinally();\n    }\n\n    if (!options_.stripTypes.isEmpty() ||\n        !options_.stripNameSuffixes.isEmpty() ||\n        !options_.stripTypePrefixes.isEmpty() ||\n        !options_.stripNamePrefixes.isEmpty()) {\n      stripCode(options_.stripTypes, options_.stripNameSuffixes,\n          options_.stripTypePrefixes, options_.stripNamePrefixes);\n    }\n\n    runCustomPasses(CustomPassExecutionTime.BEFORE_OPTIMIZATIONS);\n\n    // Ideally, this pass should be the first pass run, however:\n    // 1) VariableReferenceCheck reports unexpected warnings if Normalize\n    // is done first.\n    // 2) ReplaceMessages, stripCode, and potentially custom passes rely on\n    // unmodified local names.\n    normalize();\n  }\n\n```",
+            "method_doc": "This method performs various checks and optimizations on the code, including variable renaming and constant folding."
+        },
+        "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::afterExitScope(NodeTraversal,Map)": {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::afterExitScope(NodeTraversal,Map)",
+            "method_code": "```java\n    @Override\n    public void afterExitScope(NodeTraversal t,\n        Map<Var, ReferenceCollection> referenceMap) {\n\n      // Check all vars after finishing a scope\n      for (Iterator<Var> it = t.getScope().getVars(); it.hasNext();) {\n        Var v = it.next();\n        checkVar(t, v, referenceMap.get(v).references);\n      }\n    }\n\n```",
+            "method_doc": "After exiting a scope, this method iterates over all variables in the current scope and calls `checkVar` for each one."
+        },
+        "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::checkVar(NodeTraversal,Var,List)": {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::checkVar(NodeTraversal,Var,List)",
+            "method_code": "```java\n    private void checkVar(NodeTraversal t, Var v, List<Reference> references) {\n      blocksWithDeclarations.clear();\n      boolean isDeclaredInScope = false;\n      boolean isUnhoistedNamedFunction = false;\n      Reference hoistedFn = null;\n\n      // Look for hoisted functions.\n      for (Reference reference : references) {\n        if (reference.isHoistedFunction()) {\n          blocksWithDeclarations.add(reference.getBasicBlock());\n          isDeclaredInScope = true;\n          hoistedFn = reference;\n          break;\n        } else if (NodeUtil.isFunctionDeclaration(\n            reference.getNameNode().getParent())) {\n          isUnhoistedNamedFunction = true;\n        }\n      }\n\n      for (Reference reference : references) {\n        if (reference == hoistedFn) {\n          continue;\n        }\n\n        BasicBlock basicBlock = reference.getBasicBlock();\n        boolean isDeclaration = reference.isDeclaration();\n\n        if (isDeclaration) {\n          // Look through all the declarations we've found so far, and\n          // check if any of them are before this block.\n          for (BasicBlock declaredBlock : blocksWithDeclarations) {\n            if (declaredBlock.provablyExecutesBefore(basicBlock)) {\n              compiler.report(\n                  JSError.make(reference.getSourceName(),\n                      reference.getNameNode(),\n                      checkLevel,\n                      REDECLARED_VARIABLE, v.name));\n              break;\n            }\n          }\n        }\n\n        if (CHECK_UNHOISTED_NAMED_FUNCTIONS && isUnhoistedNamedFunction\n            && !isDeclaration && isDeclaredInScope) {\n          // Only allow an unhoisted named function to be used within the\n          // block it is declared.\n          for (BasicBlock declaredBlock : blocksWithDeclarations) {\n            if (!declaredBlock.provablyExecutesBefore(basicBlock)) {\n              compiler.report(\n                  JSError.make(reference.getSourceName(),\n                      reference.getNameNode(),\n                      checkLevel,\n                      AMBIGUOUS_FUNCTION_DECL, v.name));\n              break;\n            }\n          }\n        }\n\n        if (!isDeclaration && !isDeclaredInScope) {\n          // Special case to deal with var goog = goog || {}\n          Node grandparent = reference.getGrandparent();\n          if (grandparent.getType() == Token.NAME\n              && grandparent.getString() == v.name) {\n            continue;\n          }\n\n          // Only generate warnings if the scopes do not match in order\n          // to deal with possible forward declarations and recursion\n          if (reference.getScope() == v.scope) {\n            compiler.report(\n                JSError.make(reference.getSourceName(),\n                             reference.getNameNode(),\n                             checkLevel,\n                             UNDECLARED_REFERENCE, v.name));\n          }\n        }\n\n        if (isDeclaration) {\n          blocksWithDeclarations.add(basicBlock);\n          isDeclaredInScope = true;\n        }\n      }\n    }\n\n```",
+            "method_doc": " If the variable is declared more than once in a basic block, generate a warning. Also check if a variable is used in a given scope before it is declared, which suggest a likely error. Relies on the fact that references is in parse-tree order. "
+        },
+        "com.google.javascript.jscomp.VariableNameGenerator::VariableNameGenerator(Scope)": {
+            "method_name": "com.google.javascript.jscomp.VariableNameGenerator::VariableNameGenerator(Scope)",
+            "method_code": "```java\n  VariableNameGenerator(Scope scope) {\n    Set<String> usedNames = Sets.newHashSet();\n    for (Iterator<Var> i = scope.getVars(); i.hasNext();) {\n      usedNames.add(i.next().getName());\n    }\n    names = new NameGenerator(usedNames, \"\", null);\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(Node,JSDocInfo)": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(Node,JSDocInfo)",
+            "method_code": "```java\n  FunctionTypeBuilder inferParameterTypes(@Nullable Node argsParent,\n      @Nullable JSDocInfo info) {\n    if (argsParent == null) {\n      if (info == null) {\n        return this;\n      } else {\n        return inferParameterTypes(info);\n      }\n    }\n\n    // arguments\n    FunctionParamBuilder builder = new FunctionParamBuilder(typeRegistry);\n    boolean warnedAboutArgList = false;\n    Set<String> allJsDocParams = (info == null) ?\n        Sets.<String>newHashSet() :\n        Sets.newHashSet(info.getParameterNames());\n    boolean foundTemplateType = false;\n    for (Node arg : argsParent.children()) {\n      String argumentName = arg.getString();\n      allJsDocParams.remove(argumentName);\n\n      // type from JSDocInfo\n      JSType parameterType =\n          info != null && info.hasParameterType(argumentName) ?\n          info.getParameterType(argumentName).evaluate(scope) :\n          typeRegistry.getNativeType(UNKNOWN_TYPE);\n      if (templateTypeName != null &&\n          parameterType.restrictByNotNullOrUndefined().isTemplateType()) {\n        if (foundTemplateType) {\n          reportError(TEMPLATE_TYPE_DUPLICATED, fnName);\n        }\n        foundTemplateType = true;\n      }\n      warnedAboutArgList |= addParameter(\n          builder, parameterType, warnedAboutArgList,\n          isOptionalParameter(arg, info),\n          isVarArgsParameter(arg, info));\n    }\n\n    if (templateTypeName != null && !foundTemplateType) {\n      reportError(TEMPLATE_TYPE_EXPECTED, fnName);\n    }\n\n    for (String inexistentName : allJsDocParams) {\n      reportWarning(INEXISTANT_PARAM, inexistentName, fnName);\n    }\n\n    parametersNode = builder.build();\n    return this;\n  }\n\n```",
+            "method_doc": " Infer the parameter types from the list of argument names and the doc info. "
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::buildAndRegister()": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::buildAndRegister()",
+            "method_code": "```java\n  FunctionType buildAndRegister() {\n    if (returnType == null || parametersNode == null) {\n      throw new IllegalStateException(\n          \"All Function types must have params and a return type\");\n    }\n\n    FunctionType fnType;\n    if (isConstructor) {\n      fnType = getOrCreateConstructor();\n    } else if (isInterface) {\n      fnType = typeRegistry.createInterfaceType(fnName, sourceNode);\n      if (scope.isGlobal() && !fnName.isEmpty()) {\n        typeRegistry.declareType(fnName, fnType.getInstanceType());\n      }\n      maybeSetBaseType(fnType);\n    } else {\n      fnType = new FunctionType(typeRegistry, fnName, sourceNode,\n          parametersNode, returnType, thisType, templateTypeName);\n      maybeSetBaseType(fnType);\n    }\n\n    if (implementedInterfaces != null) {\n      fnType.setImplementedInterfaces(implementedInterfaces);\n    }\n\n    typeRegistry.clearTemplateTypeName();\n\n    return fnType;\n  }\n\n```",
+            "method_doc": " Builds the function type, and puts it in the registry. "
+        },
+        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)",
+            "method_code": "```java\n  void inferTypes(NodeTraversal t, Node n, Scope scope) {\n    TypeInference typeInference =\n        new TypeInference(\n            compiler, computeCfg(n), reverseInterpreter, scope,\n            getUnflowableVars(scope));\n    try {\n      typeInference.analyze();\n      escapedLocalVars.putAll(typeInference.getAssignedOuterLocalVars());\n\n      // Resolve any new type names found during the inference.\n      compiler.getTypeRegistry().resolveTypesInScope(scope);\n\n    } catch (DataFlowAnalysis.MaxIterationsExceededException e) {\n      compiler.report(JSError.make(t, n, DATAFLOW_ERROR));\n    }\n  }\n\n```",
+            "method_doc": "This method performs the actual type inference analysis within a given scope. It uses `TypeInference` to analyze the AST nodes."
+        },
+        "com.google.javascript.jscomp.TypeInferencePass$TypeInferringCallback::enterScope(NodeTraversal)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass$TypeInferringCallback::enterScope(NodeTraversal)",
+            "method_code": "```java\n    public void enterScope(NodeTraversal t) {\n      Scope scope = t.getScope();\n      Node node = t.getCurrentNode();\n      if (scope.isGlobal()) {\n        inferTypes(t, node, scope);\n      }\n    }\n\n```",
+            "method_doc": "This callback method is invoked when entering a scope; it triggers type inference for global scopes."
+        },
+        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)": {
+            "method_name": "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+            "method_code": "```java\n  public static void traverse(\n      AbstractCompiler compiler, Node root, Callback cb) {\n    NodeTraversal t = new NodeTraversal(compiler, cb);\n    t.traverse(root);\n  }\n\n```",
+            "method_doc": " Traverses a node recursively. "
+        },
+        "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)",
+            "method_code": "```java\n  public CompilerInput(JSSourceFile file, boolean isExtern) {\n    this.ast = new JsAst(file);\n    this.name = file.getName();\n    this.isExtern = isExtern;\n  }\n\n```",
+            "method_doc": "Initializes a new `CompilerInput` instance with the given `JSSourceFile` and a flag indicating if it's an external file. This constructor creates a new `JsAst` instance and initializes the `name`, `isExtern`, and `ast` fields accordingly. It does not call any other methods from the Covered Methods List."
+        },
+        "com.google.javascript.jscomp.CompilerInput::getName()": {
+            "method_name": "com.google.javascript.jscomp.CompilerInput::getName()",
+            "method_code": "```java\n  public String getName() {\n    return name;\n  }\n\n```",
+            "method_doc": "Returns a name for this input. Must be unique across all inputs. */"
+        },
+        "com.google.javascript.jscomp.Compiler::compileInternal()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::compileInternal()",
+            "method_code": "```java\n  private void compileInternal() {\n    parse();\n    if (hasErrors()) {\n      return;\n    }\n\n    if (!precheck()) {\n      return;\n    }\n\n    if (options_.nameAnonymousFunctionsOnly) {\n      // TODO(nicksantos): Move this into an instrument() phase maybe?\n      check();\n      return;\n    }\n\n    if (!options_.skipAllPasses) {\n      check();\n      if (hasErrors()) {\n        return;\n      }\n\n      if (options_.externExportsPath != null) {\n        externExports();\n      }\n\n      // IDE-mode is defined to stop here, before the heavy rewriting begins.\n      if (!options_.ideMode) {\n        optimize();\n      }\n    }\n\n    if (options_.recordFunctionInformation) {\n      recordFunctionInformation();\n    }\n\n    if (options_.devMode == DevMode.START_AND_END) {\n      runSanityCheck();\n    }\n  }\n\n```",
+            "method_doc": "This method orchestrates the internal compilation steps, including parsing, checking, optimization, and recording function information."
+        },
+        "com.google.javascript.jscomp.Compiler::parse()": {
+            "method_name": "com.google.javascript.jscomp.Compiler::parse()",
+            "method_code": "```java\n  public void parse() {\n    parseInputs();\n  }\n\n```",
+            "method_doc": "This method parses the inputs using the `parseInputs()` method."
+        },
+        "com.google.javascript.jscomp.Compiler::process(CompilerPass)": {
+            "method_name": "com.google.javascript.jscomp.Compiler::process(CompilerPass)",
+            "method_code": "```java\n  void process(CompilerPass p) {\n    p.process(externsRoot, jsRoot);\n  }\n\n```",
+            "method_doc": "This method processes a given compiler pass on the AST."
+        },
+        "com.google.javascript.rhino.Node::propToString(int)": {
+            "method_name": "com.google.javascript.rhino.Node::propToString(int)",
+            "method_code": "```java\n    private static final String propToString(int propType) {\n        switch (propType) {\n            case LOCAL_BLOCK_PROP:   return \"local_block\";\n            case OBJECT_IDS_PROP:    return \"object_ids_prop\";\n            case CATCH_SCOPE_PROP:   return \"catch_scope_prop\";\n            case LABEL_ID_PROP:      return \"label_id_prop\";\n            case TARGET_PROP:        return \"target\";\n            case BREAK_PROP:         return \"break\";\n            case CONTINUE_PROP:      return \"continue\";\n            case ENUM_PROP:          return \"enum\";\n            case FUNCTION_PROP:      return \"function\";\n            case TEMP_PROP:          return \"temp\";\n            case LOCAL_PROP:         return \"local\";\n            case CODEOFFSET_PROP:    return \"codeoffset\";\n            case FIXUPS_PROP:        return \"fixups\";\n            case VARS_PROP:          return \"vars\";\n            case USES_PROP:          return \"uses\";\n            case REGEXP_PROP:        return \"regexp\";\n            case CASES_PROP:         return \"cases\";\n            case DEFAULT_PROP:       return \"default\";\n            case CASEARRAY_PROP:     return \"casearray\";\n            case SOURCENAME_PROP:    return \"sourcename\";\n            case TYPE_PROP:          return \"type\";\n            case SPECIAL_PROP_PROP:  return \"special_prop\";\n            case LABEL_PROP:         return \"label\";\n            case FINALLY_PROP:       return \"finally\";\n            case LOCALCOUNT_PROP:    return \"localcount\";\n\n            case TARGETBLOCK_PROP:   return \"targetblock\";\n            case VARIABLE_PROP:      return \"variable\";\n            case LASTUSE_PROP:       return \"lastuse\";\n            case ISNUMBER_PROP:      return \"isnumber\";\n            case DIRECTCALL_PROP:    return \"directcall\";\n\n            case SPECIALCALL_PROP:   return \"specialcall\";\n            case DEBUGSOURCE_PROP:   return \"debugsource\";\n\n            case JSDOC_INFO_PROP:    return \"jsdoc_info\";\n\n            case SKIP_INDEXES_PROP:  return \"skip_indexes\";\n            case INCRDECR_PROP:      return \"incrdecr\";\n            case MEMBER_TYPE_PROP:   return \"member_type\";\n            case NAME_PROP:          return \"name\";\n            case PARENTHESIZED_PROP: return \"parenthesized\";\n            case QUOTED_PROP:        return \"quoted\";\n\n            case SYNTHETIC_BLOCK_PROP: return \"synthetic\";\n            case SOURCEFILE_PROP: return \"sourcefile\";\n            case EMPTY_BLOCK: return \"empty_block\";\n            case ORIGINALNAME_PROP: return \"originalname\";\n            case NO_SIDE_EFFECTS_CALL: return \"no_side_effects_call\";\n\n            case IS_CONSTANT_NAME:   return \"is_constant_name\";\n            case IS_OPTIONAL_PARAM:  return \"is_optional_param\";\n            case IS_VAR_ARGS_PARAM:  return \"is_var_args_param\";\n            case IS_NAMESPACE:       return \"is_namespace\";\n            case IS_DISPATCHER:      return \"is_dispatcher\";\n            case DIRECTIVES:         return \"directives\";\n            case DIRECT_EVAL:        return \"direct_eval\";\n            default:\n              Kit.codeBug();\n\n\n        }\n        return null;\n    }\n\n```",
+            "method_doc": "x..y or x..@i"
+        },
+        "com.google.javascript.rhino.Node::newNumber(double)": {
+            "method_name": "com.google.javascript.rhino.Node::newNumber(double)",
+            "method_code": "```java\n    public static Node newNumber(double number) {\n        return new NumberNode(number);\n    }\n\n```",
+            "method_doc": "Creates a new NumberNode with the specified number."
+        },
+        "com.google.javascript.rhino.Node::newString(int,String)": {
+            "method_name": "com.google.javascript.rhino.Node::newString(int,String)",
+            "method_code": "```java\n    public static Node newString(int type, String str) {\n        return new StringNode(type, str);\n    }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.VariableReferenceCheck::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.VariableReferenceCheck::process(Node,Node)",
+            "method_code": "```java\n  @Override\n  public void process(Node externs, Node root) {\n    ReferenceCollectingCallback callback = new ReferenceCollectingCallback(\n        compiler, new ReferenceCheckingBehavior());\n    callback.process(externs, root);\n  }\n\n```",
+            "method_doc": "This method initializes a `ReferenceCollectingCallback` with a `ReferenceCheckingBehavior` and processes the AST using this callback."
+        },
+        "com.google.javascript.jscomp.VariableNameGenerator::getNameNewName()": {
+            "method_name": "com.google.javascript.jscomp.VariableNameGenerator::getNameNewName()",
+            "method_code": "```java\n  String getNameNewName() {\n    return names.generateNextName();\n  }\n\n```",
+            "method_doc": ""
+        },
+        "com.google.javascript.jscomp.VariableMap::VariableMap(Map)": {
+            "method_name": "com.google.javascript.jscomp.VariableMap::VariableMap(Map)",
+            "method_code": "```java\n  VariableMap(Map<String, String> map) {\n    this.map = Collections.unmodifiableMap(map);\n  }\n\n```",
+            "method_doc": "This constructor initializes the `map` field with an unmodifiable view of the provided `Map<String, String>` parameter. It does not call any other methods from the Covered Methods List."
+        },
+        "com.google.javascript.jscomp.FunctionTypeBuilder::setSourceNode(Node)": {
+            "method_name": "com.google.javascript.jscomp.FunctionTypeBuilder::setSourceNode(Node)",
+            "method_code": "```java\n  FunctionTypeBuilder setSourceNode(@Nullable Node sourceNode) {\n    this.sourceNode = sourceNode;\n    return this;\n  }\n\n```",
+            "method_doc": " Sets the FUNCTION node of this function. "
+        },
+        "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)": {
+            "method_name": "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+            "method_code": "```java\n  public void process(Node externsRoot, Node jsRoot) {\n    Node externsAndJs = jsRoot.getParent();\n    Preconditions.checkState(externsAndJs != null);\n    Preconditions.checkState(\n        externsRoot == null || externsAndJs.hasChild(externsRoot));\n\n    inferTypes(externsAndJs);\n  }\n\n```",
+            "method_doc": " Main entry point for type inference when running over the whole tree.  @param externsRoot The root of the externs parse tree. @param jsRoot The root of the input parse tree to be checked. "
+        }
+    },
+    "hypodeduce": [
+        {
+            "test_suite": "com.google.javascript.jscomp.CompilerRunnerTest",
+            "settings": {
+                "hypotheses": 5,
+                "classes": 5,
+                "methods": 3,
+                "selection": "max"
+            },
+            "hypotheses": [
+                "Incorrect Handling of `arguments` Keyword\n**Description:** The compiler might be incorrectly handling the `arguments` keyword, leading to unexpected transformations or optimizations that result in a different AST than expected.\n\n**Location:** Likely within the compiler's handling of the `arguments` keyword during optimization phases.\n\n**Observation Support:** The test output indicates a discrepancy between the expected and actual ASTs. Specifically, the expected AST does not have the `var` declaration for `arguments`, while the actual AST does. This suggests that the compiler might be removing the `var` declaration during optimization, which is incorrect behavior.",
+                "Bug in the Optimization Level\n**Description:** There might be a bug in the implementation of the `SIMPLE_OPTIMIZATIONS` level that affects how the `arguments` keyword is handled.\n\n**Location:** Within the `SimpleOptimizations` pass of the compiler.\n\n**Observation Support:** The test output shows that the `arguments` keyword is being treated differently in the optimized version compared to the unoptimized version. This discrepancy is indicative of a bug in the optimization logic.",
+                "Issue with Variable Declaration Hoisting\n**Description:** The compiler might be incorrectly hoisting the `arguments` variable declaration, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's variable declaration hoisting mechanism.\n\n**Observation Support:** The test output indicates that the `arguments` variable is declared with `var` in the actual AST but not in the expected AST. This suggests that the compiler might be hoisting the declaration incorrectly, which is a known issue in some JavaScript engines.",
+                "Bug in the Abstract Syntax Tree Comparison Logic\n**Description:** There might be a bug in the logic used to compare the ASTs of the original and compiled code, leading to false negatives when the ASTs are actually equivalent.\n\n**Location:** Within the AST comparison logic of the test framework.\n\n**Observation Support:** The test output shows that the ASTs are considered unequal despite being semantically equivalent. This discrepancy is indicative of a bug in the AST comparison logic.",
+                "Issue with the `Function` Node Transformation\n**Description:** The compiler might be incorrectly transforming the `Function` node, leading to a mismatch between the expected and actual ASTs.\n\n**Location:** Within the compiler's transformation logic for `Function` nodes.\n\n**Observation Support:** The test output indicates that the `Function` node is being transformed in a way that introduces additional declarations (e.g., `var arguments`). This suggests that the compiler might be applying incorrect transformations to the `Function` node, which is a potential bug."
+            ],
+            "selected": 1,
+            "plausibility": {
+                "1": [
+                    9,
+                    9.0
+                ],
+                "2": [
+                    9,
+                    9.0
+                ],
+                "3": [
+                    9,
+                    9.0
+                ],
+                "4": [
+                    9,
+                    9.0
+                ],
+                "5": [
+                    9,
+                    9.0
+                ]
+            },
+            "classes": {
+                "1": [
+                    "com.google.javascript.jscomp.OptimizeArgumentsArray",
+                    "com.google.javascript.jscomp.AbstractCompilerRunner",
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.NodeUtil",
+                    "com.google.javascript.jscomp.AbstractCompiler"
+                ],
+                "2": [
+                    "com.google.javascript.jscomp.OptimizeArgumentsArray",
+                    "com.google.javascript.jscomp.AbstractCompilerRunner",
+                    "com.google.javascript.jscomp.CompilerInput",
+                    "com.google.javascript.jscomp.AbstractCompiler"
+                ],
+                "3": [
+                    "com.google.javascript.jscomp.Compiler",
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.jscomp.VariableReferenceCheck",
+                    "com.google.javascript.jscomp.VariableNameGenerator",
+                    "com.google.javascript.jscomp.VariableMap"
+                ],
+                "4": [
+                    "com.google.javascript.jscomp.NodeTraversal",
+                    "com.google.javascript.jscomp.AbstractCompilerRunner",
+                    "com.google.javascript.jscomp.CompilerInput",
+                    "com.google.javascript.jscomp.Compiler"
+                ],
+                "5": [
+                    "com.google.javascript.rhino.Node",
+                    "com.google.javascript.jscomp.CompilerInput",
+                    "com.google.javascript.jscomp.AbstractCompiler",
+                    "com.google.javascript.jscomp.FunctionTypeBuilder",
+                    "com.google.javascript.jscomp.TypeInferencePass"
+                ]
+            },
+            "methods": {
+                "1": {
+                    "com.google.javascript.jscomp.OptimizeArgumentsArray": [
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::exitScope(NodeTraversal)",
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::tryReplaceArguments(Scope)",
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::OptimizeArgumentsArray(AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.AbstractCompilerRunner": [
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)",
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)"
+                    ],
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::NodeTraversal(AbstractCompiler,Callback)"
+                    ],
+                    "com.google.javascript.jscomp.NodeUtil": []
+                },
+                "2": {
+                    "com.google.javascript.jscomp.OptimizeArgumentsArray": [
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::exitScope(NodeTraversal)",
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::tryReplaceArguments(Scope)",
+                        "com.google.javascript.jscomp.OptimizeArgumentsArray::OptimizeArgumentsArray(AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.AbstractCompilerRunner": [
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)",
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)",
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::getName()"
+                    ]
+                },
+                "3": {
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::compileInternal()",
+                        "com.google.javascript.jscomp.Compiler::parse()",
+                        "com.google.javascript.jscomp.Compiler::check()"
+                    ],
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::propToString(int)",
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ],
+                    "com.google.javascript.jscomp.VariableReferenceCheck": [
+                        "com.google.javascript.jscomp.VariableReferenceCheck::process(Node,Node)",
+                        "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::afterExitScope(NodeTraversal,Map)",
+                        "com.google.javascript.jscomp.VariableReferenceCheck$ReferenceCheckingBehavior::checkVar(NodeTraversal,Var,List)"
+                    ],
+                    "com.google.javascript.jscomp.VariableNameGenerator": [
+                        "com.google.javascript.jscomp.VariableNameGenerator::getNameNewName()",
+                        "com.google.javascript.jscomp.VariableNameGenerator::VariableNameGenerator(Scope)"
+                    ],
+                    "com.google.javascript.jscomp.VariableMap": [
+                        "com.google.javascript.jscomp.VariableMap::VariableMap(Map)"
+                    ]
+                },
+                "4": {
+                    "com.google.javascript.jscomp.NodeTraversal": [
+                        "com.google.javascript.jscomp.NodeTraversal::traverse(AbstractCompiler,Node,Callback)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseBranch(Node,Node)",
+                        "com.google.javascript.jscomp.NodeTraversal::traverseFunction(Node,Node)"
+                    ],
+                    "com.google.javascript.jscomp.AbstractCompilerRunner": [
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::initOptionsFromFlags(CompilerOptions)",
+                        "com.google.javascript.jscomp.AbstractCompilerRunner::createDefineReplacements(List,CompilerOptions)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)",
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)",
+                        "com.google.javascript.jscomp.CompilerInput::getName()"
+                    ],
+                    "com.google.javascript.jscomp.Compiler": [
+                        "com.google.javascript.jscomp.Compiler::compileInternal()",
+                        "com.google.javascript.jscomp.Compiler::check()",
+                        "com.google.javascript.jscomp.Compiler::process(CompilerPass)"
+                    ]
+                },
+                "5": {
+                    "com.google.javascript.rhino.Node": [
+                        "com.google.javascript.rhino.Node::propToString(int)",
+                        "com.google.javascript.rhino.Node::newNumber(double)",
+                        "com.google.javascript.rhino.Node::newString(int,String)"
+                    ],
+                    "com.google.javascript.jscomp.CompilerInput": [
+                        "com.google.javascript.jscomp.CompilerInput::CompilerInput(JSSourceFile,boolean)",
+                        "com.google.javascript.jscomp.CompilerInput::getAstRoot(AbstractCompiler)"
+                    ],
+                    "com.google.javascript.jscomp.FunctionTypeBuilder": [
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::setSourceNode(Node)",
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::inferParameterTypes(Node,JSDocInfo)",
+                        "com.google.javascript.jscomp.FunctionTypeBuilder::buildAndRegister()"
+                    ],
+                    "com.google.javascript.jscomp.TypeInferencePass": [
+                        "com.google.javascript.jscomp.TypeInferencePass::process(Node,Node)",
+                        "com.google.javascript.jscomp.TypeInferencePass::inferTypes(NodeTraversal,Node,Scope)",
+                        "com.google.javascript.jscomp.TypeInferencePass$TypeInferringCallback::enterScope(NodeTraversal)"
+                    ]
+                }
+            }
+        }
+    ]
+}
