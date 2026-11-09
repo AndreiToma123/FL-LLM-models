@@ -29,13 +29,17 @@ All values were read from the code and the existing run files on 2026-11-09 (see
   tied are ordered by the expected 0-9 score from log-probabilities. Prompt versions 239089a8c86f (S5, S5+S2) and
   75b2b186403e (S8a, S8a+S2).
 - Also reported (secondary): S5, S5+S2, S8a, S6, S1 and the gate S0 > S6 > S8a+S2 (margin 0.5).
-- Open point for the user: the execution plan (15, C3) suggests S5 as the simple main selector. Changing the main
-  selector now, after the S8a+S2 and S5 results of both datasets were seen, would be a choice made after looking
-  at results; keeping S8a+S2 as main and reporting S5 next to it avoids that.
+- Decided by the user 2026-11-09: S8a+S2 stays the main selector; testing the other selectors as main (for example
+  plain S5) is future work. The judge job still writes the other selectors' results, for that future work.
 
 ## Run protocol
-- 3 independent runs per setting and dataset (`--rep 1..3`), no reruns of failed bugs (`--retries 0`, no
-  `--retry-failed`); a failed bug is a miss and is listed with its reason.
+- **One run per setting and dataset (`--rep 1`; user decision 2026-11-09)**, all with the same code version; no reruns
+  of failed bugs (`--retries 0`, no `--retry-failed`); a failed bug is a miss and is listed with its reason. All old
+  SoapFL / class-widening results on datasets 1 and 2 are replaced by these runs.
+- Report dataset 1 twice: all 388 bugs, and the 288 bugs outside the 100-bug design sample of
+  `configs/selection_split.json` (`analyze.py tables --heldout`; computed from the same runs, no separate run).
+- Main comparison per research question (confirmed by the user 2026-11-09): RQ1 always vs SoapFL, RQ2 gated vs
+  SoapFL, RQ3 SoapFL + S8a+S2 vs SoapFL (Top-1, exact McNemar); all others exploratory, Holm-corrected.
 - Safeguards: 1 h per bug; stuck-bug guard 3 x p95 (at least 10 min) once all bugs started; circuit breaker at more
   than 50% failures after 30 attempts; judge questions give up after 120 s; Slurm limits 4 h (front end), 2 h (judge).
 - Counting: every bug of the dataset counts; no output = miss. Top-1/3/5, MRR; exact McNemar on the median run.

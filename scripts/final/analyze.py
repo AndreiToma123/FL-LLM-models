@@ -31,6 +31,8 @@ sys.path.insert(0, ROOT)
 from fl_tools.bugs import DATASETS, all_bugs  # noqa: E402
 
 MISS = 10 ** 6
+_SPLIT = json.load(open(os.path.join(ROOT, "configs", "selection_split.json")))
+DESIGN_BUGS = set(_SPLIT["dev"]) | set(_SPLIT["test"])   # the 100 bugs the judge was designed and first tested on
 SETTINGS = [  # (label, run-name pattern; {d} = dataset suffix, {r} = repetition suffix)
     ("SoapFL", "runall-qwen25coder{d}-csc{r}"),
     ("Class widening (always)", "runall-qwen25coder-ca3{d}-csc{r}"),
@@ -330,9 +332,15 @@ def cmd_tables(args):
                     tabs.append(None)
                     continue
                 sel = _sel_dir(args, run) if judged else None
-                tabs.append(read_run(run_dir, sel)[0] if (sel or not judged) else None)
+                t = read_run(run_dir, sel)[0] if (sel or not judged) else None
+                if t is not None and args.heldout:
+                    t = {b: v for b, v in t.items() if b not in DESIGN_BUGS}
+                tabs.append(t)
             data[(label, judged)] = tabs
-    lines = [f"# {DATASET_LABEL.get(ds, ds)}: results over {len(rsufs)} run(s)", "",
+    n_held = next((len(t) for ts in data.values() for t in ts if t), 0)
+    part = (f" - only the {n_held} bugs never used to design the "
+            "judge (the 100-bug design sample of configs/selection_split.json left out)") if args.heldout else ""
+    lines = [f"# {DATASET_LABEL.get(ds, ds)}{part}: results over {len(rsufs)} run(s)", "",
              f"Judge = selector {args.selector} replayed on each run's own candidate lists. Every bug counts; a bug "
              "without output is a miss. Median and range (min-max) over the runs that exist.", ""]
     for top, key in ((1, "top1"), (3, "top3"), (5, "top5")):
@@ -399,7 +407,7 @@ def cmd_tables(args):
                 if tabs[i] and tabs[j]:
                     flips = sum((tabs[i][b]["rank"] <= 1) != (tabs[j].get(b, {}).get("rank", MISS) <= 1) for b in tabs[i])
                     lines.append(f"| {label}{' + judge' if judged else ''} | {i + 1} vs {j + 1} | {flips} |")
-    _write(os.path.join(args.out, f"TABLES_{ds}.md"), "\n".join(lines) + "\n")
+    _write(os.path.join(args.out, f"TABLES_{ds}{'_heldout' if args.heldout else ''}.md"), "\n".join(lines) + "\n")
 
 
 def main(argv=None):
@@ -411,7 +419,9 @@ def main(argv=None):
     ap.add_argument("--selector", default="S8a+S2")
     ap.add_argument("--out", default=os.path.join("reports", "final"))
     ap.add_argument("--dataset", default="d4j14")
-    ap.add_argument("--reps", type=int, default=3, help="tables: runs per setting (-r1..-rN); 0 = the old unsuffixed runs")
+    ap.add_argument("--heldout", action="store_true",
+                    help="tables: only the bugs outside the 100-bug design sample (288 on dataset 1)")
+    ap.add_argument("--reps", type=int, default=1, help="tables: runs per setting (-r1..-rN; default 1 = the -r1 runs); 0 = the old unsuffixed runs")
     args = ap.parse_args(argv)
     if args.command != "tables" and not args.runs:
         ap.error("give at least one run name (folder under --reports)")
