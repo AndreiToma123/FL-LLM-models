@@ -29,7 +29,7 @@ esac
 mkdir -p "$WORK/results/_failure_context" "$WORK/cache" "$JUDGE_CACHE_DIR" "$OUT_DIR" "$FL_ROOT/logs" \
   || fail "cannot create folders"
 log "job $SLURM_JOB_ID on $(hostname): judge $FL_PRESET ($FL_HF_REPO); runs: $FL_RUNS"
-log "selectors $FL_SELECTORS; ladder ${FL_LADDER:-none}; split $FL_SPLIT; shortlist $FL_SHORTLIST (K $FL_K); out $FL_OUT"
+log "selectors $FL_SELECTORS; ladder ${FL_LADDER:-none}; split $FL_SPLIT; shortlist $FL_SHORTLIST (K $FL_K); out $FL_OUT; judge question limit ${FL_CALL_TIMEOUT:-120}s"
 
 IFS=',' read -r -a RUNS <<< "$FL_RUNS"
 for r in "${RUNS[@]}"; do
@@ -109,7 +109,7 @@ for r in "${RUNS[@]}"; do
   T_RUN=$(date +%s)
   log "=== $r: select $FL_SELECTORS"
   SEL=(python -m fl_tools select "reports/$r" --selector "$FL_SELECTORS" --judge-model "$FL_PRESET"
-       --split "$FL_SPLIT" --shortlist "$FL_SHORTLIST" --k "$FL_K" --jobs "$FL_SEL_JOBS"
+       --split "$FL_SPLIT" --shortlist "$FL_SHORTLIST" --k "$FL_K" --jobs "$FL_SEL_JOBS" --call-timeout "${FL_CALL_TIMEOUT:-120}"
        --cache "/work/judge/$r.jsonl" --out-root "$OUT_C" ${FL_EXTRA:-})
   "${SF[@]}" "${SEL[@]}" > "$JOB_LOG_DIR/$r-select.txt" 2>&1 &
   SEL_PID=$!
@@ -134,7 +134,8 @@ except Exception:
 data["jobs"].append({"slurm_job_id": "$SLURM_JOB_ID", "node": "$(hostname)", "judge": "$FL_HF_REPO",
                      "served_name": "$FL_PRESET", "vllm_module": "$VLLM_MODULE", "selectors": "$FL_SELECTORS",
                      "ladder": "$FL_LADDER", "split": "$FL_SPLIT", "shortlist": "$FL_SHORTLIST", "k": $FL_K,
-                     "parallel_bugs": $FL_SEL_JOBS, "elapsed_s": $E,
+                     "parallel_bugs": $FL_SEL_JOBS, "elapsed_s": $E, "call_timeout_s": ${FL_CALL_TIMEOUT:-120},
+                     "git_commit": "$(git -C "$FL_REPO" rev-parse HEAD 2>/dev/null || echo unknown)",
                      "gpu_billing_units_est": round($E / 3600 * 200, 1), "exit": $rc})
 json.dump(data, open(path, "w"), indent=2)
 PY

@@ -19,7 +19,10 @@
 #                     has a 150k-file quota; a relative DIR is a folder inside the repository)
 #   --context         first export the failure context of bugs that have none (runs their failing tests;
 #                     needed for new runs whose bugs are not in reports/_failure_context; skipped bugs are free)
-#   --jobs N          bugs judged in parallel (default 32)    --time HH:MM:SS (default 04:00:00)
+#   --jobs N          bugs judged in parallel (default 32)    --time HH:MM:SS (default 02:00:00; the judge jobs of
+#                     2026-11 took 2-7 min, so 2 h is only the backstop; billing counts elapsed time, not --time)
+#   --call-timeout S  give up one judge question after S seconds (default 120; 2 retries, then the replay of that
+#                     run stops with an error instead of waiting on a hung server; answers so far stay cached)
 #   --partition P     --name NAME     --smoke (gputest, 15 min)    --dry-run
 # Re-submitting the same command resumes: every judge answer is cached in $FL_ROOT/judge-cache/<run>.jsonl.
 set -euo pipefail
@@ -27,10 +30,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 cd "$FL_REPO"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-[ $# -ge 2 ] || { sed -n 2,26p "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n 2,29p "$0"; exit 2; }
 PRESET="$1"; RUNS="$2"; shift 2
 SELECTORS="S0,S0r,S1,S6,S5,S5+S2,S8a,S8a+S2"; LADDER="S6,S8a+S2"; SPLIT=none; SHORTLIST=top-tie; K=8
-OUT=""; CONTEXT=0; SEL_JOBS=32; CTX_JOBS=16; TIME=""; PARTITION=""; NAME=""; SMOKE=0; DRY=0
+OUT=""; CONTEXT=0; SEL_JOBS=32; CTX_JOBS=16; CALL_TIMEOUT=120; TIME=""; PARTITION=""; NAME=""; SMOKE=0; DRY=0
 EXTRA=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
     --out) OUT="$2"; shift ;;
     --context) CONTEXT=1 ;;
     --jobs) SEL_JOBS="$2"; shift ;;
+    --call-timeout) CALL_TIMEOUT="$2"; shift ;;
     --time) TIME="$2"; shift ;;
     --partition) PARTITION="$2"; shift ;;
     --name) NAME="$2"; shift ;;
@@ -93,7 +97,7 @@ if [ "$SMOKE" = 1 ]; then
   PARTITION="${PARTITION:-gputest}"; TIME="${TIME:-00:15:00}"; ENFORCE_EAGER=1
   NAME="${NAME:-select-smoke}"
 else
-  PARTITION="${PARTITION:-gpumedium}"; TIME="${TIME:-04:00:00}"; ENFORCE_EAGER=0
+  PARTITION="${PARTITION:-gpumedium}"; TIME="${TIME:-02:00:00}"; ENFORCE_EAGER=0
   NAME="${NAME:-select-${RUN_LIST[0]}$( [ "${#RUN_LIST[@]}" -gt 1 ] && echo "-and-$(( ${#RUN_LIST[@]} - 1 ))" || true )}"
 fi
 
@@ -102,6 +106,7 @@ JOB_ENV="$FL_ROOT/logs/$NAME-$(date +%Y%m%d-%H%M%S).env"
 {
   for v in PRESET:FL_PRESET RUNS:FL_RUNS SELECTORS:FL_SELECTORS LADDER:FL_LADDER SPLIT:FL_SPLIT \
            SHORTLIST:FL_SHORTLIST K:FL_K OUT:FL_OUT CONTEXT:FL_CONTEXT SEL_JOBS:FL_SEL_JOBS CTX_JOBS:FL_CTX_JOBS \
+           CALL_TIMEOUT:FL_CALL_TIMEOUT \
            EXTRA:FL_EXTRA HF_REPO:FL_HF_REPO MODEL_DIR:FL_MODEL_DIR CTX:FL_CTX ENFORCE_EAGER:FL_ENFORCE_EAGER \
            FL_REPO:FL_REPO; do
     src="${v%%:*}"; printf '%s=%q\n' "${v#*:}" "${!src}"
@@ -111,7 +116,7 @@ CMD=(sbatch --account="$CSC_PROJECT" --partition="$PARTITION" --time="$TIME" --g
      --job-name="fl-$NAME" --output="$FL_ROOT/logs/%x-%j.out"
      --export=ALL,FL_JOB_ENV="$JOB_ENV" "$FL_REPO/csc/select_job.sbatch")
 echo "select job $NAME: judge $PRESET ($HF_REPO) on ${#RUN_LIST[@]} run(s): $RUNS"
-echo "  selectors $SELECTORS; gate ${LADDER:-none}; split $SPLIT; shortlist $SHORTLIST; out $OUT; partition $PARTITION, limit $TIME"
+echo "  selectors $SELECTORS; gate ${LADDER:-none}; split $SPLIT; shortlist $SHORTLIST; out $OUT; partition $PARTITION, limit $TIME; judge question limit ${CALL_TIMEOUT}s"
 if [ "$DRY" = 1 ]; then printf '%q ' "${CMD[@]}"; echo; exit 0; fi
 "${CMD[@]}"
 echo "follow it with:  squeue --me    and    tail -f $FL_ROOT/logs/fl-$NAME-<jobid>.out"

@@ -149,6 +149,11 @@ log "runner finished (exit $RC) after $(( (T_END - T_RUN) / 60 )) min"
 
 # ---------------------------------------------------------------- record the job, analyse, export
 GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)
+# settings sheet (thesis A3): exact code version and model weights, so every run can be traced
+GIT_COMMIT=$(git -C "$FL_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY=$(git -C "$FL_REPO" status --porcelain --untracked-files=no -- fl_tools csc configs patches 2>/dev/null | wc -l)
+WEIGHTS_ID=$(cat "$FL_MODEL_DIR"/.cache/huggingface/download/*.metadata 2>/dev/null | head -1)
+WEIGHTS_ID=${WEIGHTS_ID:-$(sha256sum "$FL_MODEL_DIR/config.json" 2>/dev/null | cut -c1-16)}
 python3 - "$WORK/results/$RUN/job_meta.json" <<PY
 import json, os, sys
 path = sys.argv[1]
@@ -166,6 +171,8 @@ data["jobs"].append({
     "started": $T0, "vllm_ready_s": $T_READY - $T0, "run_s": $T_END - $T_RUN, "elapsed_s": elapsed,
     "gpu_billing_units_est": round(elapsed / 3600 * 200, 1), "runner_exit": $RC,
     "stopped_by_time_limit": $STOPPING == 1,
+    "git_commit": "$GIT_COMMIT", "git_uncommitted_files": $GIT_DIRTY, "model_weights_id": "$WEIGHTS_ID",
+    "runner_args": """${FL_PIPELINE_ARGS:-}""", "per_bug_timeout_s": 3600,
 })
 json.dump(data, open(path, "w"), indent=2)
 PY

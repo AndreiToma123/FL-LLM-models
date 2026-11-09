@@ -85,6 +85,20 @@ bash csc/submit_select.sh qwen25coder run100-qwen25coder --split default --revea
   tests; all 832 dataset-1/2 bugs already have one, so only needed for other bugs).
 - vLLM gets `--enable-auto-tool-choice --tool-call-parser hermes` for the agent selector S8b (native tool calls).
 
+## Official runs (thesis protocol of 2026-11-09)
+
+Smoke test first, then stop and look at the report (details: `docs/AUDIT_2026-11-09.md`, section 9):
+
+    bash csc/smoke_all.sh            # 6 small jobs: 5 bugs x SoapFL / always / gated x 2 datasets
+    bash csc/smoke_all.sh judge      # when they are done: one judge job on the 6 smoke runs
+    bash csc/smoke_all.sh report     # writes reports/final/SMOKE_REPORT.md
+
+Then 3 independent runs per setting (`--rep 1`, `--rep 2`, `--rep 3`): the run name gets `-r<N>`, the SoapFL seed is
+N-1, failed bugs are never re-run (`--retries 0`; `--retry-failed` is refused). Replay the judge on each run's own
+lists with `csc/submit_select.sh` (each judge question now gives up after 120 s, `--call-timeout`; default job
+limit 2 h). Tables: `python scripts/final/analyze.py tables --dataset d4j14 --reps 3` (and `d4j2new`). Every job
+now records its git commit and the model-weights revision in `job_meta.json`. Frozen settings: `docs/FROZEN_CONFIG.md`.
+
 ## Spending the GPU budget carefully
 
 - Debug locally first. Use `--smoke` (15 min max) before any larger CSC run.

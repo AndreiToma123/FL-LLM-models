@@ -17,6 +17,13 @@
 #   the run stops itself if more than half of 30+ finished attempts failed (--breaker-rate R, --breaker-min N).
 # Options: --name RUN (default run<N>-<preset>-csc)  --jobs N (default: automatic)  --time HH:MM:SS
 #          --partition P  --seed S  --dry-run (print the sbatch command only)
+#          --retries N   extra attempts after a TRANSIENT error only (server unreachable, rate limit, killed for
+#                        memory); default 1
+# Repeated runs (thesis run protocol of 2026-11-09: 3 independent runs per setting, no reruns):
+#   csc/submit.sh <preset> --n all [--classaug ...] [--dataset ...] --rep 1     (then --rep 2, --rep 3)
+#   --rep R adds "-r<R>" to the run name, uses SoapFL seed R-1 (unless --seed is given; the seed only changes
+#   which failing tests SoapFL samples when a bug has more than it reads; the model answers greedily) and sets
+#   --retries 0, so a bug that fails is a miss and is never tried again (--retry-failed is refused with --rep).
 #
 # Billing: 200 GPU billing units per GPU-hour of the job's ELAPSED time (not of --time). Re-submitting the
 # same command resumes a run: finished bugs are skipped.
@@ -25,10 +32,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 cd "$FL_REPO"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-[ $# -ge 1 ] || { sed -n 2,12p "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n 2,30p "$0"; exit 2; }
 PRESET="$1"; shift
 N=100; SELECT=""; NAME=""; JOBS="auto"; TIME=""; PARTITION=""; SEED=0; SMOKE=0; DRY=0
-SAFETY=""; PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14; CA_K=3; CA_MODE=always
+SAFETY=""; REP=0; RETRIES=""; SEED_SET=0; PIPELINE=soapfl; HD_H=5; HD_C=5; HD_M=0; SUBSET_OF=0; DATASET=d4j14; CA_K=3; CA_MODE=always
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1 ;;
@@ -38,7 +45,9 @@ while [ $# -gt 0 ]; do
     --jobs) JOBS="$2"; shift ;;
     --time) TIME="$2"; shift ;;
     --partition) PARTITION="$2"; shift ;;
-    --seed) SEED="$2"; shift ;;
+    --seed) SEED="$2"; SEED_SET=1; shift ;;
+    --rep) REP="$2"; shift ;;
+    --retries) RETRIES="$2"; shift ;;
     --dry-run) DRY=1 ;;
     --hypodeduce) PIPELINE=hypodeduce ;;
     --hd-h) HD_H="$2"; shift ;;
@@ -97,6 +106,13 @@ if [ "$DATASET" != d4j14 ]; then
   PIPELINE_ARGS="$PIPELINE_ARGS --dataset $DATASET"
   SUFFIX="${SUFFIX}-$DATASET"
 fi
+if [ "$REP" != 0 ]; then
+  [[ "$REP" =~ ^[1-9]$ ]] || die "--rep takes 1-9"
+  [[ "$SAFETY" == *--retry-failed* ]] && die "--rep (run protocol: no reruns) cannot be combined with --retry-failed"
+  [ "$SEED_SET" = 1 ] || SEED=$(( REP - 1 ))
+  RETRIES="${RETRIES:-0}"
+fi
+[ -n "$RETRIES" ] && SAFETY="$SAFETY --retries $RETRIES"
 PIPELINE_ARGS="$PIPELINE_ARGS$SAFETY"
 SIZE="$N"
 if [ "$SUBSET_OF" != 0 ] && [ "$SUBSET_OF" -gt "$N" ]; then
@@ -114,7 +130,7 @@ else
   if [ -n "$SELECT" ]; then
     NAME="${NAME:-sel-$PRESET$SUFFIX-csc}"
   else
-    NAME="${NAME:-run$SIZE-$PRESET$SUFFIX-csc}"
+    NAME="${NAME:-run$SIZE-$PRESET$SUFFIX-csc$( [ "$REP" != 0 ] && echo "-r$REP" || true )}"
   fi
   PARTITION="${PARTITION:-gpumedium}"
   # generous limit: billing counts elapsed time only; the job stops itself when the bugs are done
@@ -136,6 +152,7 @@ CMD=(sbatch --account="$CSC_PROJECT" --partition="$PARTITION" --time="$TIME" --g
      --job-name="fl-$NAME" --output="$FL_ROOT/logs/%x-%j.out"
      --export=ALL,FL_JOB_ENV="$JOB_ENV" "$FL_REPO/csc/run_job.sbatch")
 echo "run $NAME: preset $PRESET ($HF_REPO), $( [ -n "$SELECT" ] && echo "bugs $SELECT" || echo "$N bugs" ), partition $PARTITION, limit $TIME"
+echo "  seed $SEED; runner options:${PIPELINE_ARGS:- (defaults)} (per-bug limit 3600 s, tail guard and circuit breaker on unless set to 0 above)"
 if [ "$DRY" = 1 ]; then printf '%q ' "${CMD[@]}"; echo; exit 0; fi
 "${CMD[@]}"
 echo "follow it with:  squeue --me    and    tail -f $FL_ROOT/logs/fl-$NAME-<jobid>.out"

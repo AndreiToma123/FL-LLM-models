@@ -173,6 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cache", default=os.path.join(DEFAULT_RESULTS, "judge_cache.jsonl"),
                    help="judge answer cache (re-runs never repeat a call)")
     p.add_argument("--jobs", type=int, default=1, help="bugs judged in parallel (1 for Ollama; more on vLLM)")
+    p.add_argument("--call-timeout", type=float, default=600.0,
+                   help="seconds one judge question may take before it is given up (2 retries; default 600). "
+                        "A judge answer is 1-2 tokens, so on vLLM 120 is plenty; csc/submit_select.sh passes 120")
     p.add_argument("--agent-steps", type=int, default=6, help="S8b: max tool calls per investigation (default 6)")
     p.add_argument("--agent-protocol", choices=["native", "json"], default="native",
                    help="S8b: native tool calls, or one JSON action per turn (for endpoints without tools)")
@@ -362,7 +365,8 @@ def main(argv=None) -> int:
                 print("no judge model: give --judge-model or a run folder with run_meta.json", file=sys.stderr)
                 return 2
             try:
-                client = JudgeClient(model, cache_path=None if (args.check_logprobs or args.check_tools) else args.cache)
+                client = JudgeClient(model, cache_path=None if (args.check_logprobs or args.check_tools) else args.cache,
+                                     timeout=args.call_timeout)
                 if args.check_tools:
                     r = probe_tools(client)
                     print(f"endpoint {client.base_url}, model {model}: native tool calls "
