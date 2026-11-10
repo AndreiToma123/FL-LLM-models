@@ -6,45 +6,45 @@ Judge = selector S8a+S2 replayed on each run's own candidate lists. Every bug co
 
 | Pipeline | run 1 | median | range |
 |---|---:|---:|---:|
-| SoapFL | 102 | 102 | 102-102 |
-| SoapFL + judge | 116 | 116 | 116-116 |
-| Class widening (always) | 107 | 107 | 107-107 |
-| Class widening (always) + judge | 130 | 130 | 130-130 |
-| Class widening (gated) | 94 | 94 | 94-94 |
-| Class widening (gated) + judge | 120 | 120 | 120-120 |
+| SoapFL | 95 | 95 | 95-95 |
+| SoapFL + judge | 119 | 119 | 119-119 |
+| Class widening (always) | 102 | 102 | 102-102 |
+| Class widening (always) + judge | 127 | 127 | 127-127 |
+| Class widening (gated) | 99 | 99 | 99-99 |
+| Class widening (gated) + judge | 122 | 122 | 122-122 |
 
 ## Top-3
 
 | Pipeline | run 1 | median | range |
 |---|---:|---:|---:|
-| SoapFL | 144 | 144 | 144-144 |
-| SoapFL + judge | 148 | 148 | 148-148 |
+| SoapFL | 143 | 143 | 143-143 |
+| SoapFL + judge | 149 | 149 | 149-149 |
 | Class widening (always) | 158 | 158 | 158-158 |
-| Class widening (always) + judge | 169 | 169 | 169-169 |
-| Class widening (gated) | 150 | 150 | 150-150 |
-| Class widening (gated) + judge | 161 | 161 | 161-161 |
+| Class widening (always) + judge | 167 | 167 | 167-167 |
+| Class widening (gated) | 149 | 149 | 149-149 |
+| Class widening (gated) + judge | 164 | 164 | 164-164 |
 
 ## Top-5
 
 | Pipeline | run 1 | median | range |
 |---|---:|---:|---:|
-| SoapFL | 152 | 152 | 152-152 |
+| SoapFL | 149 | 149 | 149-149 |
 | SoapFL + judge | 153 | 153 | 153-153 |
-| Class widening (always) | 176 | 176 | 176-176 |
-| Class widening (always) + judge | 181 | 181 | 181-181 |
-| Class widening (gated) | 160 | 160 | 160-160 |
+| Class widening (always) | 171 | 171 | 171-171 |
+| Class widening (always) + judge | 178 | 178 | 178-178 |
+| Class widening (gated) | 161 | 161 | 161-161 |
 | Class widening (gated) + judge | 167 | 167 | 167-167 |
 
 ## Bugs and cost
 
 | Pipeline | bugs | without output (per run) | front-end calls / bug (bugs with output) | tokens / bug (bugs with output) | judge calls / bug (all bugs) |
 |---|---:|---|---:|---:|---:|
-| SoapFL | 288 | 20 | 11.6 | 29,629 | - |
-| SoapFL + judge | 288 | 20 | 11.6 | 29,629 | 7.2 |
-| Class widening (always) | 288 | 14 | 31.2 | 78,592 | - |
-| Class widening (always) + judge | 288 | 14 | 31.2 | 78,592 | 17.9 |
-| Class widening (gated) | 288 | 13 | 20.1 | 50,524 | - |
-| Class widening (gated) + judge | 288 | 13 | 20.1 | 50,524 | 13.7 |
+| SoapFL | 288 | 19 | 11.7 | 29,704 | - |
+| SoapFL + judge | 288 | 19 | 11.7 | 29,704 | 8.3 |
+| Class widening (always) | 288 | 12 | 31.5 | 78,710 | - |
+| Class widening (always) + judge | 288 | 12 | 31.5 | 78,710 | 17.5 |
+| Class widening (gated) | 288 | 16 | 19.7 | 49,595 | - |
+| Class widening (gated) + judge | 288 | 16 | 19.7 | 49,595 | 12.3 |
 
 ## Paired test against plain SoapFL (Top-1, exact McNemar on the median run of each pipeline)
 
@@ -52,11 +52,11 @@ One main comparison per research question (RQ1, RQ2, RQ3; this choice of main co
 
 | Pipeline vs SoapFL | role | median run used | gained / lost | p | p (Holm) | runs with a gain |
 |---|---|---:|---:|---:|---:|---:|
-| SoapFL + judge | RQ3 | 1 | +22 / -8 | 0.0161 | - | 1 of 1 |
-| Class widening (always) | RQ1 | 1 | +20 / -15 | 0.5 | - | 1 of 1 |
-| Class widening (always) + judge | exploratory | 1 | +42 / -14 | 0.000234 | 0.000469 | 1 of 1 |
-| Class widening (gated) | RQ2 | 1 | +10 / -18 | 0.185 | - | 0 of 1 |
-| Class widening (gated) + judge | exploratory | 1 | +33 / -15 | 0.0133 | 0.0133 | 1 of 1 |
+| SoapFL + judge | RQ3 | 1 | +32 / -8 | 0.000182 | - | 1 of 1 |
+| Class widening (always) | RQ1 | 1 | +15 / -8 | 0.21 | - | 1 of 1 |
+| Class widening (always) + judge | exploratory | 1 | +46 / -14 | 4.22e-05 | 8.45e-05 | 1 of 1 |
+| Class widening (gated) | RQ2 | 1 | +19 / -15 | 0.608 | - | 1 of 1 |
+| Class widening (gated) + judge | exploratory | 1 | +42 / -15 | 0.00046 | 0.00046 | 1 of 1 |
 
 ## How many bugs change between runs (Top-1 hit or not)
 
